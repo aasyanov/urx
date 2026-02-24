@@ -1,0 +1,61 @@
+name: Bug Report
+description: Report a bug in URX
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for reporting a bug. Please fill in as much detail as possible.
+
+  - type: input
+    id: go-version
+    attributes:
+      label: Go version
+      description: Output of `go version`
+      placeholder: go1.24.0 linux/amd64
+    validations:
+      required: true
+
+  - type: input
+    id: urx-version
+    attributes:
+      label: URX version
+      description: Module version or commit hash
+      placeholder: v0.1.0 or abc1234
+    validations:
+      required: true
+
+  - type: input
+    id: package
+    attributes:
+      label: Affected package
+      description: Which package is affected?
+      placeholder: retryx, circuitx, bulkx, etc.
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: What happened? What did you expect?
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Paste the smallest Go code that reproduces the issue.
+      render: go
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs or race detector output
+      description: Paste any error messages, stack traces, or `-race` output.
+      render: text
+    validations:
+      required: false
