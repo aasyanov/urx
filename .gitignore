@@ -1,0 +1,33 @@
+# Coverage artifacts
+coverage.out
+coverage
+cov.html
+cov_*
+cover_*
+*_cov
+*_cov.txt
+coverage_*
+*_coverage
+
+# Test & benchmark results
+test_results.txt
+benchmark_results.txt
+*_report.txt
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
