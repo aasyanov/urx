@@ -122,7 +122,7 @@ See [Getting Started](docs/getting-started.md) for a step-by-step tutorial and [
 | Metric | Value |
 |--------|-------|
 | Packages | 31 |
-| Tests | 1320 |
+| Tests | 1323 |
 | Benchmarks | 207 |
 | Coverage | 91.6% – 100% per package |
 | Race detector | All tests pass with `-race` |
@@ -151,7 +151,7 @@ See [Getting Started](docs/getting-started.md) for a step-by-step tutorial and [
 | hedgex | 33 | 98.4% | 1 |
 | i18n | 74 | 97.5% | 14 |
 | logx | 14 | 94.7% | 4 |
-| lrux | 136 | 98.8% | 29 |
+| lrux | 139 | 98.8% | 29 |
 | panix | 19 | 100.0% | 7 |
 | poolx | 24 | 96.9% | 3 |
 | quotax | 33 | 95.4% | 3 |

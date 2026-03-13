@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed (lrux)
+
+- `TTL()` and `Len()` now return 0 on a closed cache, consistent with all other read methods (`Get`, `Peek`, `Has`, `Keys`, `Values`, `Range`).
+
+### Tests (lrux)
+
+- 139 tests (was 136), 98.8% coverage.
+- Added: `TestTTL_OnClosed`, `TestLen_OnClosed`.
+
 ## [1.2.0] — 2026-03-13
 
 ### Changed (envx)

@@ -138,7 +138,7 @@ defer sc.Close()
 
 ## Tests
 
-**136 tests, 98.8% statement coverage.**
+**139 tests, 98.8% statement coverage.**
 
 ```text
 go test -race -count=1 -coverprofile=coverage.out ./...
@@ -265,7 +265,7 @@ pkg/lrux/
     lrux.go       -- LRU[K,V], New(), Get(), Set(), GetOrCompute(), etc.
     sharded.go    -- ShardedLRU[K,V], NewSharded(), shard routing, batch dispatch
     types.go      -- Options, EvictionReason, Stats, node, config, cleanupTicker
-    lrux_test.go  -- 136 tests, 98.8% coverage
+    lrux_test.go  -- 139 tests, 98.8% coverage
     bench_test.go -- 29 benchmarks
     README.md
 ```
