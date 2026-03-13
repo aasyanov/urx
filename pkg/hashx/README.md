@@ -105,11 +105,11 @@ All errors are `*errx.Error` with domain `HASH`:
 
 ## Tests
 
-**54 tests, 95.9% statement coverage.**
+**57 tests, 96.0% statement coverage.**
 
 ```bash
 go test -race -count=1 -cover ./pkg/hashx
-ok  github.com/aasyanov/urx/pkg/hashx  coverage: 95.9% of statements
+ok  github.com/aasyanov/urx/pkg/hashx  coverage: 96.0% of statements
 ```
 
 Coverage includes:
@@ -126,6 +126,9 @@ Coverage includes:
 - Bcrypt malformed hash returns INVALID_HASH (not MISMATCH)
 - Scrypt DoS protection (huge N rejected)
 - Context cancellation during KDF
+- Pepper preserved regardless of option ordering (WithPepper before/after WithAlgorithm/WithTier)
+- Unsupported algorithm panics on Generate
+- WithBcryptCost with out-of-range cost panics
 - Error constructors and domain/code constants
 
 ### Benchmark analysis
@@ -150,6 +153,6 @@ All benchmarks reflect real-world KDF cost, not framework overhead.
 pkg/hashx/
     hashx.go       -- Hasher, New, Generate, Compare, NeedsRehash, applyPepper
     errors.go      -- DomainHash, Code constants, error constructors
-    hashx_test.go  -- 54 tests + 3 benchmarks, 95.9% coverage
+    hashx_test.go  -- 57 tests + 3 benchmarks, 96.0% coverage
     README.md
 ```

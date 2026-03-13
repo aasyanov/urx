@@ -15,10 +15,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `formatCycle` no longer duplicates the closing element in cyclic dependency error messages (was "A -> B -> A -> A", now "A -> B -> A").
 
+### Fixed (hashx)
+
+- `WithAlgorithm` and `WithTier` no longer silently discard a previously configured pepper. Option ordering is now irrelevant.
+- `Generate` panics on unsupported `Algorithm` value instead of silently falling back to Argon2id (fail-fast for programmer error).
+- `WithBcryptCost` panics on out-of-range cost instead of silently ignoring the value.
+
 ### Tests (lrux)
 
 - 139 tests (was 136), 98.8% coverage.
 - Added: `TestTTL_OnClosed`, `TestLen_OnClosed`.
+
+### Tests (hashx)
+
+- 57 tests (was 54), 96.0% coverage (was 95.9%).
+- Added: `TestPepper_PreservedByWithAlgorithm`, `TestPepper_PreservedByWithTier`, `TestWithBcryptCost_InvalidCost_Panics`.
 
 ## [1.2.0] — 2026-03-13
 

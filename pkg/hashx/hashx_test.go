@@ -3,6 +3,8 @@ package hashx
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -529,6 +531,52 @@ func TestPepper_IsDefensivelyCopied(t *testing.T) {
 }
 
 // ============================================================
+// Pepper preserved regardless of option order
+// ============================================================
+
+func TestPepper_PreservedByWithAlgorithm(t *testing.T) {
+	pepper := []byte("my-secret")
+	h := New(WithPepper(pepper), WithAlgorithm(Scrypt), WithTier(TierMin))
+	hash, err := h.Generate(context.Background(), "password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := h.Compare(context.Background(), hash, "password"); err != nil {
+		t.Fatal("pepper must survive WithAlgorithm applied after WithPepper")
+	}
+}
+
+func TestPepper_PreservedByWithTier(t *testing.T) {
+	pepper := []byte("my-secret")
+	h := New(WithPepper(pepper), WithTier(TierMax))
+	hash, err := h.Generate(context.Background(), "password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := h.Compare(context.Background(), hash, "password"); err != nil {
+		t.Fatal("pepper must survive WithTier applied after WithPepper")
+	}
+}
+
+// ============================================================
+// WithBcryptCost invalid cost panics
+// ============================================================
+
+func TestWithBcryptCost_InvalidCost_Panics(t *testing.T) {
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("expected panic for invalid bcrypt cost")
+		}
+		msg := fmt.Sprint(r)
+		if !strings.Contains(msg, "out of range") {
+			t.Fatalf("unexpected panic message: %s", msg)
+		}
+	}()
+	WithBcryptCost(100)
+}
+
+// ============================================================
 // Tier coverage (Scrypt/Bcrypt TierMax + TierDefault)
 // ============================================================
 
@@ -747,16 +795,20 @@ func TestCompare_ArgonBadKeyBase64(t *testing.T) {
 // Default algorithm fallback
 // ============================================================
 
-func TestGenerate_DefaultAlgorithmFallback(t *testing.T) {
+func TestGenerate_UnsupportedAlgorithm_Panics(t *testing.T) {
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("expected panic for unsupported algorithm")
+		}
+		msg := fmt.Sprint(r)
+		if !strings.Contains(msg, "unsupported algorithm") {
+			t.Fatalf("unexpected panic message: %s", msg)
+		}
+	}()
 	h := &Hasher{cfg: config{algorithm: Algorithm(99), saltLen: 16, keyLen: 32,
 		argonMemory: 32 * 1024, argonIterations: 2, argonParallelism: 2}}
-	hash, err := h.Generate(context.Background(), "password")
-	if err != nil {
-		t.Fatalf("default fallback should work: %v", err)
-	}
-	if err := h.Compare(context.Background(), hash, "password"); err != nil {
-		t.Fatalf("compare after default fallback: %v", err)
-	}
+	h.Generate(context.Background(), "password")
 }
 
 // ============================================================

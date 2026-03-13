@@ -124,7 +124,7 @@ See [Getting Started](docs/getting-started.md) for a step-by-step tutorial and [
 | Metric | Value |
 |--------|-------|
 | Packages | 31 |
-| Tests | 1323 |
+| Tests | 1326 |
 | Benchmarks | 207 |
 | Coverage | 91.6% – 100% per package |
 | Race detector | All tests pass with `-race` |
@@ -148,7 +148,7 @@ See [Getting Started](docs/getting-started.md) for a step-by-step tutorial and [
 | envx | 37 | 97.5% | 7 |
 | errx | 83 | 100.0% | 23 |
 | fallx | 33 | 96.2% | 3 |
-| hashx | 54 | 95.9% | 3 |
+| hashx | 57 | 96.0% | 3 |
 | healthx | 21 | 98.6% | 4 |
 | hedgex | 33 | 98.4% | 1 |
 | i18n | 74 | 97.5% | 14 |

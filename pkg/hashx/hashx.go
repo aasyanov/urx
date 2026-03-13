@@ -146,8 +146,9 @@ type Option func(*config)
 // WithAlgorithm selects the hashing algorithm. Default: [Argon2id].
 func WithAlgorithm(alg Algorithm) Option {
 	return func(c *config) {
-		base := tierParams(alg, TierDefault)
-		*c = base
+		pepper := c.pepper
+		*c = tierParams(alg, TierDefault)
+		c.pepper = pepper
 	}
 }
 
@@ -155,8 +156,9 @@ func WithAlgorithm(alg Algorithm) Option {
 // [WithAlgorithm]. Default: [TierDefault].
 func WithTier(tier Tier) Option {
 	return func(c *config) {
-		base := tierParams(c.algorithm, tier)
-		*c = base
+		pepper := c.pepper
+		*c = tierParams(c.algorithm, tier)
+		c.pepper = pepper
 	}
 }
 
@@ -193,13 +195,14 @@ func WithScryptParams(n, r, p int) Option {
 }
 
 // WithBcryptCost sets a custom bcrypt cost. Implies [Bcrypt].
-// Valid range: 4–31.
+// Panics if cost is outside bcrypt's valid range (4–31).
 func WithBcryptCost(cost int) Option {
+	if cost < bcrypt.MinCost || cost > bcrypt.MaxCost {
+		panic(fmt.Sprintf("hashx: bcrypt cost %d out of range [%d, %d]", cost, bcrypt.MinCost, bcrypt.MaxCost))
+	}
 	return func(c *config) {
 		c.algorithm = Bcrypt
-		if cost >= bcrypt.MinCost && cost <= bcrypt.MaxCost {
-			c.bcryptCost = cost
-		}
+		c.bcryptCost = cost
 	}
 }
 
@@ -255,7 +258,7 @@ func (h *Hasher) Generate(ctx context.Context, password string) (string, error) 
 	case Bcrypt:
 		return h.generateBcrypt(ctx, password)
 	default:
-		return h.generateArgon2(ctx, password)
+		panic(fmt.Sprintf("hashx: unsupported algorithm: %d", h.cfg.algorithm))
 	}
 }
 
