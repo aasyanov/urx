@@ -1224,10 +1224,9 @@ func TestDuplicateRun_Panics(t *testing.T) {
 			t.Fatalf("unexpected panic message: %s", msg)
 		}
 	}()
-	New(nil, "app", "test",
-		Run(func(ctx *Context) error { return nil }),
-		Run(func(ctx *Context) error { return nil }),
-	)
+	first := Run(func(ctx *Context) error { return nil })
+	second := Run(func(ctx *Context) error { return nil })
+	New(nil, "app", "test", first, second)
 }
 
 // --- Aliases ---

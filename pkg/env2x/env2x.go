@@ -163,7 +163,7 @@ func (r *Result) Err() error {
 	for _, e := range r.Errors {
 		me.Add(e)
 	}
-	return me
+	return me.Err()
 }
 
 // --- Overlay ---

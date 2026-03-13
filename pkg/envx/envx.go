@@ -2,7 +2,7 @@
 // lookup for industrial Go services.
 //
 // An [Env] reads variables through a configurable lookup function (defaults
-// to [os.Getenv]) and converts them to typed values via generic [Bind].
+// to [os.LookupEnv]) and converts them to typed values via generic [Bind].
 // All unresolved required variables are collected into a single
 // [errx.MultiError] on [Env.Validate].
 //
@@ -28,7 +28,6 @@
 //	        "APP_SECRET": "test-key",
 //	    })),
 //	)
-//
 package envx
 
 import (
@@ -45,12 +44,12 @@ import (
 
 type config struct {
 	prefix string
-	lookup func(string) string
+	lookup func(string) (string, bool)
 }
 
 func defaultConfig() config {
 	return config{
-		lookup: os.Getenv,
+		lookup: os.LookupEnv,
 	}
 }
 
@@ -68,8 +67,8 @@ func WithPrefix(prefix string) Option {
 }
 
 // WithLookup sets the function used to read environment variables.
-// Default: [os.Getenv]. Override for testing or custom sources.
-func WithLookup(fn func(string) string) Option {
+// Default: [os.LookupEnv]. Override for testing or custom sources.
+func WithLookup(fn func(string) (string, bool)) Option {
 	return func(c *config) {
 		if fn != nil {
 			c.lookup = fn
@@ -79,9 +78,10 @@ func WithLookup(fn func(string) string) Option {
 
 // MapLookup returns a lookup function backed by a static map.
 // Useful for testing without touching real environment.
-func MapLookup(m map[string]string) func(string) string {
-	return func(key string) string {
-		return m[key]
+func MapLookup(m map[string]string) func(string) (string, bool) {
+	return func(key string) (string, bool) {
+		v, ok := m[key]
+		return v, ok
 	}
 }
 
@@ -110,20 +110,13 @@ func New(opts ...Option) *Env {
 // Validate checks all required variables. Returns *errx.MultiError if any
 // are missing or invalid, nil otherwise.
 func (e *Env) Validate() error {
-	var errs []*errx.Error
+	me := errx.NewMulti()
 	for _, v := range e.vars {
 		if err := v.validate(); err != nil {
-			errs = append(errs, err)
+			me.Add(err)
 		}
 	}
-	if len(errs) == 0 {
-		return nil
-	}
-	me := errx.NewMulti()
-	for _, err := range errs {
-		me.Add(err)
-	}
-	return me
+	return me.Err()
 }
 
 // Vars returns the names of all bound variables (with prefix).
@@ -184,24 +177,22 @@ func (v *Var[T]) validate() *errx.Error {
 
 // --- Bind ---
 
-// Bind reads an environment variable and converts it to type T.
-// If the variable is not set, defaultVal is used. Supported types:
-// string, int, int64, float64, bool, time.Duration.
-func Bind[T any](env *Env, name string, defaultVal T) *Var[T] {
+func bindVar[T any](env *Env, name string, defaultVal T, required bool) *Var[T] {
 	key := env.fullKey(name)
-	raw := env.cfg.lookup(key)
+	raw, found := env.cfg.lookup(key)
 
 	v := &Var[T]{
-		key:   key,
-		value: defaultVal,
-		raw:   raw,
-		found: raw != "",
+		key:      key,
+		value:    defaultVal,
+		raw:      raw,
+		found:    found,
+		required: required,
 	}
 
 	if v.found {
-		parsed, err := parse[T](raw)
-		if err != "" {
-			v.parseErr = err
+		parsed, parseErr := parse[T](raw)
+		if parseErr != "" {
+			v.parseErr = parseErr
 		} else {
 			v.value = parsed
 		}
@@ -211,32 +202,18 @@ func Bind[T any](env *Env, name string, defaultVal T) *Var[T] {
 	return v
 }
 
+// Bind reads an environment variable and converts it to type T.
+// If the variable is not set, defaultVal is used. Supported types:
+// string, int, int64, float64, bool, time.Duration.
+func Bind[T any](env *Env, name string, defaultVal T) *Var[T] {
+	return bindVar(env, name, defaultVal, false)
+}
+
 // BindRequired reads a required environment variable. If the variable
 // is not set, [Env.Validate] will report it as missing.
 func BindRequired[T any](env *Env, name string) *Var[T] {
-	key := env.fullKey(name)
-	raw := env.cfg.lookup(key)
-
 	var zero T
-	v := &Var[T]{
-		key:      key,
-		value:    zero,
-		raw:      raw,
-		found:    raw != "",
-		required: true,
-	}
-
-	if v.found {
-		parsed, err := parse[T](raw)
-		if err != "" {
-			v.parseErr = err
-		} else {
-			v.value = parsed
-		}
-	}
-
-	env.vars = append(env.vars, v)
-	return v
+	return bindVar(env, name, zero, true)
 }
 
 // BindTo reads an environment variable and writes the value directly into

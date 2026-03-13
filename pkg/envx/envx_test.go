@@ -9,8 +9,11 @@ import (
 	"github.com/aasyanov/urx/pkg/errx"
 )
 
-func lookup(m map[string]string) func(string) string {
-	return func(key string) string { return m[key] }
+func lookup(m map[string]string) func(string) (string, bool) {
+	return func(key string) (string, bool) {
+		v, ok := m[key]
+		return v, ok
+	}
 }
 
 // --- Bind defaults ---
@@ -253,11 +256,13 @@ func TestValidate_AllOptional(t *testing.T) {
 func TestMapLookup(t *testing.T) {
 	m := map[string]string{"FOO": "bar", "NUM": "42"}
 	fn := MapLookup(m)
-	if fn("FOO") != "bar" {
-		t.Fatalf("got %q, want bar", fn("FOO"))
+	v, ok := fn("FOO")
+	if !ok || v != "bar" {
+		t.Fatalf("got (%q, %v), want (bar, true)", v, ok)
 	}
-	if fn("MISSING") != "" {
-		t.Fatal("expected empty for missing key")
+	v, ok = fn("MISSING")
+	if ok {
+		t.Fatalf("expected not found, got (%q, true)", v)
 	}
 }
 
@@ -360,6 +365,33 @@ func TestValidate_Mixed(t *testing.T) {
 	}
 	if !debug.Value() {
 		t.Fatal("debug should be true")
+	}
+}
+
+// --- Empty string is found ---
+
+func TestBind_EmptyStringIsFound(t *testing.T) {
+	env := New(WithLookup(lookup(map[string]string{"HOST": ""})))
+	v := Bind(env, "HOST", "default")
+	if !v.Found() {
+		t.Fatal("empty string should be found")
+	}
+	if v.Value() != "" {
+		t.Fatalf("got %q, want empty string", v.Value())
+	}
+}
+
+func TestBindRequired_EmptyStringIsFound(t *testing.T) {
+	env := New(WithLookup(lookup(map[string]string{"TOKEN": ""})))
+	v := BindRequired[string](env, "TOKEN")
+	if err := env.Validate(); err != nil {
+		t.Fatalf("empty string should satisfy required: %v", err)
+	}
+	if !v.Found() {
+		t.Fatal("empty string should be found")
+	}
+	if v.Value() != "" {
+		t.Fatalf("got %q, want empty string", v.Value())
 	}
 }
 

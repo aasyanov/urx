@@ -54,6 +54,7 @@ package cfgx
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -159,9 +160,12 @@ func WithWriter(fn func(path string, data []byte, perm os.FileMode) error) Optio
 // Load reads a config file at path into dst. The format is detected
 // from the file extension unless overridden with [WithFormat].
 //
-// If the file does not exist and [WithCreateIfMissing] is set, dst
-// is written to disk in the detected format. If the destination
-// implements [Validator], it is called after successful unmarshal.
+// If the file does not exist and [WithCreateIfMissing] is set, the
+// destination is validated (if it implements [Validator]) and then
+// written to disk in the detected format — saving corrected defaults.
+//
+// If the destination implements [Validator], it is called after
+// successful unmarshal (or before writing when creating a missing file).
 // Any returned validation errors are propagated as an [*errx.MultiError].
 //
 // Errors are returned as [*errx.Error] values (domain [DomainConfig]),
@@ -188,6 +192,11 @@ func Load(path string, dst any, opts ...Option) error {
 	data, readErr := cfg.reader(path)
 	if readErr != nil {
 		if os.IsNotExist(readErr) && cfg.createOK {
+			if v, ok := dst.(Validator); ok {
+				if err := errValidationFailed(path, v.Validate(cfg.autoFix)); err != nil {
+					return err
+				}
+			}
 			return save(path, dst, format, cfg.writer)
 		}
 		if os.IsNotExist(readErr) {
@@ -275,7 +284,7 @@ func unmarshal(data []byte, dst any, format Format) error {
 	case FormatTOML:
 		return toml.Unmarshal(data, dst)
 	default:
-		return nil
+		panic(fmt.Sprintf("cfgx: unmarshal called with unresolved format %d", format))
 	}
 }
 
@@ -297,6 +306,6 @@ func marshal(src any, format Format) ([]byte, error) {
 		}
 		return buf.Bytes(), nil
 	default:
-		return nil, nil
+		panic(fmt.Sprintf("cfgx: marshal called with unresolved format %d", format))
 	}
 }

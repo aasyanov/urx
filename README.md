@@ -8,54 +8,34 @@ Composable infrastructure primitives for Go — 31 packages with no framework ru
 
 ## Motivation
 
-In larger systems, concerns such as retry logic, circuit breaking,
-concurrency limiting, structured errors, and graceful shutdown are often
-implemented multiple times across services. Over time this leads to
-duplicated code, inconsistent behavior, and reduced observability.
+In larger systems, concerns such as retry logic, circuit breaking, concurrency limiting, structured errors, and graceful shutdown are often implemented multiple times across services. Over time this leads to duplicated code, inconsistent behavior, and reduced observability.
 
-URX extracts these patterns into focused, single-purpose packages with
-shared conventions:
+URX extracts these patterns into focused, single-purpose packages with shared conventions:
 
 - `context.Context` for cancellation and control flow
 - `*errx.Error` for structured, inspectable errors
 - Generic `Execute` / `Do` wrappers for type-safe execution control
 - Panic-to-error conversion via `panix`
 
-Each package addresses one concern and composes with others through plain
-Go interfaces — never through a central framework, struct tags, or code
-generation. Packages can be adopted incrementally in existing codebases.
+Each package addresses one concern and composes with others through plain Go interfaces — never through a central framework, struct tags, or code generation. Packages can be adopted incrementally in existing codebases.
 
 ### Design principles
 
-1. **Single responsibility** — one package, one concern. `retryx` retries.
-   `circuitx` breaks circuits. `bulkx` limits concurrency. They compose;
-   they don't merge.
+1. **Single responsibility** — one package, one concern. `retryx` retries. `circuitx` breaks circuits. `bulkx` limits concurrency. They compose; they don't merge.
 
-2. **Generic-first API** — all execution wrappers (`Execute`, `Do`) are
-   package-level generic functions returning `(T, error)`. Type safety
-   without reflection.
+2. **Generic-first API** — all execution wrappers (`Execute`, `Do`) are package-level generic functions returning `(T, error)`. Type safety without reflection.
 
-3. **Structured errors** — all public APIs return `*errx.Error` with Domain,
-   Code, and metadata. No `fmt.Errorf`, no string matching.
+3. **Structured errors** — all public APIs return `*errx.Error` with Domain, Code, and metadata. No `fmt.Errorf`, no string matching.
 
-4. **Panic safety** — every `Execute`/`Do` path is wrapped with `panix.Safe`.
-   Panics are converted into structured errors instead of propagating to the caller.
+4. **Panic safety** — every `Execute`/`Do` path is wrapped with `panix.Safe`. Panics are converted into structured errors instead of propagating to the caller.
 
-5. **Allocation-conscious hot paths** — admission checks, rate limiting,
-   and circuit state reads avoid heap allocations.
+5. **Allocation-conscious hot paths** — admission checks, rate limiting, and circuit state reads avoid heap allocations.
 
-6. **Execution controllers** — callbacks in `retryx`, `circuitx`, `bulkx`,
-   `shedx`, `adaptx`, `hedgex`, and `cronx` receive a controller interface
-   that exposes execution context (attempt number, load, limit) and lets
-   the function influence wrapper behavior (abort retry, skip failure,
-   reschedule) from the inside.
+6. **Execution controllers** — callbacks in `retryx`, `circuitx`, `bulkx`, `shedx`, `adaptx`, `hedgex`, and `cronx` receive a controller interface that exposes execution context (attempt number, load, limit) and lets the function influence wrapper behavior (abort retry, skip failure, reschedule) from the inside.
 
-7. **Testable by design** — injectable lookup functions, injectable readers,
-   `testx` failure simulators. No `os.Setenv` in tests, no global state.
+7. **Testable by design** — injectable lookup functions, injectable readers, `testx` failure simulators. No `os.Setenv` in tests, no global state.
 
-8. **Minimal dependencies** — the entire toolkit depends on 4 external
-   modules: `sync`, `yaml`, `toml`, `crypto`. All other dependencies are
-   from the Go standard library.
+8. **Minimal dependencies** — the entire toolkit depends on 4 external modules: `sync`, `yaml`, `toml`, `crypto`. All other dependencies are from the Go standard library.
 
 ## Quick start
 
@@ -82,8 +62,7 @@ resp, err := bulkx.Execute(bh, ctx, func(ctx context.Context, bc bulkx.BulkContr
 })
 ```
 
-See [Getting Started](docs/getting-started.md) for a step-by-step
-tutorial and [examples/](examples/) for runnable programs.
+See [Getting Started](docs/getting-started.md) for a step-by-step tutorial and [examples/](examples/) for runnable programs.
 
 ## Packages
 
@@ -126,7 +105,7 @@ tutorial and [examples/](examples/) for runnable programs.
 | [**cfgx**](pkg/cfgx/) | File → struct loader (YAML, JSON, TOML) |
 | [**envx**](pkg/envx/) | Typed environment variable binding (generics, no reflection) |
 | [**env2x**](pkg/env2x/) | Reflection-based env overlay for large structs |
-| [**clix**](pkg/clix/) | CLI flag parser with subcommands |
+| [**clix**](pkg/clix/) | CLI flag parser with subcommands, aliases, and version handling |
 | [**validx**](pkg/validx/) | Functional validators and fixers |
 
 ### Data
@@ -143,9 +122,9 @@ tutorial and [examples/](examples/) for runnable programs.
 | Metric | Value |
 |--------|-------|
 | Packages | 31 |
-| Tests | 1296 |
-| Benchmarks | 213 |
-| Coverage | 90.7% – 100% per package |
+| Tests | 1320 |
+| Benchmarks | 207 |
+| Coverage | 91.6% – 100% per package |
 | Race detector | All tests pass with `-race` |
 | Go version | 1.24 |
 | External deps | 4 (`sync`, `yaml`, `toml`, `crypto`) |
@@ -154,24 +133,24 @@ tutorial and [examples/](examples/) for runnable programs.
 
 | Package | Tests | Coverage | Benchmarks |
 |---------|------:|:--------:|-----------:|
-| adaptx | 56 | 92.8% | 2 |
+| adaptx | 56 | 91.6% | 2 |
 | bulkx | 37 | 98.3% | 4 |
 | busx | 39 | 94.6% | 9 |
-| cfgx | 24 | 90.7% | 6 |
+| cfgx | 33 | 93.7% | 6 |
 | circuitx | 33 | 94.4% | 4 |
-| clix | 64 | 95.0% | 4 |
-| cronx | 29 | 98.1% | 3 |
-| ctxx | 19 | 100.0% | 10 |
+| clix | 83 | 96.0% | 4 |
+| cronx | 29 | 97.5% | 3 |
+| ctxx | 19 | 99.1% | 10 |
 | dicx | 67 | 94.1% | 10 |
-| env2x | 34 | 94.8% | — |
-| envx | 33 | 96.7% | 7 |
+| env2x | 34 | 94.7% | — |
+| envx | 37 | 97.5% | 7 |
 | errx | 83 | 100.0% | 23 |
-| fallx | 33 | 93.6% | 3 |
+| fallx | 33 | 96.2% | 3 |
 | hashx | 54 | 95.9% | 3 |
 | healthx | 21 | 98.6% | 4 |
 | hedgex | 33 | 98.4% | 1 |
 | i18n | 74 | 97.5% | 14 |
-| logx | 14 | 100.0% | 4 |
+| logx | 14 | 94.7% | 4 |
 | lrux | 136 | 98.8% | 29 |
 | panix | 19 | 100.0% | 7 |
 | poolx | 24 | 96.9% | 3 |
@@ -179,7 +158,7 @@ tutorial and [examples/](examples/) for runnable programs.
 | ratex | 28 | 94.6% | 5 |
 | retryx | 40 | 100.0% | 13 |
 | shedx | 34 | 98.3% | 3 |
-| signalx | 11 | 97.3% | 4 |
+| signalx | 11 | 94.6% | 4 |
 | syncx | 18 | 100.0% | 3 |
 | testx | 28 | 98.6% | 5 |
 | toutx | 16 | 100.0% | 3 |
@@ -188,9 +167,7 @@ tutorial and [examples/](examples/) for runnable programs.
 
 ## Controller pattern
 
-Seven packages pass an **execution controller** into the callback — an
-interface that exposes execution state and, where applicable, lets the
-function influence the wrapper's behavior.
+Seven packages pass an **execution controller** into the callback — an interface that exposes execution state and, where applicable, lets the function influence the wrapper's behavior.
 
 ```text
 Execute/Do  ──creates──▶  private struct
@@ -203,9 +180,7 @@ Execute/Do  ──creates──▶  private struct
                           write methods ◀─────────────────────┘
 ```
 
-Read methods return execution state (attempt number, failure count,
-current limit). Write methods change wrapper behavior (abort retry,
-skip failure recording, exclude sample).
+Read methods return execution state (attempt number, failure count, current limit). Write methods change wrapper behavior (abort retry, skip failure recording, exclude sample).
 
 | Controller | Package | Read | Write |
 |------------|---------|------|-------|
@@ -217,13 +192,11 @@ skip failure recording, exclude sample).
 | `HedgeController` | hedgex | `Attempt()`, `IsHedge()` | — |
 | `JobController` | cronx | `RunNumber()`, `LastRunTime()` | `Abort()`, `Reschedule()`, `SkipError()` |
 
-The wrapper passes a private implementation as a public interface.
-The callback only sees the interface surface — no access to internal state.
+The wrapper passes a private implementation as a public interface. The callback only sees the interface surface — no access to internal state.
 
 ## Error model
 
-All packages return `*errx.Error`, providing consistent error
-inspection and propagation:
+All packages return `*errx.Error`, providing consistent error inspection and propagation:
 
 ```go
 type Error struct {
@@ -237,13 +210,11 @@ type Error struct {
 }
 ```
 
-Errors are inspectable via `errors.As`, serializable to JSON, and integrate
-with `slog` via the `LogValue()` method.
+Errors are inspectable via `errors.As`, serializable to JSON, and integrate with `slog` via the `LogValue()` method.
 
 ## Roadmap
 
-Packages under development, following URX conventions (generic API,
-`errx.Error`, `context.Context`, minimal dependencies):
+Packages under development, following URX conventions (generic API, `errx.Error`, `context.Context`, minimal dependencies):
 
 | Package | Description | Status |
 |---------|-------------|--------|

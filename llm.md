@@ -7,7 +7,7 @@
 
 1. ALL execution wrappers are **package-level generic functions**, not methods:
    `retryx.Do[T](...)`, `bulkx.Execute[T](...)`, NOT `r.Do(...)`, `b.Execute(...)`
-2. ALL errors are `*errx.Error` with Domain/Code — never use `fmt.Errorf`
+2. ALL public API errors are `*errx.Error` with Domain/Code — prefer `errx.New`/`errx.Wrap` over `fmt.Errorf`
 3. ALL `Execute`/`Do` callbacks are wrapped with `panix.Safe` — panics become `*errx.Error`
 4. Seven packages pass **controllers** to callbacks — always include them in fn signature
 5. Return type is always `(T, error)` — never just `error`
@@ -510,14 +510,33 @@ import "github.com/aasyanov/urx/pkg/envx"
 
 env := envx.New(envx.WithPrefix("APP"))
 
-port   := envx.Bind(env, "PORT", 8080)          // optional with default
+port   := envx.Bind(env, "PORT", 8080)             // optional with default
 host   := envx.Bind(env, "HOST", "localhost")
-secret := envx.BindRequired[string](env, "SECRET") // required
-envx.BindTo(env, "DEBUG", &cfg.Debug)            // write into existing pointer
+secret := envx.BindRequired[string](env, "SECRET")  // required
+envx.BindTo(env, "DEBUG", &cfg.Debug)               // write into existing pointer
 
 if err := env.Validate(); err != nil { log.Fatal(err) }
 
-fmt.Println(port.Value()) // 8080 or from APP_PORT
+fmt.Println(port.Value())   // 8080 or from APP_PORT
+fmt.Println(secret.Found()) // true — variable was set (even if empty string)
+
+// Key API:
+// New(opts...) *Env                         — create env reader
+// Bind[T](env, name, default) *Var[T]       — optional with fallback
+// BindRequired[T](env, name) *Var[T]        — required (Validate reports missing)
+// BindTo[T](env, name, &target) *Var[T]     — write into pointer, panics on nil
+// env.Validate() error                      — check all bindings (*errx.MultiError)
+// env.Vars() []string                       — list bound variable names
+// var.Value() T                             — resolved value
+// var.Ptr() *T                              — pointer (for CLI flag binding)
+// var.Found() bool                          — true if variable was set in env
+// var.Key() string                          — full name with prefix
+
+// Options:
+// WithPrefix(p)    — prepend P_ to all names
+// WithLookup(fn)   — custom func(string)(string,bool), default os.LookupEnv
+// MapLookup(m)     — helper: map[string]string -> lookup function
+
 // Supported types: string, int, int64, float64, bool, time.Duration
 // Errors: ENV.MISSING, ENV.INVALID
 ```
@@ -831,7 +850,7 @@ func main() {
 
 1. **Method-style call** — WRONG: `bh.Execute(ctx, fn)` → RIGHT: `bulkx.Execute(bh, ctx, fn)`
 2. **Missing controller in fn** — WRONG: `func(ctx) (T, error)` → RIGHT: `func(ctx, bc BulkController) (T, error)`
-3. **Using fmt.Errorf** — ALWAYS use `errx.New` or `errx.Wrap` instead
+3. **Using fmt.Errorf in public APIs** — prefer `errx.New` or `errx.Wrap` for domain errors; `fmt.Errorf` is acceptable for internal wraps and sentinels
 4. **Returning just error** — ALL generic Execute/Do return `(T, error)`, not just `error`
 5. **Forgetting defer Close/Stop()** — `bulkx`, `shedx`, `adaptx`, `quotax`, `lrux`, `poolx`, `fallx`, `busx` need `Close()`; `cronx` needs `Stop(timeout)`
 6. **retryx.Do signature** — fn takes `RetryController` only (no ctx): `func(rc RetryController) (T, error)`

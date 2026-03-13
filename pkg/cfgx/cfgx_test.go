@@ -491,6 +491,123 @@ func TestError_Domain(t *testing.T) {
 	}
 }
 
+// --- Save: non-pointer src ---
+
+func TestSave_NonPointerSrc(t *testing.T) {
+	cfg := testCfg{Host: "val", Port: 3000}
+	var out []byte
+	err := Save("config.yaml", cfg, WithWriter(captureWriter(&out)))
+	if err != nil {
+		t.Fatalf("Save with non-pointer src should work: %v", err)
+	}
+	if len(out) == 0 {
+		t.Fatal("expected non-empty output")
+	}
+}
+
+// --- Save: nil pointer ---
+
+func TestSave_NilPointerSrc(t *testing.T) {
+	var p *testCfg
+	err := Save("config.yaml", p)
+	if err == nil {
+		t.Fatal("expected error for nil pointer src")
+	}
+	var xe *errx.Error
+	if !errors.As(err, &xe) {
+		t.Fatalf("expected *errx.Error, got %T", err)
+	}
+	if xe.Code != CodeInvalidInput {
+		t.Fatalf("code = %q, want %q", xe.Code, CodeInvalidInput)
+	}
+}
+
+// --- Save: unsupported format ---
+
+func TestSave_UnsupportedFormat(t *testing.T) {
+	err := Save("config.ini", &testCfg{Host: "x"})
+	if err == nil {
+		t.Fatal("expected error for unsupported format")
+	}
+	var xe *errx.Error
+	if !errors.As(err, &xe) {
+		t.Fatalf("expected *errx.Error, got %T", err)
+	}
+	if xe.Code != CodeUnsupportedFormat {
+		t.Fatalf("code = %q, want %q", xe.Code, CodeUnsupportedFormat)
+	}
+}
+
+// --- CreateIfMissing + write failure ---
+
+func TestLoad_CreateIfMissing_WriteFailed(t *testing.T) {
+	err := Load("config.yaml", &testCfg{Host: "x"},
+		WithReader(notFoundReader()),
+		WithWriter(failWriter("read-only fs")),
+		WithCreateIfMissing(),
+	)
+	if err == nil {
+		t.Fatal("expected write error")
+	}
+	var xe *errx.Error
+	if !errors.As(err, &xe) {
+		t.Fatalf("expected *errx.Error, got %T", err)
+	}
+	if xe.Code != CodeWriteFailed {
+		t.Fatalf("code = %q, want %q", xe.Code, CodeWriteFailed)
+	}
+}
+
+// --- CreateIfMissing + Validator ---
+
+func TestLoad_CreateIfMissing_ValidatorAutoFix(t *testing.T) {
+	cfg := validatingCfg{Port: -1, Host: ""}
+	var written []byte
+	err := Load("config.yaml", &cfg,
+		WithReader(notFoundReader()),
+		WithWriter(captureWriter(&written)),
+		WithCreateIfMissing(),
+		WithAutoFix(),
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Port != 8080 {
+		t.Fatalf("port should be fixed to 8080, got %d", cfg.Port)
+	}
+	if cfg.Host != "0.0.0.0" {
+		t.Fatalf("host should be fixed to 0.0.0.0, got %q", cfg.Host)
+	}
+	if len(written) == 0 {
+		t.Fatal("expected file to be written")
+	}
+
+	var reloaded validatingCfg
+	err = Load("config.yaml", &reloaded, WithReader(memReader(written)))
+	if err != nil {
+		t.Fatalf("reload error: %v", err)
+	}
+	if reloaded.Port != 8080 || reloaded.Host != "0.0.0.0" {
+		t.Fatalf("written file should contain fixed values: %+v", reloaded)
+	}
+}
+
+func TestLoad_CreateIfMissing_ValidatorNoFix(t *testing.T) {
+	cfg := validatingCfg{Port: -1, Host: ""}
+	err := Load("config.yaml", &cfg,
+		WithReader(notFoundReader()),
+		WithWriter(captureWriter(new([]byte))),
+		WithCreateIfMissing(),
+	)
+	if err == nil {
+		t.Fatal("expected validation error without autofix")
+	}
+	var me *errx.MultiError
+	if !errors.As(err, &me) {
+		t.Fatalf("expected *errx.MultiError, got %T: %v", err, err)
+	}
+}
+
 // --- Default values preserved when file missing with create ---
 
 func TestLoad_CreatePreservesDefaults(t *testing.T) {

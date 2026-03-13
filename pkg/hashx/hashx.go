@@ -281,7 +281,7 @@ func (h *Hasher) Compare(ctx context.Context, hash, password string) error {
 		if parts := strings.Split(hash, ":"); len(parts) == 5 {
 			return h.compareScrypt(ctx, hash, password)
 		}
-		return errInvalidHash(fmt.Errorf("unrecognized hash prefix")) //nolint:forbidigo // internal wrap
+		return errInvalidHash(fmt.Errorf("unrecognized hash prefix"))
 	}
 }
 
@@ -388,7 +388,7 @@ func (h *Hasher) generateArgon2(ctx context.Context, password string) (string, e
 func (h *Hasher) compareArgon2(ctx context.Context, hash, password string) error {
 	parts := strings.Split(hash, "$")
 	if len(parts) != 6 {
-		return errInvalidHash(fmt.Errorf("expected 6 parts, got %d", len(parts))) //nolint:forbidigo // internal wrap
+		return errInvalidHash(fmt.Errorf("expected 6 parts, got %d", len(parts)))
 	}
 
 	var memory, iterations uint32
@@ -460,7 +460,7 @@ func (h *Hasher) generateScrypt(ctx context.Context, password string) (string, e
 func (h *Hasher) compareScrypt(ctx context.Context, hash, password string) error {
 	parts := strings.Split(hash, ":")
 	if len(parts) != 5 {
-		return errInvalidHash(fmt.Errorf("expected 5 parts, got %d", len(parts))) //nolint:forbidigo // internal wrap
+		return errInvalidHash(fmt.Errorf("expected 5 parts, got %d", len(parts)))
 	}
 
 	var n, r, p int
@@ -479,7 +479,7 @@ func (h *Hasher) compareScrypt(ctx context.Context, hash, password string) error
 
 	const maxScryptN = 1 << 20 // 1 MiB limit on N to prevent DoS via crafted hashes
 	if n < 2 || n > maxScryptN || r < 1 || r > 128 || p < 1 || p > 128 {
-		return errInvalidHash(fmt.Errorf("scrypt params out of safe range: n=%d r=%d p=%d", n, r, p)) //nolint:forbidigo // internal wrap
+		return errInvalidHash(fmt.Errorf("scrypt params out of safe range: n=%d r=%d p=%d", n, r, p))
 	}
 
 	salt, err := base64.RawStdEncoding.DecodeString(parts[3])

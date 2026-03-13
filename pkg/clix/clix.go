@@ -857,7 +857,7 @@ func parseValue[T any](s string) (T, error) {
 	case time.Time:
 		val, err = time.Parse(time.RFC3339, s)
 	default:
-		return zero, fmt.Errorf("unsupported flag type %T", zero) //nolint:forbidigo // internal wrap
+		return zero, fmt.Errorf("unsupported flag type %T", zero)
 	}
 
 	if err != nil {

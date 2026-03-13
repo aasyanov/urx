@@ -4,10 +4,7 @@ Typed environment variable binding with injectable lookup for industrial Go serv
 
 ## Philosophy
 
-`envx` follows the **urx** principle: no reflection, no struct tags, no magic.
-Variables are bound explicitly with compile-time type safety via generics.
-The lookup function is injectable (`WithLookup`) so tests never touch the real
-environment — the same pattern used across the ecosystem.
+`envx` follows the **urx** principle: no reflection, no struct tags, no magic. Variables are bound explicitly with compile-time type safety via generics. The lookup function is injectable (`WithLookup`) so tests never touch the real environment — the same pattern used across the ecosystem.
 
 ## Quick Start
 
@@ -61,7 +58,7 @@ No `os.Setenv`, no cleanup, no race conditions in parallel tests.
 | Option | Default | Description |
 |---|---|---|
 | `WithPrefix(p)` | none | Prepend `P_` to all variable names |
-| `WithLookup(fn)` | `os.Getenv` | Custom lookup function |
+| `WithLookup(fn)` | `os.LookupEnv` | Custom lookup `func(string) (string, bool)` |
 | `MapLookup(m)` | — | Helper: lookup from `map[string]string` |
 
 ## Supported Types
@@ -81,29 +78,18 @@ Multiple errors are collected into `*errx.MultiError` by `Validate()`.
 
 ## Thread safety
 
-`Env` is designed for **initialization phase** — bind all variables at startup,
-call `Validate()`, then read `Var.Value()` concurrently. No locking needed
-because values are immutable after `Validate()`.
+`Env` is designed for **initialization phase** — bind all variables at startup, call `Validate()`, then read `Var.Value()` concurrently. No locking needed because values are immutable after `Validate()`.
 
 ## Tests
 
-**34 tests, 96.7% statement coverage.**
+**37 tests, 97.5% statement coverage.**
 
 ```bash
 go test -race -count=1 -coverprofile=coverage.out ./...
-ok  github.com/aasyanov/urx/pkg/envx  coverage: 96.7% of statements
+ok  github.com/aasyanov/urx/pkg/envx  coverage: 97.5% of statements
 ```
 
-Coverage includes:
-- Bind: all supported types (string, int, int64, float64, bool, duration)
-- BindTo: pointer writing for all types
-- BindRequired: missing variable error
-- Validate: collects multiple errors into MultiError
-- Prefix: correct prepending
-- MapLookup: static map injection
-- WithLookup: custom lookup function
-- Var accessors: Value(), Ptr(), Found(), Key()
-- Error constructors and domain/code constants
+Coverage includes: Bind for all supported types (string, int, int64, float64, bool, duration), BindTo (pointer writing for all types), BindRequired (missing variable error), Validate (collects multiple errors into MultiError), prefix (correct prepending), MapLookup (static map with found/not-found semantics), WithLookup (custom lookup function), empty-string vs unset distinction, Var accessors (Value(), Ptr(), Found(), Key()), error constructors and domain/code constants.
 
 ## Benchmarks
 
@@ -119,9 +105,7 @@ BenchmarkVars                    ~8 ns/op      0 B/op    0 allocs/op
 
 ### Analysis
 
-**Bind** is a one-time startup cost (~190 ns per variable). **Value()** is ~3 ns — a
-simple field read, free on the hot path. **Validate** with all present ~55 ns, 0
-allocs. The only allocation path is error construction on missing/invalid vars.
+**Bind** is a one-time startup cost (~190 ns per variable). **Value()** is ~3 ns — a simple field read, free on the hot path. **Validate** with all present ~55 ns, 0 allocs. The only allocation path is error construction on missing/invalid vars.
 
 ## File structure
 
@@ -129,7 +113,7 @@ allocs. The only allocation path is error construction on missing/invalid vars.
 pkg/envx/
     envx.go        -- Env, Var[T], New(), Bind(), BindTo(), BindRequired(), Validate()
     errors.go      -- DomainEnv, Code constants, error constructors
-    envx_test.go   -- 34 tests, 96.7% coverage
+    envx_test.go   -- 37 tests, 97.5% coverage
     bench_test.go  -- 7 benchmarks
     README.md
 ```

@@ -61,7 +61,7 @@ const (
 //	    fmt.Println(p.Help())
 //	    os.Exit(0)
 //	}
-var ErrHelp = errors.New("clix: help requested") //nolint:forbidigo // sentinel error
+var ErrHelp = errors.New("clix: help requested")
 
 // ErrVersion is the sentinel returned by [Parser.Err] when --version or -V
 // is encountered and [Version] was set. Callers should test with [errors.Is]
@@ -71,7 +71,7 @@ var ErrHelp = errors.New("clix: help requested") //nolint:forbidigo // sentinel 
 //	    fmt.Println(p.Version())
 //	    os.Exit(0)
 //	}
-var ErrVersion = errors.New("clix: version requested") //nolint:forbidigo // sentinel error
+var ErrVersion = errors.New("clix: version requested")
 
 // --- Error constructors ---
 

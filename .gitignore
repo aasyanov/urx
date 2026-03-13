@@ -1,18 +1,16 @@
-# Coverage artifacts
-coverage.out
-coverage
-cov.html
-cov_*
-cover_*
-*_cov
-*_cov.txt
-coverage_*
-*_coverage
+# Binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
 
-# Test & benchmark results
-test_results.txt
-benchmark_results.txt
-*_report.txt
+# Test artifacts
+*.test
+cover.out
+coverage.txt
+benchmark.txt
+results.txt
 
 # IDE
 .idea/
@@ -25,9 +23,8 @@ benchmark_results.txt
 .DS_Store
 Thumbs.db
 
-# Binaries
-*.exe
-*.exe~
-*.dll
-*.so
-*.dylib
+# Go workspace
+vendor/
+
+# Build
+dist/

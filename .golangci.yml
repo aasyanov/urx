@@ -18,7 +18,6 @@ linters:
     - misspell
     - unconvert
     - unparam
-    - forbidigo
     - goconst
   settings:
     govet:
@@ -36,12 +35,6 @@ linters:
         - name: exported
           arguments:
             - "checkPrivateReceivers"
-    forbidigo:
-      forbid:
-        - pattern: '^fmt\.Errorf$'
-          msg: "use errx.New / errx.Wrap instead of fmt.Errorf"
-        - pattern: '^errors\.New$'
-          msg: "use errx.New instead of errors.New"
     goconst:
       min-len: 3
       min-occurrences: 3
@@ -53,19 +46,8 @@ linters:
     rules:
       - linters:
           - errcheck
-        path: '_test\.go$'
-      - linters:
-          - errcheck
           - unparam
         path: '_test\.go$'
-      - linters:
-          - forbidigo
-        path: '_test\.go$'
-      - linters:
-          - forbidigo
-          - errcheck
-          - unparam
-        path: 'examples/'
       - linters:
           - goconst
         path: '_test\.go$'

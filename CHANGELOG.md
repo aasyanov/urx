@@ -7,6 +7,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0] — 2026-03-13
+
+### Changed (envx)
+
+- **Breaking:** `WithLookup` signature changed from `func(string) string` to `func(string) (string, bool)`. Default is now `os.LookupEnv` instead of `os.Getenv`. This correctly distinguishes "variable not set" from "variable set to empty string".
+- **Breaking:** `MapLookup` returns `(string, bool)` — missing keys return `("", false)`.
+- Internal: `Bind` and `BindRequired` deduplicated into shared `bindVar` helper.
+- `Validate` uses `errx.NewMulti()` directly instead of intermediate slice.
+
+### Fixed (envx)
+
+- `Bind`/`BindRequired` now correctly report `Found() == true` for variables set to empty string. Previously, empty string was indistinguishable from unset.
+- `ExampleBind` now uses `WithPrefix("APP")` consistently with the key map.
+
+### Tests (envx)
+
+- 37 tests (was 35), 97.5% coverage (was 96.7%).
+- Added: `TestBind_EmptyStringIsFound`, `TestBindRequired_EmptyStringIsFound`.
+
+### Fixed (env2x)
+
+- `Result.Err()` now returns `me.Err()` instead of raw `*errx.MultiError`, consistent with `envx.Validate()`.
+
+### Fixed (cfgx)
+
+- `CreateIfMissing` now calls `Validator` before writing defaults to disk. With `WithAutoFix()`, defaults are corrected first, then saved. Previously, invalid defaults were written as-is.
+- `unmarshal`/`marshal` default branches now panic instead of silently returning nil. These branches are unreachable by design (`resolveFormat` guards against `FormatAuto`), but the panic ensures any future format addition that misses the switch is caught immediately.
+
+### Added (cfgx)
+
+- Tests for: `Save` with non-pointer src, `Save` with nil pointer, `Save` with unsupported format, `CreateIfMissing` + write failure, `CreateIfMissing` + Validator (autofix and no-fix paths).
+
+### Tests (cfgx)
+
+- 33 tests (was 27), 93.7% coverage (was 91.3%).
+
+### Changed (infra)
+
+- CI updated to match slabix: `checkout@v5`, `setup-go@v6`, `golangci-lint-action@v9`, `upload-artifact@v6`. Added `concurrency` (cancel-in-progress), `timeout=120s`. Removed strategy matrix and `Build examples` step.
+- `.golangci.yml` aligned with slabix: removed `forbidigo` linter. Cleaned up duplicate exclusion rules.
+- `.gitignore` simplified to match slabix style.
+
+### Removed (infra)
+
+- `dependabot.yml`, issue templates (`bug_report.yml`, `feature_request.yml`, `config.yml`), PR template — unnecessary for a personal project.
+- All stale `//nolint:forbidigo` comments across `clix`, `errx`, `hashx`.
+
 ## [1.1.0] — 2026-03-13
 
 ### Changed (clix)

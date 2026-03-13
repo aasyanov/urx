@@ -1,15 +1,10 @@
 # validx
 
-Composable, pure-function field validators and auto-fixers returning structured
-`*errx.Error` values.
+Composable, pure-function field validators and auto-fixers returning structured `*errx.Error` values.
 
 ## Philosophy
 
-**One job: validate fields.** `validx` provides pure functions that accept a
-field name and value, returning `nil` on success or a structured `*errx.Error`
-on failure. Fix-functions (`Clamp`, `Default`, etc.) mutate the value in place
-and return an informational `CodeFixed` error. `Collect` aggregates results
-into an `*errx.MultiError`. No struct tags, no reflection, no side effects.
+**One job: validate fields.** `validx` provides pure functions that accept a field name and value, returning `nil` on success or a structured `*errx.Error` on failure. Fix-functions (`Clamp`, `Default`, etc.) mutate the value in place and return an informational `CodeFixed` error. `Collect` aggregates results into an `*errx.MultiError`. No struct tags, no reflection, no side effects.
 
 ## Quick start
 
@@ -62,22 +57,15 @@ fixed := validx.Collect(
 
 ## Behavior details
 
-- **Pure functions**: every validator is a standalone function with no shared
-  state. Compose freely by passing results to `Collect`.
+- **Pure functions**: every validator is a standalone function with no shared state. Compose freely by passing results to `Collect`.
 
-- **Structured errors**: each error includes `field` in `Meta` and a specific
-  `Code` (e.g. `TOO_SHORT`, `OUT_OF_RANGE`). The caller can inspect
-  `errx.Error.Code` to build localized messages.
+- **Structured errors**: each error includes `field` in `Meta` and a specific `Code` (e.g. `TOO_SHORT`, `OUT_OF_RANGE`). The caller can inspect `errx.Error.Code` to build localized messages.
 
-- **Auto-fixers**: `Clamp`, `Default`, etc. mutate `*T` in place. If the value
-  was changed, they return `CodeFixed` (informational, severity `Info`). If
-  unchanged, they return `nil`.
+- **Auto-fixers**: `Clamp`, `Default`, etc. mutate `*T` in place. If the value was changed, they return `CodeFixed` (informational, severity `Info`). If unchanged, they return `nil`.
 
-- **Collect**: filters out `nil` errors and wraps the rest into
-  `*errx.MultiError`. Returns `nil` if all validators pass.
+- **Collect**: filters out `nil` errors and wraps the rest into `*errx.MultiError`. Returns `nil` if all validators pass.
 
-- **Generics**: `Clamp[T]`, `Default[T]`, `DefaultOneOf[T]` use
-  `cmp.Ordered` / `comparable` constraints — no reflection.
+- **Generics**: `Clamp[T]`, `Default[T]`, `DefaultOneOf[T]` use `cmp.Ordered` / `comparable` constraints — no reflection.
 
 ## Error diagnostics
 
@@ -106,8 +94,7 @@ VALIDATION.FIXED: age was auto-fixed | meta: field=age, from=150, to=120, fixed=
 
 ## Thread safety
 
-- All functions are pure (no shared state) — safe for concurrent use
-- `Collect` is a pure aggregation function — safe for concurrent use
+All functions are pure (no shared state) — safe for concurrent use. `Collect` is a pure aggregation function — safe for concurrent use.
 
 ## Tests
 
@@ -118,25 +105,11 @@ go test -race -count=1 -coverprofile=coverage.out ./...
 ok  github.com/aasyanov/urx/pkg/validx  coverage: 100% of statements
 ```
 
-Coverage includes:
-- Required: empty, whitespace, valid
-- MinLen / MaxLen: boundary values, Unicode runes
-- Between: in range, below, above, boundary
-- Match: valid, invalid, bad pattern
-- OneOf: valid, invalid
-- Email: valid, invalid formats
-- URL: valid, invalid, relative
-- Clamp: in range, below, above (int, float64, time)
-- Default: zero, non-zero, string, time
-- DefaultOneOf: valid, invalid
-- Collect: all valid, some invalid, empty
-- Nil pointer safety: all fix functions return `CodeNilPointer` instead of panicking
-- Meta fields: field name present in every error
+Coverage includes: Required (empty, whitespace, valid), MinLen / MaxLen (boundary values, Unicode runes), Between (in range, below, above, boundary), Match (valid, invalid, bad pattern), OneOf (valid, invalid), Email (valid, invalid formats), URL (valid, invalid, relative), Clamp (in range, below, above for int, float64, time), Default (zero, non-zero, string, time), DefaultOneOf (valid, invalid), Collect (all valid, some invalid, empty), nil pointer safety (all fix functions return `CodeNilPointer` instead of panicking), meta fields (field name present in every error).
 
 ## Benchmarks
 
-Environment: `go1.24.0 windows/amd64`, Intel Core i7-10510U @ 1.80 GHz.
-Each benchmark was run 3 times (`-count=3`); the table shows median values.
+Environment: `go1.24.0 windows/amd64`, Intel Core i7-10510U @ 1.80 GHz. Each benchmark was run 3 times (`-count=3`); the table shows median values.
 
 ```text
 BenchmarkRequired_Valid          ~6 ns/op       0 B/op     0 allocs/op

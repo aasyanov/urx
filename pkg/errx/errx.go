@@ -354,7 +354,7 @@ func NewPanicError(op string, r any) *Error {
 	if err, ok := r.(error); ok {
 		cause = err
 	} else {
-		cause = fmt.Errorf("%v", r) //nolint:forbidigo // panic recovery
+		cause = fmt.Errorf("%v", r)
 	}
 	e := &Error{
 		Domain:    DomainInternal,
