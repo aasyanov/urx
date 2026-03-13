@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed (logx)
+
+- `TestFromContext_Nil` and `TestWithLogger_NilContext` now actually test nil context (were using `context.TODO()`, masking uncovered nil paths). Coverage restored to 100.0% (was 94.7%).
+
 ### Fixed (lrux)
 
 - `TTL()` and `Len()` now return 0 on a closed cache, consistent with all other read methods (`Get`, `Peek`, `Has`, `Keys`, `Values`, `Range`).

@@ -22,7 +22,7 @@ func TestFromContext_Default(t *testing.T) {
 }
 
 func TestFromContext_Nil(t *testing.T) {
-	l := FromContext(context.TODO())
+	l := FromContext(nil)
 	if l == nil {
 		t.Fatal("expected non-nil logger")
 	}
@@ -39,7 +39,7 @@ func TestWithLogger_RoundTrip(t *testing.T) {
 
 func TestWithLogger_NilContext(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
-	ctx := WithLogger(context.TODO(), logger)
+	ctx := WithLogger(nil, logger)
 	got := FromContext(ctx)
 	if got != logger {
 		t.Fatal("expected same logger after nil ctx normalization")

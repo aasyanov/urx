@@ -4,11 +4,7 @@ Structured logging bridge between `log/slog`, `ctxx` trace propagation, and `err
 
 ## Philosophy
 
-**One job: enrich slog records.** `logx` provides a `slog.Handler` wrapper that
-automatically injects `trace_id` and `span_id` from `ctxx` context values into
-every log record. `Err()` converts `*errx.Error` into a structured `slog.Attr`
-group. It does not define log levels, configure outputs, or manage rotation.
-Those are responsibilities of `slog` and the caller.
+**One job: enrich slog records.** `logx` provides a `slog.Handler` wrapper that automatically injects `trace_id` and `span_id` from `ctxx` context values into every log record. `Err()` converts `*errx.Error` into a structured `slog.Attr` group. It does not define log levels, configure outputs, or manage rotation. Those are responsibilities of `slog` and the caller.
 
 ## Quick start
 
@@ -42,24 +38,13 @@ log.InfoContext(ctx, "request processed",
 
 ## Behavior details
 
-- **Trace injection**: `Handle` extracts `trace_id` and `span_id` from the
-  context (via `ctxx.TraceFromContext`) and adds them as `slog.Attr` fields
-  to the log record. If no trace is present, the fields are omitted.
+- **Trace injection**: `Handle` extracts `trace_id` and `span_id` from the context (via `ctxx.TraceFromContext`) and adds them as `slog.Attr` fields to the log record. If no trace is present, the fields are omitted.
 
-- **errx integration**: `Err()` checks whether the error is `*errx.Error` (via
-  `errx.As`). If so, it returns a `slog.Group("error", ...)` with these fields:
-  `domain`, `code`, `message`, `severity`, and conditionally `op`, `trace_id`,
-  `span_id`, `panic`, `meta`, `cause`. Plain errors produce a simple
-  `slog.String("error", err.Error())`. Nil returns an empty attr.
+- **errx integration**: `Err()` checks whether the error is `*errx.Error` (via `errx.As`). If so, it returns a `slog.Group("error", ...)` with these fields: `domain`, `code`, `message`, `severity`, and conditionally `op`, `trace_id`, `span_id`, `panic`, `meta`, `cause`. Plain errors produce a simple `slog.String("error", err.Error())`. Nil returns an empty attr.
 
-- **Context logger**: `WithLogger` stores a `*slog.Logger` in the context.
-  `FromContext` retrieves it, falling back to `slog.Default()`. Nil context
-  also returns `slog.Default()`.
+- **Context logger**: `WithLogger` stores a `*slog.Logger` in the context. `FromContext` retrieves it, falling back to `slog.Default()`. Nil context also returns `slog.Default()`.
 
-- **Duplicate trace_id**: `Handler` injects `trace_id` from context, and `Err`
-  may include `trace_id` from `errx.Error`. These can differ when an error
-  originated in another service. `slog` outputs both, which is correct —
-  they carry different semantics (current request vs error origin).
+- **Duplicate trace_id**: `Handler` injects `trace_id` from context, and `Err` may include `trace_id` from `errx.Error`. These can differ when an error originated in another service. `slog` outputs both, which is correct — they carry different semantics (current request vs error origin).
 
 ## Thread safety
 
@@ -80,14 +65,12 @@ Coverage includes:
 - Handler: trace injection, no-trace passthrough, WithAttrs, WithGroup
 - WithLogger: nil context normalization
 - FromContext: with logger, without logger (default), nil context
-- Err: errx.Error (all fields), errx with trace_id/span_id, errx panic error,
-  errx with cause, plain error, nil error
+- Err: errx.Error (all fields), errx with trace_id/span_id, errx panic error, errx with cause, plain error, nil error
 - Enabled: level delegation
 
 ## Benchmarks
 
-Environment: `go1.24.0 windows/amd64`, Intel Core i7-10510U @ 1.80 GHz.
-Each benchmark was run 3 times (`-count=3`); the table shows median values.
+Environment: `go1.24.0 windows/amd64`, Intel Core i7-10510U @ 1.80 GHz. Each benchmark was run 3 times (`-count=3`); the table shows median values.
 
 ```text
 BenchmarkHandler_WithTrace    ~1068 ns/op       0 B/op     0 allocs/op

@@ -1,17 +1,10 @@
 # errx
 
-Structured error type with domain, code, severity, retry classification,
-metadata, slog integration, and JSON serialization.
-
-Part of the **urx** infrastructure ecosystem alongside `bulkx`, `busx`, `circuitx`, `clix`, `ctxx`, `dicx`, `healthx`, `i18n`, `logx`, `lrux`, `panix`, `poolx`, `ratex`, `retryx`, `shedx`, `signalx`, `syncx`, `toutx`, and `validx`.
+Structured error type with domain, code, severity, retry classification, metadata, slog integration, and JSON serialization.
 
 ## Philosophy
 
-**One job: structured errors.** `errx` defines a rich `Error` type that every
-package in the ecosystem uses. Each error carries `Domain`, `Code`, `Message`,
-`Severity`, `Category`, `RetryClass`, `Meta`, `Cause`, `TraceID`, `SpanID`,
-and optional stack traces. Errors are immutable after construction, implement
-`slog.LogValuer` and `json.Marshaler`, and integrate with `errors.As`.
+**One job: structured errors.** `errx` defines a rich `Error` type that every package in the ecosystem uses. Each error carries `Domain`, `Code`, `Message`, `Severity`, `Category`, `RetryClass`, `Meta`, `Cause`, `TraceID`, `SpanID`, and optional stack traces. Errors are immutable after construction, implement `slog.LogValuer` and `json.Marshaler`, and integrate with `errors.As`.
 
 ## Quick start
 
@@ -94,23 +87,12 @@ data, _ := json.Marshal(err)
 
 ## Behavior details
 
-- **Immutable after construction**: all `With*` options are applied during
-  `New`/`Wrap`. The resulting `*Error` is never mutated.
-
-- **Error chain**: `Wrap` sets `Cause` and participates in `errors.Is` /
-  `errors.As` via `Unwrap()`.
-
-- **slog integration**: `LogValue()` returns a `slog.GroupValue` with all
-  fields. `SlogLevel()` maps `Severity` to `slog.Level`.
-
-- **JSON**: `MarshalJSON()` produces a flat JSON object with all fields
-  including cause chain.
-
-- **Stack traces**: disabled by default. `EnableStackTrace(true)` captures
-  call stacks on every `New`/`Wrap`. `StackTrace()` formats the stack.
-
-- **MultiError**: aggregates multiple errors. Computes overall `Severity`,
-  `Retryable`, and `IsPanic` from contained errors.
+- **Immutable after construction**: all `With*` options are applied during `New`/`Wrap`. The resulting `*Error` is never mutated.
+- **Error chain**: `Wrap` sets `Cause` and participates in `errors.Is` / `errors.As` via `Unwrap()`.
+- **slog integration**: `LogValue()` returns a `slog.GroupValue` with all fields. `SlogLevel()` maps `Severity` to `slog.Level`.
+- **JSON**: `MarshalJSON()` produces a flat JSON object with all fields. The `cause` field is serialized as a string via `.Error()` — intermediate structured errors in the chain are flattened.
+- **Stack traces**: disabled by default. `EnableStackTrace(true)` captures call stacks on every `New`/`Wrap`. `StackTrace()` formats the stack.
+- **MultiError**: aggregates multiple errors. Computes overall `Severity`, `Retryable`, and `IsPanic` from contained errors.
 
 ## Thread safety
 
@@ -143,8 +125,7 @@ Coverage includes:
 
 ## Benchmarks
 
-Environment: `go1.24.0 windows/amd64`, Intel Core i7-10510U @ 1.80 GHz.
-Each benchmark was run 3 times (`-count=3`); the table shows median values.
+Environment: `go1.24.0 windows/amd64`, Intel Core i7-10510U @ 1.80 GHz. Each benchmark was run 3 times (`-count=3`); the table shows median values.
 
 ```text
 BenchmarkNew_Minimal                 ~174 ns/op     192 B/op      1 allocs/op
@@ -219,8 +200,8 @@ BenchmarkWithMetaMap                 ~593 ns/op     544 B/op      4 allocs/op
 
 ```text
 pkg/errx/
-    errx.go       -- Error, New(), Wrap(), As(), enums, options, JSON, slog
-    multi.go      -- MultiError, NewMulti(), Add(), Err()
+    errx.go         -- Error, New(), Wrap(), As(), enums, options, JSON, slog
+    multi.go        -- MultiError, NewMulti(), Add(), Err()
     error_test.go   -- 58 tests
     multi_test.go   -- 25 tests
     example_test.go -- runnable examples

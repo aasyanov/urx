@@ -4,10 +4,7 @@ Lightweight trace and span propagation via `context.Context`.
 
 ## Philosophy
 
-**One job: propagate trace IDs.** `ctxx` stores W3C-compatible identifiers in
-`context.Context`: `trace_id` (32 hex), `span_id` (16 hex), and `trace_flags`
-(2 hex). `WithTrace` creates or reuses a trace; `WithSpan` forks a new span.
-`TraceFromContext` extracts IDs. It does not export spans or include an OTEL SDK.
+**One job: propagate trace IDs.** `ctxx` stores W3C-compatible identifiers in `context.Context`: `trace_id` (32 hex), `span_id` (16 hex), and `trace_flags` (2 hex). `WithTrace` creates or reuses a trace; `WithSpan` forks a new span. `TraceFromContext` extracts IDs. It does not export spans or include an OTEL SDK.
 
 ## Quick start
 
@@ -43,35 +40,25 @@ traceID, spanID, ctx = ctxx.MustTraceFromContext(ctx)
 
 ## Behavior details
 
-- **ID generation**: if the context has no trace, `WithTrace` generates
-  cryptographically random W3C-shaped IDs:
-  - trace ID: 16 random bytes -> 32 lowercase hex chars
-  - span ID: 8 random bytes -> 16 lowercase hex chars
-  - trace flags: default `01` (sampled)
+- **ID generation**: if the context has no trace, `WithTrace` generates cryptographically random W3C-shaped IDs: trace ID is 16 random bytes (32 lowercase hex chars), span ID is 8 random bytes (16 lowercase hex chars), trace flags default to `01` (sampled).
 
-- **Span forking**: `WithSpan` replaces only the `spanID`, preserving the
-  existing `traceID`. If no trace exists, it creates both.
+- **Span forking**: `WithSpan` replaces only the `spanID`, preserving the existing `traceID`. If no trace exists, it creates both.
 
-- **W3C propagation**: `InjectTraceparent` / `ExtractTraceparent` support
-  `traceparent` without OTEL dependency, useful for HTTP boundaries.
+- **W3C propagation**: `InjectTraceparent` / `ExtractTraceparent` support `traceparent` without OTEL dependency, useful for HTTP boundaries.
 
-- **Context key isolation**: keys are of an unexported `ctxKey` type, preventing
-  collisions with other packages that use `context.WithValue`.
+- **Context key isolation**: keys are of an unexported `ctxKey` type, preventing collisions with other packages that use `context.WithValue`.
 
-- **Zero allocations on read**: `TraceFromContext` is a pair of
-  `context.Value` lookups — no heap allocation.
+- **Zero allocations on read**: `TraceFromContext` performs a single `context.Value` lookup (primary path) — no heap allocation.
 
 ## Thread safety
 
-- All functions create new `context.Context` values — immutable, safe for
-  concurrent use
-- `TraceFromContext` / `MustTraceFromContext` are pure reads — safe for
-  concurrent use
+- All functions create new `context.Context` values — immutable, safe for concurrent use
+- `TraceFromContext` / `MustTraceFromContext` are pure reads — safe for concurrent use
 - No shared mutable state
 
 ## Tests
 
-**37 tests, 99.1% statement coverage.**
+**38 tests, 99.1% statement coverage.**
 
 ```bash
 go test -race -count=1 -coverprofile=coverage.out ./...
@@ -79,23 +66,21 @@ ok  github.com/aasyanov/urx/pkg/ctxx  coverage: 99.1% of statements
 ```
 
 Coverage includes:
-- WithTrace: new trace, existing trace, empty IDs (auto-generate)
-- WithSpan: with existing trace, without trace
-- TraceFromContext: present, missing, nil context, empty context
-- MustTraceFromContext: present (reuse), missing (generate)
+- WithTrace: new trace, existing trace, empty IDs (auto-generate), nil context
+- WithSpan: with existing trace, without trace, nil context, multiple spans
+- TraceFromContext: present, missing, nil context, empty context, wrong value type
+- MustTraceFromContext: present (reuse), missing (generate), nil context, partial trace
 - ID uniqueness: generated IDs are distinct
-- traceparent parse/format/inject/extract
+- traceparent: parse/format roundtrip, invalid inputs, inject/extract HTTP headers
 - TraceFlagsFromContext: nil, empty
-- FormatTraceparent: invalid inputs
 - InjectTraceparent: nil header, no trace
 - ExtractTraceparent: nil header
-- Legacy fallback: old-style separate context keys
+- Legacy fallback: old-style separate context keys, invalid legacy IDs
 - TraceContext normalization: uppercase hex, invalid flags
 
 ## Benchmarks
 
-Environment: `go1.24.0 windows/amd64`, Intel Core i7-10510U @ 1.80 GHz.
-Each benchmark was run 3 times (`-count=3`); the table shows median values.
+Environment: `go1.24.0 windows/amd64`, Intel Core i7-10510U @ 1.80 GHz. Each benchmark was run 3 times (`-count=3`); the table shows median values.
 
 ```text
 BenchmarkWithTrace_New                   ~1024 ns/op     256 B/op     8 allocs/op
@@ -112,12 +97,11 @@ BenchmarkMustTraceFromContext_Generate   ~1272 ns/op     256 B/op     8 allocs/o
 
 ### Analysis
 
-**WithTrace (new):** ~1.0 us class. Dominated by random ID generation
-(`crypto/rand`) and context wrapping. One-time cost per request.
+**WithTrace (new):** ~1.0 us. Dominated by random ID generation (`crypto/rand`) and context wrapping. One-time cost per request.
 
-**WithTrace (existing):** ~33 ns, 0 allocs. Two `context.WithValue` calls. No generation needed.
+**WithTrace (existing):** ~33 ns, 0 allocs. Single `context.Value` lookup + `context.WithValue`. No generation needed.
 
-**TraceFromContext:** ~29 ns, 0 allocs. Two `context.Value` lookups. Hot-path friendly.
+**TraceFromContext:** ~29 ns, 0 allocs. Single `context.Value` lookup. Hot-path friendly.
 
 **TraceFromContext (nil):** ~3 ns. Early nil check. Free.
 
