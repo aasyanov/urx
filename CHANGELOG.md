@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Improved (busx)
+
+- Added `WithOnError` tests (called on panic, not called on success). Coverage 94.6% → 98.9%, tests 39 → 41.
+- Updated README: added `WithOnError`, `Stats()`, `ResetStats()` to API table; removed soft line wraps; updated file structure section.
+
 ### Changed (errx)
 
 - **Breaking:** `MarshalJSON` now serializes `cause` recursively. If the cause is `*errx.Error`, it becomes a nested JSON object preserving all structured fields (Domain, Code, Severity, Meta, etc.). Non-`errx` errors remain plain strings. Recursion depth is unlimited.

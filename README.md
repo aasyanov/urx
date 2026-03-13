@@ -183,7 +183,7 @@ The wrapper passes a private implementation as a public interface. The callback 
 | Metric | Value |
 |---|---|
 | Packages | 31 |
-| Tests | 1350 |
+| Tests | 1352 |
 | Benchmarks | 207 |
 | Coverage | 91.6% – 100% per package |
 | Race detector | All tests pass with `-race` |
@@ -196,7 +196,7 @@ The wrapper passes a private implementation as a public interface. The callback 
 |---|---:|:---:|---:|
 | adaptx | 56 | 91.6% | 2 |
 | bulkx | 37 | 98.3% | 4 |
-| busx | 39 | 94.6% | 9 |
+| busx | 41 | 98.9% | 9 |
 | cfgx | 33 | 93.7% | 6 |
 | circuitx | 33 | 94.4% | 4 |
 | clix | 83 | 96.0% | 4 |

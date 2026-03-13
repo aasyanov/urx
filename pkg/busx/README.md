@@ -4,11 +4,7 @@ Thread-safe, synchronous, in-process event bus for industrial Go services.
 
 ## Philosophy
 
-**One job: deliver events.** `busx` dispatches events to subscribed handlers
-synchronously in the caller's goroutine, recovers panics via `panix`, and
-reports problems as structured `errx.Error` values. It does not manage
-goroutines, serialize payloads, or route across processes. Those are
-responsibilities of your application code or a message broker.
+**One job: deliver events.** `busx` dispatches events to subscribed handlers synchronously in the caller's goroutine, recovers panics via `panix`, and reports problems as structured `errx.Error` values. It does not manage goroutines, serialize payloads, or route across processes. Those are responsibilities of your application code or a message broker.
 
 ## Quick start
 
@@ -32,14 +28,22 @@ b.Close()
 
 | Function / Method | Description |
 |---|---|
-| `New() *Bus` | Create an empty bus |
+| `New(opts ...Option) *Bus` | Create an empty bus with optional configuration |
 | `b.Subscribe(event, fn) (SubscriptionID, error)` | Register a handler; returns unique ID |
 | `b.Unsubscribe(id) bool` | Remove subscription by ID |
 | `b.Publish(ctx, event, payload) error` | Invoke all handlers synchronously; aggregate panics |
 | `b.Subscribers(event) int` | Count of handlers for event |
 | `b.Events() []string` | All events with subscribers |
+| `b.Stats() Stats` | Snapshot of event bus counters (events, subscriptions, published, delivered, panics) |
+| `b.ResetStats()` | Zero published/delivered/panics counters |
 | `b.Close()` | Shut down, clear subscriptions (idempotent) |
 | `b.IsClosed() bool` | Whether the bus is closed |
+
+### Options
+
+| Option | Description |
+|---|---|
+| `WithOnError(fn)` | Callback invoked for each handler error during Publish. Receives event name and `*errx.Error`. |
 
 ## Handler signature
 
@@ -47,35 +51,23 @@ b.Close()
 type HandlerFunc func(ctx context.Context, event string, payload any)
 ```
 
-The payload is a single `any` value. Callers wrap structured data in a struct
-or slice as needed. No variadic `...any` -- cleaner API, explicit types.
+The payload is a single `any` value. Callers wrap structured data in a struct or slice as needed. No variadic `...any` — cleaner API, explicit types.
 
 ## Behavior details
 
-- **Synchronous dispatch**: handlers run in the caller's goroutine, in
-  subscription order. If you need async, wrap the call in `go`. This makes
-  event delivery predictable and testable without `sync.WaitGroup` hacks.
+- **Synchronous dispatch**: handlers run in the caller's goroutine, in subscription order. If you need async, wrap the call in `go`. This makes event delivery predictable and testable without `sync.WaitGroup` hacks.
 
-- **Panic recovery**: each handler is wrapped with `panix.Safe`. If a handler
-  panics, the panic is recovered into a structured `*errx.Error`, and the
-  remaining handlers still execute. All panic errors are aggregated via
-  `errx.MultiError` and returned from `Publish`.
+- **Panic recovery**: each handler is wrapped with `panix.Safe`. If a handler panics, the panic is recovered into a structured `*errx.Error`, and the remaining handlers still execute. All panic errors are aggregated via `errx.MultiError` and returned from `Publish`.
 
-- **Subscription IDs**: `Subscribe` returns a `SubscriptionID` (monotonic
-  `uint64`). Use it with `Unsubscribe` -- no `reflect.ValueOf(fn).Pointer()`
-  hacks, no fragile function pointer comparison.
+- **Subscription IDs**: `Subscribe` returns a `SubscriptionID` (monotonic `uint64`). Use it with `Unsubscribe` — no `reflect.ValueOf(fn).Pointer()` hacks, no fragile function pointer comparison.
 
-- **O(1) unsubscribe**: an internal `map[SubscriptionID]string` index maps each
-  ID to its event name. `Unsubscribe` locates the event in constant time, then
-  removes the handler via swap-delete on the per-event slice.
+- **O(1) unsubscribe**: an internal `map[SubscriptionID]string` index maps each ID to its event name. `Unsubscribe` locates the event in constant time, then removes the handler via swap-delete on the per-event slice.
 
-- **Snapshot isolation**: `Publish` takes a snapshot of the handler slice under
-  a read lock. Handlers that subscribe or unsubscribe during dispatch do not
-  affect the current publish cycle.
+- **Snapshot isolation**: `Publish` takes a snapshot of the handler slice under a read lock. Handlers that subscribe or unsubscribe during dispatch do not affect the current publish cycle.
 
-- **Close**: marks the bus as closed via `atomic.Bool`, clears all subscriptions
-  and the ID index. After `Close`, `Subscribe` and `Publish` return `CodeClosed`
-  errors. `Close` is idempotent.
+- **OnError callback**: when set via `WithOnError`, the callback is invoked for each handler that panics during `Publish`, receiving the event name and the wrapped `*errx.Error`. The callback runs synchronously before the next handler.
+
+- **Close**: marks the bus as closed via `atomic.Bool`, clears all subscriptions and the ID index. After `Close`, `Subscribe` and `Publish` return `CodeClosed` errors. `Close` is idempotent.
 
 ## Error diagnostics
 
@@ -102,17 +94,17 @@ Multiple panics produce an `errx.MultiError` with one `PUBLISH_FAILED` entry per
 
 - `Subscribe` / `Unsubscribe` / `Close` take a write lock (both `subs` map and `index` map are mutated together)
 - `Publish` takes a read lock (snapshot copy), then releases before invoking handlers
-- `Subscribers` / `Events` take a read lock
+- `Subscribers` / `Events` / `Stats` take a read lock
 - `IsClosed` is lock-free (`atomic.Bool`)
 - Concurrent `Publish` calls are fully parallel after the snapshot copy
 
 ## Tests
 
-**39 tests, 94.6% statement coverage.**
+**41 tests, 98.9% statement coverage.**
 
 ```bash
 go test -race -count=1 -coverprofile=coverage.out ./...
-ok  github.com/aasyanov/urx/pkg/busx  coverage: 94.6% of statements
+ok  github.com/aasyanov/urx/pkg/busx  coverage: 98.9% of statements
 ```
 
 Coverage includes:
@@ -125,11 +117,12 @@ Coverage includes:
 - Thread safety: concurrent subscribe+publish, concurrent subscribe+unsubscribe, publish with close
 - Error structure: CodeClosed fields, CodePublishFailed meta
 - Snapshot isolation: subscribe-during-publish
+- Stats: initial, after subscribe, after publish, panic counted, no-subscriber publish, reset
+- WithOnError: called on panic, not called on success
 
 ## Benchmarks
 
-Environment: `go1.24.0 windows/amd64`, Intel Core i7-10510U @ 1.80 GHz.
-Each benchmark was run 3 times (`-count=3`); the table shows median values.
+Environment: `go1.24.0 windows/amd64`, Intel Core i7-10510U @ 1.80 GHz. Each benchmark was run 3 times (`-count=3`); the table shows median values.
 
 ```text
 BenchmarkSubscribe                   ~436 ns/op     464 B/op     4 allocs/op
@@ -156,8 +149,6 @@ BenchmarkConcurrentPublish_Contention ~751 ns/op   216 B/op     3 allocs/op
 **Panic path:** ~2.9 us. Dominated by `recover()` + `errx.NewPanicError` + `errx.Wrap` + `MultiError.Add`. The 20 allocs come from panic recovery machinery. Acceptable because panics are exceptional.
 
 **Concurrent publish:** ~147 ns under `RunParallel`. The `RWMutex` read path scales well. Under high goroutine contention (~751 ns), cost is dominated by goroutine scheduling.
-
-**Subscribe/Unsubscribe:** ~436/594 ns. One-time costs during setup. The allocs include the `Bus` struct, maps (`subs` + `index`), and slice. `Unsubscribe` uses an internal index for O(1) event lookup, avoiding a full scan of all events.
 
 ### Performance summary
 
@@ -188,9 +179,9 @@ For context: a typical HTTP handler takes 50-500 us, a database query takes 1-50
 
 ```text
 pkg/busx/
-    busx.go         -- Bus struct, New(), Subscribe(), Unsubscribe(), Publish(), Close()
+    busx.go         -- Bus, New(), Subscribe(), Unsubscribe(), Publish(), Stats(), Close()
     errors.go       -- DomainBus, Code constants, error constructors
-    busx_test.go    -- 39 tests, 94.6% coverage
+    busx_test.go    -- 41 tests, 98.9% coverage
     bench_test.go   -- 9 benchmarks
     README.md
 ```

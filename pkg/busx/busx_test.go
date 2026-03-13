@@ -601,3 +601,45 @@ func TestResetStats(t *testing.T) {
 		t.Fatalf("expected Events=1, Subscriptions=1 (not reset), got %+v", s)
 	}
 }
+
+// --- WithOnError ---
+
+func TestWithOnError_CalledOnPanic(t *testing.T) {
+	var captured struct {
+		event string
+		err   error
+	}
+	b := New(WithOnError(func(event string, err error) {
+		captured.event = event
+		captured.err = err
+	}))
+	b.Subscribe("fail", func(ctx context.Context, event string, payload any) {
+		panic("handler boom")
+	})
+	b.Publish(context.Background(), "fail", nil)
+	if captured.event != "fail" {
+		t.Fatalf("expected event='fail', got %q", captured.event)
+	}
+	if captured.err == nil {
+		t.Fatal("expected non-nil error in onError callback")
+	}
+	var xe *errx.Error
+	if !errors.As(captured.err, &xe) {
+		t.Fatalf("expected *errx.Error, got %T", captured.err)
+	}
+	if xe.Code != CodePublishFailed {
+		t.Fatalf("expected code %s, got %s", CodePublishFailed, xe.Code)
+	}
+}
+
+func TestWithOnError_NotCalledOnSuccess(t *testing.T) {
+	called := false
+	b := New(WithOnError(func(event string, err error) {
+		called = true
+	}))
+	b.Subscribe("ok", func(ctx context.Context, event string, payload any) {})
+	b.Publish(context.Background(), "ok", nil)
+	if called {
+		t.Fatal("onError should not be called when handler succeeds")
+	}
+}
