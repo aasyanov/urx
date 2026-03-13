@@ -698,6 +698,120 @@ func TestMarshalJSON_Full(t *testing.T) {
 	}
 }
 
+func TestMarshalJSON_RecursiveCause_ErrxWrapsErrx(t *testing.T) {
+	inner := New("DB", "CONN_FAILED", "connection refused",
+		WithSeverity(SeverityError),
+		WithMeta("host", "db.prod"),
+	)
+	outer := Wrap(inner, "SERVICE", "USER_LOOKUP", "find user failed",
+		WithSeverity(SeverityCritical),
+	)
+
+	b, err := json.Marshal(outer)
+	if err != nil {
+		t.Fatalf("MarshalJSON error: %v", err)
+	}
+
+	var m map[string]any
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatalf("Unmarshal error: %v", err)
+	}
+
+	if m["domain"] != "SERVICE" {
+		t.Errorf("domain = %v", m["domain"])
+	}
+
+	cause, ok := m["cause"].(map[string]any)
+	if !ok {
+		t.Fatalf("cause should be an object, got %T: %v", m["cause"], m["cause"])
+	}
+	if cause["domain"] != "DB" {
+		t.Errorf("cause.domain = %v", cause["domain"])
+	}
+	if cause["code"] != "CONN_FAILED" {
+		t.Errorf("cause.code = %v", cause["code"])
+	}
+	if cause["severity"] != "error" {
+		t.Errorf("cause.severity = %v", cause["severity"])
+	}
+	causeMeta, ok := cause["meta"].(map[string]any)
+	if !ok || causeMeta["host"] != "db.prod" {
+		t.Errorf("cause.meta = %v", cause["meta"])
+	}
+}
+
+func TestMarshalJSON_RecursiveCause_DeepChain(t *testing.T) {
+	plain := errors.New("connection refused")
+	level1 := Wrap(plain, "DB", "CONN", "pg connect failed")
+	level2 := Wrap(level1, "REPO", "QUERY", "select user failed")
+	level3 := Wrap(level2, "SERVICE", "FIND", "user lookup failed")
+
+	b, err := json.Marshal(level3)
+	if err != nil {
+		t.Fatalf("MarshalJSON error: %v", err)
+	}
+
+	var m map[string]any
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatalf("Unmarshal error: %v", err)
+	}
+
+	// level 3: SERVICE.FIND
+	if m["domain"] != "SERVICE" {
+		t.Fatalf("top domain = %v", m["domain"])
+	}
+	c2, ok := m["cause"].(map[string]any)
+	if !ok {
+		t.Fatalf("level 2 cause should be object, got %T", m["cause"])
+	}
+
+	// level 2: REPO.QUERY
+	if c2["domain"] != "REPO" {
+		t.Fatalf("level 2 domain = %v", c2["domain"])
+	}
+	c1, ok := c2["cause"].(map[string]any)
+	if !ok {
+		t.Fatalf("level 1 cause should be object, got %T", c2["cause"])
+	}
+
+	// level 1: DB.CONN
+	if c1["domain"] != "DB" {
+		t.Fatalf("level 1 domain = %v", c1["domain"])
+	}
+
+	// level 0: plain string
+	causeStr, ok := c1["cause"].(string)
+	if !ok {
+		t.Fatalf("leaf cause should be string, got %T: %v", c1["cause"], c1["cause"])
+	}
+	if causeStr != "connection refused" {
+		t.Errorf("leaf cause = %q", causeStr)
+	}
+}
+
+func TestMarshalJSON_RecursiveCause_PlainErrorIsString(t *testing.T) {
+	plain := errors.New("timeout")
+	e := Wrap(plain, "NET", "TIMEOUT", "request timed out")
+
+	b, err := json.Marshal(e)
+	if err != nil {
+		t.Fatalf("MarshalJSON error: %v", err)
+	}
+
+	var m map[string]any
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatalf("Unmarshal error: %v", err)
+	}
+
+	causeStr, ok := m["cause"].(string)
+	if !ok {
+		t.Fatalf("plain error cause should be string, got %T", m["cause"])
+	}
+	if causeStr != "timeout" {
+		t.Errorf("cause = %q", causeStr)
+	}
+}
+
 func TestMarshalJSON_PanicError(t *testing.T) {
 	e := NewPanicError("op", "boom")
 	b, err := json.Marshal(e)

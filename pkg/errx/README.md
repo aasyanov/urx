@@ -90,7 +90,7 @@ data, _ := json.Marshal(err)
 - **Immutable after construction**: all `With*` options are applied during `New`/`Wrap`. The resulting `*Error` is never mutated.
 - **Error chain**: `Wrap` sets `Cause` and participates in `errors.Is` / `errors.As` via `Unwrap()`.
 - **slog integration**: `LogValue()` returns a `slog.GroupValue` with all fields. `SlogLevel()` maps `Severity` to `slog.Level`.
-- **JSON**: `MarshalJSON()` produces a flat JSON object with all fields. The `cause` field is serialized as a string via `.Error()` — intermediate structured errors in the chain are flattened.
+- **JSON (recursive cause)**: `MarshalJSON()` serializes the `cause` field recursively. If the cause is `*errx.Error`, it becomes a nested JSON object with all structured fields preserved (Domain, Code, Severity, Meta, etc.). Any other error type is serialized as a plain string via `.Error()`. The recursion depth is unlimited — it follows the full causal chain until a non-`*errx.Error` is reached.
 - **Stack traces**: disabled by default. `EnableStackTrace(true)` captures call stacks on every `New`/`Wrap`. `StackTrace()` formats the stack.
 - **MultiError**: aggregates multiple errors. Computes overall `Severity`, `Retryable`, and `IsPanic` from contained errors.
 
@@ -103,7 +103,7 @@ data, _ := json.Marshal(err)
 
 ## Tests
 
-**83 tests, 100% statement coverage.**
+**86 tests, 100% statement coverage.**
 
 ```bash
 go test -race -count=1 -coverprofile=coverage.out ./...
@@ -115,7 +115,7 @@ Coverage includes:
 - Wrap: basic, nil cause, chained wraps
 - As: found, not found, deep chain
 - Error.String: with/without cause
-- MarshalJSON: minimal, full, with cause
+- MarshalJSON: minimal, full, with cause, recursive cause (errx wraps errx), deep chain (3 levels), plain error as string
 - LogValue: minimal, full, severity mapping
 - MultiError: Add, Len, Err, Error, Unwrap, severity/retry aggregation
 - NewPanicError: string value, error value
@@ -202,7 +202,7 @@ BenchmarkWithMetaMap                 ~593 ns/op     544 B/op      4 allocs/op
 pkg/errx/
     errx.go         -- Error, New(), Wrap(), As(), enums, options, JSON, slog
     multi.go        -- MultiError, NewMulti(), Add(), Err()
-    error_test.go   -- 58 tests
+    error_test.go   -- 61 tests
     multi_test.go   -- 25 tests
     example_test.go -- runnable examples
     bench_test.go   -- 23 benchmarks

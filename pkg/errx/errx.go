@@ -433,8 +433,11 @@ func As(err error) (*Error, bool) {
 
 // --- JSON serialization ---
 
-// MarshalJSON produces a flat JSON object with all error fields.
-// Cause is serialized as a string; stack trace is included only when captured.
+// MarshalJSON produces a JSON object with all error fields.
+// If Cause is an [*Error], it is serialized recursively as a nested object
+// (preserving Domain, Code, Severity, Meta, etc. at every level).
+// Any other error type is serialized as a plain string.
+// The recursion depth is unlimited — it follows the full causal chain.
 func (e *Error) MarshalJSON() ([]byte, error) {
 	type jsonError struct {
 		Domain    string         `json:"domain"`
@@ -442,7 +445,7 @@ func (e *Error) MarshalJSON() ([]byte, error) {
 		Message   string         `json:"message"`
 		Op        string         `json:"op,omitempty"`
 		Meta      map[string]any `json:"meta,omitempty"`
-		Cause     string         `json:"cause,omitempty"`
+		Cause     any            `json:"cause,omitempty"`
 		Retry     RetryClass     `json:"retry"`
 		Severity  Severity       `json:"severity"`
 		Category  Category       `json:"category"`
@@ -468,7 +471,12 @@ func (e *Error) MarshalJSON() ([]byte, error) {
 		Stack:     e.StackTrace(),
 	}
 	if e.Cause != nil {
-		je.Cause = e.Cause.Error()
+		var xe *Error
+		if errors.As(e.Cause, &xe) {
+			je.Cause = xe
+		} else {
+			je.Cause = e.Cause.Error()
+		}
 	}
 	return json.Marshal(je)
 }
