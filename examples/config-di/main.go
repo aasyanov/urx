@@ -38,7 +38,7 @@ type Config struct {
 	AppName string `yaml:"appName" json:"appName"`
 }
 
-func (c *Config) Validate(fix bool) error {
+func (c *Config) Validate(_ bool) error {
 	return validx.Collect(
 		validx.Between("port", c.Port, 1, 65535),
 		validx.Required("host", c.Host),
@@ -51,7 +51,7 @@ type Database struct {
 }
 
 func NewDatabase() *Database { return &Database{dsn: "postgres://localhost:5432/app"} }
-func (d *Database) Start(_ context.Context) error {
+func (d *Database) Start(_ context.Context) error { //nolint:unparam // implements dicx.Starter interface
 	slog.Info("database connected", slog.String("dsn", d.dsn))
 	return nil
 }
@@ -102,15 +102,25 @@ func main() {
 	)
 
 	c := dicx.New()
-	c.Provide(NewDatabase)
-	c.Provide(NewUserService)
+	if err := c.Provide(NewDatabase); err != nil {
+		logger.Error("provide Database failed", logx.Err(err))
+		os.Exit(1)
+	}
+	if err := c.Provide(NewUserService); err != nil {
+		logger.Error("provide UserService failed", logx.Err(err))
+		os.Exit(1)
+	}
 
 	ctx := ctxx.WithTrace(context.Background())
 	if err := c.Start(ctx); err != nil {
 		logger.Error("DI start failed", logx.Err(err))
 		os.Exit(1)
 	}
-	defer c.Stop(ctx)
+	defer func() {
+		if err := c.Stop(ctx); err != nil {
+			logger.Error("DI stop error", logx.Err(err))
+		}
+	}()
 
 	db := dicx.MustResolve[*Database](c)
 	_ = dicx.MustResolve[*UserService](c)
@@ -136,8 +146,12 @@ func main() {
 		}
 	}()
 
-	signalx.Wait(ctx, 10*time.Second, func(ctx context.Context) {
-		srv.Shutdown(ctx)
+	if err := signalx.Wait(ctx, 10*time.Second, func(ctx context.Context) {
+		if err := srv.Shutdown(ctx); err != nil {
+			logger.Error("server shutdown error", logx.Err(err))
+		}
 		logger.Info("shutdown complete")
-	})
+	}); err != nil {
+		logger.Error("shutdown error", logx.Err(err))
+	}
 }

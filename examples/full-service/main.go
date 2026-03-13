@@ -89,10 +89,14 @@ func main() {
 		}
 	}()
 
-	signalx.Wait(context.Background(), 10*time.Second, func(ctx context.Context) {
+	if err := signalx.Wait(context.Background(), 10*time.Second, func(ctx context.Context) {
 		logger.Info("shutting down...")
-		srv.Shutdown(ctx)
-	})
+		if err := srv.Shutdown(ctx); err != nil {
+			logger.Error("server shutdown error", logx.Err(err))
+		}
+	}); err != nil {
+		logger.Error("shutdown error", logx.Err(err))
+	}
 
 	logger.Info("stopped")
 }

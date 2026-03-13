@@ -90,7 +90,7 @@ func main() {
 
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("X-Trace-ID", traceID)
-		json.NewEncoder(w).Encode(map[string]string{
+		_ = json.NewEncoder(w).Encode(map[string]string{
 			"status":   "ok",
 			"trace_id": traceID,
 			"user":     r.Header.Get("X-User"),
@@ -117,7 +117,7 @@ func main() {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{
+		_ = json.NewEncoder(w).Encode(map[string]string{
 			"hash":     hash,
 			"verified": "true",
 		})
@@ -132,10 +132,14 @@ func main() {
 		}
 	}()
 
-	signalx.Wait(context.Background(), 5*time.Second, func(ctx context.Context) {
-		srv.Shutdown(ctx)
+	if err := signalx.Wait(context.Background(), 5*time.Second, func(ctx context.Context) {
+		if err := srv.Shutdown(ctx); err != nil {
+			logger.Error("server shutdown error", logx.Err(err))
+		}
 		logger.Info("shutdown complete")
-	})
+	}); err != nil {
+		logger.Error("shutdown error", logx.Err(err))
+	}
 }
 
 func writeError(w http.ResponseWriter, status int, err error) {
@@ -147,5 +151,5 @@ func writeError(w http.ResponseWriter, status int, err error) {
 		resp["error"] = ex.Message
 		resp["code"] = fmt.Sprintf("%s.%s", ex.Domain, ex.Code)
 	}
-	json.NewEncoder(w).Encode(resp)
+	_ = json.NewEncoder(w).Encode(resp)
 }
