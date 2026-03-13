@@ -91,6 +91,8 @@ func formatChain(chain []reflect.Type, tail reflect.Type) string {
 }
 
 // formatCycle renders a circular dependency path as "A -> B -> A".
+// The caller is expected to pass a chain that already includes the repeated
+// element at the end (e.g. [A, B, A]).
 func formatCycle(chain []reflect.Type) string {
 	if len(chain) == 0 {
 		return ""
@@ -102,7 +104,5 @@ func formatCycle(chain []reflect.Type) string {
 		}
 		sb.WriteString(t.String())
 	}
-	sb.WriteString(" -> ")
-	sb.WriteString(chain[0].String())
 	return sb.String()
 }

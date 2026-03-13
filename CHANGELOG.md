@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `TTL()` and `Len()` now return 0 on a closed cache, consistent with all other read methods (`Get`, `Peek`, `Has`, `Keys`, `Values`, `Range`).
 
+### Fixed (dicx)
+
+- `formatCycle` no longer duplicates the closing element in cyclic dependency error messages (was "A -> B -> A -> A", now "A -> B -> A").
+
 ### Tests (lrux)
 
 - 139 tests (was 136), 98.8% coverage.

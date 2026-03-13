@@ -6,6 +6,8 @@
 
 Composable infrastructure primitives for Go — 31 packages with no framework runtime or central dependency.
 
+*A personal engineering toolkit, built for real production systems and shared openly. Use what helps, ignore the rest.*
+
 ## Motivation
 
 In larger systems, concerns such as retry logic, circuit breaking, concurrency limiting, structured errors, and graceful shutdown are often implemented multiple times across services. Over time this leads to duplicated code, inconsistent behavior, and reduced observability.

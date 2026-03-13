@@ -111,7 +111,7 @@ Test coverage includes:
 - Provide: valid constructors, invalid signatures, duplicate registration, after freeze
 - Resolve: singleton, transient, with deps, missing dep, cyclic dep
 - Start: topological order, constructor failure, already started
-- Stop: reverse order, io.Closer, already stopped
+- Stop: reverse order, stopper hooks, already stopped
 - Generic API: Resolve[T], MustResolve[T]
 - Panic recovery: constructor panic
 - Stats / IsClosed: snapshot correctness

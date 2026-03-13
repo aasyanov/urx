@@ -770,6 +770,10 @@ func TestErrorFormat_CyclicDep(t *testing.T) {
 	if !strings.Contains(s, "CycleA") || !strings.Contains(s, "CycleB") {
 		t.Fatalf("unexpected cycle format: %s", s)
 	}
+	count := strings.Count(s, "CycleA")
+	if count != 2 {
+		t.Fatalf("expected CycleA exactly twice (open+close), got %d in: %s", count, s)
+	}
 }
 
 func TestErrorFormat_Chain(t *testing.T) {
