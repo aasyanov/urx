@@ -12,6 +12,8 @@ import (
 	"github.com/aasyanov/urx/pkg/errx"
 )
 
+func nilCtx() context.Context { return nil }
+
 // --- FromContext / WithLogger ---
 
 func TestFromContext_Default(t *testing.T) {
@@ -22,7 +24,7 @@ func TestFromContext_Default(t *testing.T) {
 }
 
 func TestFromContext_Nil(t *testing.T) {
-	l := FromContext(nil)
+	l := FromContext(nilCtx())
 	if l == nil {
 		t.Fatal("expected non-nil logger")
 	}
@@ -39,7 +41,7 @@ func TestWithLogger_RoundTrip(t *testing.T) {
 
 func TestWithLogger_NilContext(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
-	ctx := WithLogger(nil, logger)
+	ctx := WithLogger(nilCtx(), logger)
 	got := FromContext(ctx)
 	if got != logger {
 		t.Fatal("expected same logger after nil ctx normalization")

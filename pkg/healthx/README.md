@@ -4,11 +4,7 @@ Health-check registry for Kubernetes-style liveness and readiness probes.
 
 ## Philosophy
 
-**One job: health reporting.** `healthx` maintains a registry of named
-health-check functions and exposes Kubernetes-compatible `/livez` and `/readyz`
-endpoints. Liveness is a manual up/down toggle; readiness runs all registered
-checks with per-check timeouts. It does not restart services, log, or alert.
-Those are responsibilities of the orchestrator and the caller.
+**One job: health reporting.** `healthx` maintains a registry of named health-check functions and exposes Kubernetes-compatible `/livez` and `/readyz` endpoints. Liveness is a manual up/down toggle; readiness runs all registered checks with per-check timeouts. It does not restart services, log, or alert. Those are responsibilities of the orchestrator and the caller.
 
 ## Quick start
 
@@ -57,39 +53,26 @@ hc.RegisterHandlers(mux) // /healthz, /livez, /readyz
 
 ## Behavior details
 
-- **Liveness**: returns `StatusUp` unless `MarkDown()` was called. No checks
-  are executed — liveness is a simple toggle for orchestrator drain.
+- **Liveness**: returns `StatusUp` unless `MarkDown()` was called. No checks are executed — liveness is a simple toggle for orchestrator drain.
 
-- **Readiness**: runs all registered checks concurrently, each with its own
-  `context.WithTimeout`. If any check fails or times out, the overall status is
-  `StatusDown`. Returns a detailed `Report` with per-component results.
+- **Readiness**: runs all registered checks concurrently, each with its own `context.WithTimeout`. If any check fails or times out, the overall status is `StatusDown`. Returns a detailed `Report` with per-component results. Each check is wrapped in `panix.Safe` for panic recovery.
 
-- **HTTP handlers**: `LiveHandler` and `ReadyHandler` serialize the `Report` as
-  JSON and return HTTP 200 (up) or 503 (down).
+- **Report errors**: `ComponentStatus.Error` contains the raw error string from the check function (e.g. `"connection refused"`) or the timeout/panic message. It is a plain string, not a structured `*errx.Error`.
 
-- **Endpoint aliases**: `/healthz` and `/livez` are both liveness endpoints.
-  Use `RegisterHandlers` to mount standard probe paths in one call.
+- **HTTP handlers**: `LiveHandler` and `ReadyHandler` serialize the `Report` as JSON and return HTTP 200 (up) or 503 (down).
 
-- **MarkDown / MarkUp**: controlled via `atomic.Bool`. Use `MarkDown` before
-  graceful shutdown to drain traffic.
+- **Endpoint aliases**: `/healthz` and `/livez` are both liveness endpoints. Use `RegisterHandlers` to mount standard probe paths in one call.
 
-## Error diagnostics
+- **MarkDown / MarkUp**: controlled via `atomic.Bool`. Use `MarkDown` before graceful shutdown to drain traffic.
 
-All errors are `*errx.Error` with `Domain = "HEALTH"`.
+## Error constants
 
-### Codes
+The package exports `DomainHealth`, `CodeUnhealthy`, and `CodeTimeout` constants along with `errUnhealthy` and `errTimeout` constructors for callers who need to build structured health-check errors in their own code.
 
 | Code | When |
 |---|---|
 | `UNHEALTHY` | A health-check function returned an error |
 | `TIMEOUT` | A health-check function exceeded its timeout |
-
-### Example
-
-```text
-HEALTH.UNHEALTHY: health check failed | meta: component=postgres
-HEALTH.TIMEOUT: health check timed out | meta: component=redis
-```
 
 ## Thread safety
 
@@ -121,9 +104,7 @@ readinessProbe:
   failureThreshold: 2
 ```
 
-Use `/healthz` as an alias for liveness when your platform expects that name.
-Add `startupProbe` only when the service has a long cold start (for example,
-heavy migrations or model loading).
+Use `/healthz` as an alias for liveness when your platform expects that name. Add `startupProbe` only when the service has a long cold start (for example, heavy migrations or model loading).
 
 ## Tests
 
@@ -136,17 +117,16 @@ ok  github.com/aasyanov/urx/pkg/healthx  coverage: 98.6% of statements
 
 Coverage includes:
 - Liveness: up, after MarkDown, after MarkUp
-- Readiness: all healthy, one unhealthy, check timeout
+- Readiness: all healthy, one unhealthy, check timeout, marked down
 - HTTP handlers: status codes, JSON body, content type
 - RegisterHandlers: standard Kubernetes paths `/healthz`, `/livez`, `/readyz`
 - Register: multiple checks, concurrent registration, nil check panic
 - Readiness: nil context normalization
-- Report structure: component names, status values
+- Error constructors: errUnhealthy, errTimeout
 
 ## Benchmarks
 
-Environment: `go1.24.0 windows/amd64`, Intel Core i7-10510U @ 1.80 GHz.
-Each benchmark was run 3 times (`-count=3`); the table shows median values.
+Environment: `go1.24.0 windows/amd64`, Intel Core i7-10510U @ 1.80 GHz. Each benchmark was run 3 times (`-count=3`); the table shows median values.
 
 ```text
 BenchmarkLiveness              ~4 ns/op         0 B/op     0 allocs/op

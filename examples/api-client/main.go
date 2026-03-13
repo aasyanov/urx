@@ -246,10 +246,14 @@ func main() {
 		mux.Handle("/healthz", health.LiveHandler())
 		mux.Handle("/readyz", health.ReadyHandler())
 		logger.Info("health probes on :8081")
-		http.ListenAndServe(":8081", mux)
+		if err := http.ListenAndServe(":8081", mux); err != nil {
+			logger.Error("health server error", logx.Err(err))
+		}
 	}()
 
-	signalx.Wait(context.Background(), 5*time.Second, func(ctx context.Context) {
+	if err := signalx.Wait(context.Background(), 5*time.Second, func(ctx context.Context) {
 		logger.Info("shutdown complete")
-	})
+	}); err != nil {
+		logger.Error("shutdown error", logx.Err(err))
+	}
 }

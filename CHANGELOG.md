@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Breaking:** `MarshalJSON` now serializes `cause` recursively. If the cause is `*errx.Error`, it becomes a nested JSON object preserving all structured fields (Domain, Code, Severity, Meta, etc.). Non-`errx` errors remain plain strings. Recursion depth is unlimited.
 
+### Fixed (signalx)
+
+- `TestContext_NilParent` now actually tests nil context (was using `context.TODO()`, masking uncovered nil path). Coverage restored to 97.3% (was 94.6%).
+
 ### Fixed (logx)
 
 - `TestFromContext_Nil` and `TestWithLogger_NilContext` now actually test nil context (were using `context.TODO()`, masking uncovered nil paths). Coverage restored to 100.0% (was 94.7%).

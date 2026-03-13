@@ -219,7 +219,7 @@ The wrapper passes a private implementation as a public interface. The callback 
 | ratex | 28 | 94.6% | 5 |
 | retryx | 40 | 100.0% | 13 |
 | shedx | 34 | 98.3% | 3 |
-| signalx | 11 | 94.6% | 4 |
+| signalx | 11 | 97.3% | 4 |
 | syncx | 18 | 100.0% | 3 |
 | testx | 28 | 98.6% | 5 |
 | toutx | 16 | 100.0% | 3 |

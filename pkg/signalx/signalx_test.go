@@ -163,8 +163,10 @@ func TestWait_HookPanic_ContinuesOtherHooks(t *testing.T) {
 	}
 }
 
+func nilCtx() context.Context { return nil }
+
 func TestContext_NilParent(t *testing.T) {
-	ctx, cancel := Context(context.TODO())
+	ctx, cancel := Context(nilCtx())
 	defer cancel()
 	if ctx == nil {
 		t.Fatal("expected non-nil context")

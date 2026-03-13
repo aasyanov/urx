@@ -4,10 +4,7 @@ Graceful shutdown primitives for industrial Go services.
 
 ## Philosophy
 
-**One job: graceful shutdown.** `signalx` converts OS signals into context
-cancellation and runs shutdown hooks in order with a configurable timeout. It
-does not manage goroutine lifecycles, log, or retry. Those are responsibilities
-of the caller, `syncx.Group`, and `retryx`.
+**One job: graceful shutdown.** `signalx` converts OS signals into context cancellation and runs shutdown hooks in order with a configurable timeout. It does not manage goroutine lifecycles, log, or retry. Those are responsibilities of the caller, `syncx.Group`, and `retryx`.
 
 ## Quick start
 
@@ -16,10 +13,10 @@ ctx, cancel := signalx.Context(context.Background())
 defer cancel()
 
 signalx.OnShutdown(func(ctx context.Context) {
-    db.Close()
+    server.Shutdown(ctx)
 })
 signalx.OnShutdown(func(ctx context.Context) {
-    server.Shutdown(ctx)
+    db.Close()
 })
 
 if err := signalx.Wait(ctx, 10*time.Second); err != nil {
@@ -38,23 +35,11 @@ if err := signalx.Wait(ctx, 10*time.Second); err != nil {
 
 ## Behavior details
 
-- **Signal context**: `Context` calls `signal.Notify` on a buffered channel
-  with the provided signals (defaults to `SIGINT`, `SIGTERM`). A goroutine
-  waits for the first signal and calls `cancel()`. When either the signal
-  arrives or the parent context is cancelled, `signal.Stop(ch)` is called
-  to release signal notification resources.
+- **Signal context**: `Context` calls `signal.Notify` on a buffered channel with the provided signals (defaults to `SIGINT`, `SIGTERM`). A goroutine waits for the first signal and calls `cancel()`. When either the signal arrives or the parent context is cancelled, `signal.Stop(ch)` is called to release signal notification resources.
 
-- **Global hooks**: `OnShutdown` appends hooks to a global registry protected
-  by `sync.Mutex`. Hooks run in FIFO (registration) order during `Wait`.
+- **Global hooks**: `OnShutdown` appends hooks to a global registry protected by `sync.Mutex`. Hooks run in FIFO (registration) order during `Wait`.
 
-- **Wait**: blocks until `ctx.Done()`, then creates a timeout context via
-  `context.WithTimeout` and executes all hooks (global first, then inline)
-  sequentially. Each hook is wrapped in `panix.Safe` for panic recovery —
-  a panicking hook does not abort subsequent hooks, and the panic error is
-  collected into an `*errx.MultiError`. The timeout is checked *between*
-  hooks — a running hook is not interrupted mid-execution. If the timeout
-  expires before all hooks complete, `Wait` returns `context.DeadlineExceeded`.
-  If any hooks panicked, `Wait` returns the aggregated errors.
+- **Wait**: blocks until `ctx.Done()`, then creates a timeout context via `context.WithTimeout` and executes all hooks (global first, then inline) sequentially. Each hook is wrapped in `panix.Safe` for panic recovery — a panicking hook does not abort subsequent hooks, and the panic error is collected into an `*errx.MultiError`. The timeout is checked *between* hooks — a running hook is not interrupted mid-execution. If the timeout expires before all hooks complete, `Wait` returns `context.DeadlineExceeded`. If any hooks panicked, `Wait` returns the aggregated errors.
 
 - **ResetHooks**: clears the global registry. Intended for test isolation.
 
@@ -81,13 +66,11 @@ Coverage includes:
 - Wait: panicking hook propagates `*errx.Error` and does not abort other hooks
 - ResetHooks: clears registry
 
-The uncovered 3.1% is the `case <-ch:` branch in `Context` (actual OS signal
-reception), which requires sending real signals to the process.
+The uncovered 2.7% is the `case <-ch:` branch in `Context` (actual OS signal reception), which requires sending real signals to the process.
 
 ## Benchmarks
 
-Environment: `go1.24.0 windows/amd64`, Intel Core i7-10510U @ 1.80 GHz.
-Each benchmark was run 3 times (`-count=3`); the table shows median values.
+Environment: `go1.24.0 windows/amd64`, Intel Core i7-10510U @ 1.80 GHz. Each benchmark was run 3 times (`-count=3`); the table shows median values.
 
 ```text
 BenchmarkContext         ~2622 ns/op     289 B/op     6 allocs/op
