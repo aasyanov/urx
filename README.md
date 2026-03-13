@@ -12,36 +12,38 @@ Composable infrastructure primitives for Go — 31 packages with no framework ru
 go get github.com/aasyanov/urx
 ```
 
-## Motivation
+## The Problem
 
 In larger systems, concerns such as retry logic, circuit breaking, concurrency limiting, structured errors, and graceful shutdown are often implemented multiple times across services. Over time this leads to duplicated code, inconsistent behavior, and reduced observability.
 
+The root cause is not the individual patterns — those are well understood. The problem is that each team implements them differently: one service retries with `fmt.Errorf`, another with sentinel errors, a third with custom types. Circuit breakers track failures in ad-hoc counters. Rate limiters share no common diagnostics. When something fails in production, there is no consistent way to inspect, log, or propagate the error.
+
 URX extracts these patterns into focused, single-purpose packages with shared conventions:
 
-- `context.Context` for cancellation and control flow
-- `*errx.Error` for structured, inspectable errors
-- Generic `Execute` / `Do` wrappers for type-safe execution control
-- Panic-to-error conversion via `panix`
+| Convention | What it means |
+|---|---|
+| `context.Context` everywhere | Cancellation and control flow through the standard mechanism |
+| `*errx.Error` everywhere | Structured, inspectable errors with Domain, Code, metadata |
+| Generic `Execute` / `Do` | Type-safe execution wrappers returning `(T, error)` |
+| Panic → error via `panix` | Panics are converted into structured errors, never propagated |
+| Functional options | All configuration via `WithXxx` option functions |
 
 Each package addresses one concern and composes with others through plain Go interfaces — never through a central framework, struct tags, or code generation. Packages can be adopted incrementally in existing codebases.
 
 ### Design principles
 
-1. **Single responsibility** — one package, one concern. `retryx` retries. `circuitx` breaks circuits. `bulkx` limits concurrency. They compose; they don't merge.
+| # | Principle | In practice |
+|---|---|---|
+| 1 | **Single responsibility** | One package, one concern. `retryx` retries. `circuitx` breaks circuits. They compose; they don't merge. |
+| 2 | **Generic-first API** | All execution wrappers are package-level generic functions. Type safety without reflection. |
+| 3 | **Structured errors** | All public APIs return `*errx.Error`. No `fmt.Errorf`, no string matching. |
+| 4 | **Panic safety** | Every `Execute`/`Do` path is wrapped with `panix.Safe`. |
+| 5 | **Allocation-conscious** | Admission checks, rate limiting, and circuit state reads avoid heap allocations. |
+| 6 | **Execution controllers** | Callbacks receive a controller interface for observing and influencing wrapper behavior from the inside. |
+| 7 | **Testable by design** | Injectable functions, injectable readers, `testx` failure simulators. No global state. |
+| 8 | **Minimal deps** | 4 external modules: `sync`, `yaml`, `toml`, `crypto`. Everything else is stdlib. |
 
-2. **Generic-first API** — all execution wrappers (`Execute`, `Do`) are package-level generic functions returning `(T, error)`. Type safety without reflection.
-
-3. **Structured errors** — all public APIs return `*errx.Error` with Domain, Code, and metadata. No `fmt.Errorf`, no string matching.
-
-4. **Panic safety** — every `Execute`/`Do` path is wrapped with `panix.Safe`. Panics are converted into structured errors instead of propagating to the caller.
-
-5. **Allocation-conscious hot paths** — admission checks, rate limiting, and circuit state reads avoid heap allocations.
-
-6. **Execution controllers** — callbacks in `retryx`, `circuitx`, `bulkx`, `shedx`, `adaptx`, `hedgex`, and `cronx` receive a controller interface that exposes execution context (attempt number, load, limit) and lets the function influence wrapper behavior (abort retry, skip failure, reschedule) from the inside.
-
-7. **Testable by design** — injectable lookup functions, injectable readers, `testx` failure simulators. No `os.Setenv` in tests, no global state.
-
-8. **Minimal dependencies** — the entire toolkit depends on 4 external modules: `sync`, `yaml`, `toml`, `crypto`. All other dependencies are from the Go standard library.
+---
 
 ## Quick start
 
@@ -70,12 +72,14 @@ resp, err := bulkx.Execute(bh, ctx, func(ctx context.Context, bc bulkx.BulkContr
 
 See [Getting Started](docs/getting-started.md) for a step-by-step tutorial and [examples/](examples/) for runnable programs.
 
+---
+
 ## Packages
 
 ### Resilience
 
 | Package | Description |
-|---------|-------------|
+|---|---|
 | [**retryx**](pkg/retryx/) | Retry with backoff, jitter, and errx-aware retryability |
 | [**circuitx**](pkg/circuitx/) | Circuit breaker (closed → open → half-open) |
 | [**bulkx**](pkg/bulkx/) | Concurrency limiter (bulkhead isolation) |
@@ -92,7 +96,7 @@ See [Getting Started](docs/getting-started.md) for a step-by-step tutorial and [
 ### Infrastructure
 
 | Package | Description |
-|---------|-------------|
+|---|---|
 | [**errx**](pkg/errx/) | Structured errors with Domain, Code, metadata, severity, retryability |
 | [**panix**](pkg/panix/) | Panic recovery → `*errx.Error` conversion |
 | [**logx**](pkg/logx/) | `slog.Handler` with `ctxx` trace injection and `errx` field extraction |
@@ -107,7 +111,7 @@ See [Getting Started](docs/getting-started.md) for a step-by-step tutorial and [
 ### Configuration
 
 | Package | Description |
-|---------|-------------|
+|---|---|
 | [**cfgx**](pkg/cfgx/) | File → struct loader (YAML, JSON, TOML) |
 | [**envx**](pkg/envx/) | Typed environment variable binding (generics, no reflection) |
 | [**env2x**](pkg/env2x/) | Reflection-based env overlay for large structs |
@@ -117,16 +121,67 @@ See [Getting Started](docs/getting-started.md) for a step-by-step tutorial and [
 ### Data
 
 | Package | Description |
-|---------|-------------|
+|---|---|
 | [**lrux**](pkg/lrux/) | Generic LRU cache with sharded variant for concurrent access |
 | [**hashx**](pkg/hashx/) | Password hashing (Argon2id, scrypt, bcrypt) |
 | [**i18n**](pkg/i18n/) | Translation engine with anchor-based lookup |
 | [**dicx**](pkg/dicx/) | Dependency injection container with lifecycle management |
 
+---
+
+## Error model
+
+All packages return `*errx.Error`, providing consistent error inspection and propagation:
+
+```go
+type Error struct {
+    Domain   string       // "BULK", "CIRCUIT", "RETRY", ...
+    Code     string       // "TIMEOUT", "OPEN", "EXHAUSTED", ...
+    Message  string       // Human-readable description
+    Cause    error        // Wrapped underlying error
+    Meta     map[string]string  // Structured metadata
+    Severity Severity     // Debug, Info, Warn, Error
+    Retry    RetryHint    // Safe, Unsafe, Unknown
+}
+```
+
+Errors are inspectable via `errors.As`, serializable to JSON, and integrate with `slog` via the `LogValue()` method.
+
+## Controller pattern
+
+Seven packages pass an **execution controller** into the callback — an interface that exposes execution state and, where applicable, lets the function influence the wrapper's behavior.
+
+```text
+Execute/Do  ──creates──▶  private struct
+                               │
+                          satisfies
+                               │
+                          public interface  ──passed to──▶  user fn
+                               │                              │
+                          read methods ◀──────────────────────┘
+                          write methods ◀─────────────────────┘
+```
+
+Read methods return execution state (attempt number, failure count, current limit). Write methods change wrapper behavior (abort retry, skip failure recording, exclude sample).
+
+| Controller | Package | Read | Write |
+|---|---|---|---|
+| `RetryController` | retryx | `Number()` | `Abort()` |
+| `CircuitController` | circuitx | `State()`, `Failures()` | `SkipFailure()` |
+| `BulkController` | bulkx | `Active()`, `MaxConcurrent()`, `WaitedSlot()` | — |
+| `ShedController` | shedx | `Priority()`, `Load()`, `InFlight()` | — |
+| `AdaptController` | adaptx | `Limit()`, `InFlight()`, `Algorithm()` | `SkipSample()` |
+| `HedgeController` | hedgex | `Attempt()`, `IsHedge()` | — |
+| `JobController` | cronx | `RunNumber()`, `LastRunTime()` | `Abort()`, `Reschedule()`, `SkipError()` |
+
+The wrapper passes a private implementation as a public interface. The callback only sees the interface surface — no access to internal state.
+
+---
+
 ## Quality
 
 | Metric | Value |
-|--------|-------|
+|---|---|
 | Packages | 31 |
 | Tests | 1326 |
 | Benchmarks | 207 |
@@ -138,7 +193,7 @@ See [Getting Started](docs/getting-started.md) for a step-by-step tutorial and [
 ### Coverage by package
 
 | Package | Tests | Coverage | Benchmarks |
-|---------|------:|:--------:|-----------:|
+|---|---:|:---:|---:|
 | adaptx | 56 | 91.6% | 2 |
 | bulkx | 37 | 98.3% | 4 |
 | busx | 39 | 94.6% | 9 |
@@ -171,52 +226,7 @@ See [Getting Started](docs/getting-started.md) for a step-by-step tutorial and [
 | validx | 67 | 100.0% | 11 |
 | warmupx | 56 | 97.6% | 7 |
 
-## Controller pattern
-
-Seven packages pass an **execution controller** into the callback — an interface that exposes execution state and, where applicable, lets the function influence the wrapper's behavior.
-
-```text
-Execute/Do  ──creates──▶  private struct
-                               │
-                          satisfies
-                               │
-                          public interface  ──passed to──▶  user fn
-                               │                              │
-                          read methods ◀──────────────────────┘
-                          write methods ◀─────────────────────┘
-```
-
-Read methods return execution state (attempt number, failure count, current limit). Write methods change wrapper behavior (abort retry, skip failure recording, exclude sample).
-
-| Controller | Package | Read | Write |
-|------------|---------|------|-------|
-| `RetryController` | retryx | `Number()` | `Abort()` |
-| `CircuitController` | circuitx | `State()`, `Failures()` | `SkipFailure()` |
-| `BulkController` | bulkx | `Active()`, `MaxConcurrent()`, `WaitedSlot()` | — |
-| `ShedController` | shedx | `Priority()`, `Load()`, `InFlight()` | — |
-| `AdaptController` | adaptx | `Limit()`, `InFlight()`, `Algorithm()` | `SkipSample()` |
-| `HedgeController` | hedgex | `Attempt()`, `IsHedge()` | — |
-| `JobController` | cronx | `RunNumber()`, `LastRunTime()` | `Abort()`, `Reschedule()`, `SkipError()` |
-
-The wrapper passes a private implementation as a public interface. The callback only sees the interface surface — no access to internal state.
-
-## Error model
-
-All packages return `*errx.Error`, providing consistent error inspection and propagation:
-
-```go
-type Error struct {
-    Domain   string       // "BULK", "CIRCUIT", "RETRY", ...
-    Code     string       // "TIMEOUT", "OPEN", "EXHAUSTED", ...
-    Message  string       // Human-readable description
-    Cause    error        // Wrapped underlying error
-    Meta     map[string]string  // Structured metadata
-    Severity Severity     // Debug, Info, Warn, Error
-    Retry    RetryHint    // Safe, Unsafe, Unknown
-}
-```
-
-Errors are inspectable via `errors.As`, serializable to JSON, and integrate with `slog` via the `LogValue()` method.
+---
 
 ## When to use URX (and when not to)
 
@@ -273,7 +283,7 @@ urx/
 Packages under development, following URX conventions (generic API, `errx.Error`, `context.Context`, minimal dependencies):
 
 | Package | Description | Status |
-|---------|-------------|--------|
+|---|---|---|
 | **metricx** | Generic metrics collector (Counter, Gauge, Histogram, Timer, Summary, Rate, Statistics) with pluggable exporters (Prometheus, StatsD, InfluxDB) | Planned |
 | **tracex** | Lightweight span builder on top of `ctxx` with duration tracking and structured export | Planned |
 
