@@ -21,6 +21,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Generate` panics on unsupported `Algorithm` value instead of silently falling back to Argon2id (fail-fast for programmer error).
 - `WithBcryptCost` panics on out-of-range cost instead of silently ignoring the value.
 
+### Fixed (i18n)
+
+- `processDictionaries` now creates the language folder with `0755` permissions (was `0777`).
+- Fixed internal `setLanguage` godoc (claimed "returns the previous one", actually returns the resulting locale).
+- Renamed internal `clearCacheLocked` to `resetCache` (the function does not require the caller to hold a lock).
+- Removed dead code from `BenchmarkTranslateError_PlainError`.
+- Replaced custom `contains`/`containsSubstring` test helpers with `strings.Contains`.
+
 ### Tests (lrux)
 
 - 139 tests (was 136), 98.8% coverage.

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -809,7 +810,7 @@ func TestInit_AutoSync_DevMode(t *testing.T) {
 		t.Fatal(err)
 	}
 	content := string(data)
-	if !contains(content, "B:") {
+	if !strings.Contains(content, "B:") {
 		t.Error("auto-sync should have added missing anchor B to en.yaml in DevMode")
 	}
 }
@@ -835,19 +836,6 @@ func TestInit_NoAutoSync_WithoutDevMode(t *testing.T) {
 	if !bytes.Equal(srcData, dstData) {
 		t.Error("Init without DevMode should not modify YAML files on disk")
 	}
-}
-
-func contains(s, sub string) bool {
-	return len(s) >= len(sub) && (s == sub || len(s) > 0 && containsSubstring(s, sub))
-}
-
-func containsSubstring(s, sub string) bool {
-	for i := 0; i <= len(s)-len(sub); i++ {
-		if s[i:i+len(sub)] == sub {
-			return true
-		}
-	}
-	return false
 }
 
 // --- formatString ---

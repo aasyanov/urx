@@ -114,14 +114,9 @@ func BenchmarkTranslateError_Fallback(b *testing.B) {
 
 func BenchmarkTranslateError_PlainError(b *testing.B) {
 	tr := setupBench(b)
-	err := errx.Wrap(nil, "X", "Y", "z")
-	if err != nil {
-		b.Fatal("expected nil")
-	}
-	plain := os.ErrNotExist
 	b.ResetTimer()
 	for b.Loop() {
-		_ = tr.TranslateError("en", plain)
+		_ = tr.TranslateError("en", os.ErrNotExist)
 	}
 }
 

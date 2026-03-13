@@ -80,7 +80,7 @@ func (t *Translator) Init(opts ...Option) []error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	t.clearCacheLocked()
+	t.resetCache()
 
 	t.dict = make(map[Locale]map[Anchor]Phrase)
 	t.dict[DefaultLang] = make(map[Anchor]Phrase)
@@ -111,7 +111,7 @@ func (t *Translator) Reload(opts ...Option) []error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	t.clearCacheLocked()
+	t.resetCache()
 
 	t.dict = make(map[Locale]map[Anchor]Phrase)
 	t.dict[DefaultLang] = make(map[Anchor]Phrase)
@@ -332,10 +332,10 @@ func (t *Translator) Stats() Stats {
 
 // ClearCache invalidates the translation cache. Thread-safe.
 func (t *Translator) ClearCache() {
-	t.clearCacheLocked()
+	t.resetCache()
 }
 
-func (t *Translator) clearCacheLocked() {
+func (t *Translator) resetCache() {
 	t.cache.Range(func(key, _ any) bool {
 		t.cache.Delete(key)
 		return true
@@ -364,7 +364,7 @@ func (t *Translator) saveDefault(folder, name, ext string) error {
 	return os.WriteFile(path, blob, 0644)
 }
 
-// setLanguage switches the active language and returns the previous one.
+// setLanguage switches the active language and returns the resulting locale.
 func (t *Translator) setLanguage(required Locale) Locale {
 	if slices.Contains(t.langs, required) {
 		t.lang = required
@@ -379,7 +379,7 @@ func (t *Translator) processDictionaries(c *config) (errs []error) {
 	t.dir = c.folder
 	t.ext = c.fileExt
 
-	if err := os.MkdirAll(t.dir, 0777); err != nil {
+	if err := os.MkdirAll(t.dir, 0755); err != nil {
 		errs = append(errs, err)
 	}
 

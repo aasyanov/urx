@@ -6,7 +6,11 @@
 
 Composable infrastructure primitives for Go — 31 packages with no framework runtime or central dependency.
 
-*A personal engineering toolkit, built for real production systems and shared openly. Use what helps, ignore the rest.*
+*A personal engineering toolkit, built for real production systems and shared openly. AI-assisted auditing helped systematize, test, and document a large private collection — and catch subtle bugs that never surfaced in practice. If you find an issue, please open one — contributions and reports are welcome. Use what helps, ignore the rest.*
+
+```
+go get github.com/aasyanov/urx
+```
 
 ## Motivation
 
@@ -214,6 +218,56 @@ type Error struct {
 
 Errors are inspectable via `errors.As`, serializable to JSON, and integrate with `slog` via the `LogValue()` method.
 
+## When to use URX (and when not to)
+
+**Good fit**: production Go services where you need retry logic, circuit breaking, rate limiting, structured errors, config loading, or concurrency control — and you want consistent conventions across all of these without pulling in a framework.
+
+**Not needed**: small scripts, CLI tools with no resilience requirements, or projects that already use a framework covering the same concerns. If your service handles a few hundred requests per second and never retries anything, the standard library is sufficient.
+
+**Adopt incrementally**: each package is self-contained. You can `go get` the whole module and import only `retryx`, or only `errx`, or only `lrux`. There is no "install URX" step — pick the packages you need and ignore the rest.
+
+## Project layout
+
+```text
+urx/
+├── pkg/
+│   ├── adaptx/    # Adaptive concurrency (AIMD, Vegas, Gradient)
+│   ├── bulkx/     # Bulkhead concurrency limiter
+│   ├── busx/      # In-process event bus
+│   ├── cfgx/      # Config file loader (YAML, JSON, TOML)
+│   ├── circuitx/  # Circuit breaker
+│   ├── clix/      # CLI flag parser with subcommands
+│   ├── cronx/     # Job scheduler
+│   ├── ctxx/      # Trace/span ID propagation
+│   ├── dicx/      # Dependency injection container
+│   ├── env2x/     # Reflection-based env overlay
+│   ├── envx/      # Typed env binding (generics)
+│   ├── errx/      # Structured errors
+│   ├── fallx/     # Fallback strategies
+│   ├── hashx/     # Password hashing
+│   ├── healthx/   # Health probes
+│   ├── hedgex/    # Hedged requests
+│   ├── i18n/      # Translation engine
+│   ├── logx/      # slog handler with errx integration
+│   ├── lrux/      # LRU cache (generic, sharded)
+│   ├── panix/     # Panic → errx conversion
+│   ├── poolx/     # Worker/object pools
+│   ├── quotax/    # Per-key rate limiting
+│   ├── ratex/     # Token-bucket rate limiter
+│   ├── retryx/    # Retry with backoff
+│   ├── shedx/     # Load shedding
+│   ├── signalx/   # OS signal handling
+│   ├── syncx/     # Lazy[T], concurrent map
+│   ├── testx/     # Failure simulator
+│   ├── toutx/     # Timeout enforcement
+│   ├── validx/    # Validators and fixers
+│   └── warmupx/   # Gradual capacity ramp-up
+├── examples/      # Runnable example programs
+├── docs/          # Getting started guide
+├── llm.md         # LLM reference (for AI-assisted development)
+└── go.mod         # 4 external dependencies
+```
+
 ## Roadmap
 
 Packages under development, following URX conventions (generic API, `errx.Error`, `context.Context`, minimal dependencies):
@@ -225,7 +279,7 @@ Packages under development, following URX conventions (generic API, `errx.Error`
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines
+See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
 ## License
 
