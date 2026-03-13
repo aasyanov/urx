@@ -222,6 +222,26 @@ func TestTTL_NoExpiry(t *testing.T) {
 	}
 }
 
+func TestTTL_OnClosed(t *testing.T) {
+	c := New[string, int](WithCapacity[string, int](10), WithTTL[string, int](time.Hour))
+	c.Set("a", 1)
+	c.Close()
+
+	if d := c.TTL("a"); d != 0 {
+		t.Fatalf("expected 0 on closed cache, got %v", d)
+	}
+}
+
+func TestLen_OnClosed(t *testing.T) {
+	c := New[string, int](WithCapacity[string, int](10))
+	c.Set("a", 1)
+	c.Close()
+
+	if n := c.Len(); n != 0 {
+		t.Fatalf("expected 0 on closed cache, got %d", n)
+	}
+}
+
 func TestTTL_Missing(t *testing.T) {
 	c := New[string, int](WithCapacity[string, int](10))
 	defer c.Close()

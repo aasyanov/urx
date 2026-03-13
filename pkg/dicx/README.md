@@ -4,11 +4,7 @@ Reflection-based dependency injection container with lifecycle management.
 
 ## Philosophy
 
-**One job: wire dependencies.** `dicx` registers constructors, resolves them
-lazily via reflection, and manages singleton/transient lifetimes. `Start`
-eagerly resolves singletons and runs lifecycle hooks; `Stop` tears them down in
-reverse dependency order. It does not provide scoped lifetimes, HTTP middleware,
-or config loading.
+**One job: wire dependencies.** `dicx` registers constructors, resolves them lazily via reflection, and manages singleton/transient lifetimes. `Start` eagerly resolves singletons and runs lifecycle hooks; `Stop` tears them down in reverse dependency order. It does not provide scoped lifetimes, HTTP middleware, or config loading.
 
 ## Quick start
 
@@ -63,24 +59,15 @@ All parameters are resolved recursively from the container.
 
 ## Behavior details
 
-- **Lazy resolution**: `Resolve` instantiates the dependency (and its
-  transitive deps) on first call. Singletons are cached; transients are created
-  fresh each time.
+- **Lazy resolution**: `Resolve` instantiates the dependency (and its transitive deps) on first call. Singletons are cached; transients are created fresh each time.
 
-- **Three-step resolution**: dependency resolution captures provider/cache state
-  under lock, executes constructors outside lock, and commits singleton cache
-  under lock. This avoids global-lock deadlocks around user code.
+- **Three-step resolution**: dependency resolution captures provider/cache state under lock, executes constructors outside lock, and commits singleton cache under lock. This avoids global-lock deadlocks around user code.
 
-- **Start / Stop**: `Start(ctx)` freezes the container (`Provide` is rejected),
-  resolves all singletons, then calls `Start(ctx)` on each component that
-  implements `Starter` in dependency order. `Stop(ctx)` calls `Stop(ctx)` on
-  singleton `Stopper`s in reverse dependency order and aggregates errors.
+- **Start / Stop**: `Start(ctx)` freezes the container (`Provide` is rejected), resolves all singletons, then calls `Start(ctx)` on each component that implements `Starter` in dependency order. `Stop(ctx)` calls `Stop(ctx)` on singleton `Stopper`s in reverse dependency order and aggregates errors.
 
-- **Cycle detection**: `Resolve` tracks the resolution chain. If a cycle is
-  detected (`A → B → A`), it returns `CodeCyclicDep` with the cycle path.
+- **Cycle detection**: `Resolve` tracks the resolution chain. If a cycle is detected (`A → B → A`), it returns `CodeCyclicDep` with the cycle path.
 
-- **Panic recovery**: constructor calls are wrapped by `panix.Safe`. A
-  panicking constructor is wrapped as `CodeConstructorFailed`.
+- **Panic recovery**: constructor calls are wrapped by `panix.Safe`. A panicking constructor is wrapped as `CodeConstructorFailed`.
 
 ## Error diagnostics
 
@@ -108,16 +95,13 @@ DI.CYCLIC_DEP: cyclic dependency detected | meta: cycle=A -> B -> A
 ## Thread safety
 
 - `Provide` is guarded by `sync.RWMutex` and rejected after `Start` begins
-- `Resolve` / `MustResolve` are concurrent-safe; singleton instantiation is
-  deduplicated with in-flight tracking
-- Constructor execution and lifecycle hooks run outside the global container
-  lock to avoid lock contention and deadlocks
+- `Resolve` / `MustResolve` are concurrent-safe; singleton instantiation is deduplicated with in-flight tracking
+- Constructor execution and lifecycle hooks run outside the global container lock to avoid lock contention and deadlocks
 - `Start` / `Stop` serialize container state transitions
 
 ## Tests
 
-Comprehensive unit tests cover constructor validation, resolve paths, cycle
-detection, lifecycle orchestration, panic handling, and concurrent resolve.
+Comprehensive unit tests cover constructor validation, resolve paths, cycle detection, lifecycle orchestration, panic handling, and concurrent resolve.
 
 ```bash
 go test -race -count=1 ./...
@@ -136,8 +120,7 @@ Test coverage includes:
 
 ## Benchmarks
 
-Environment: `go1.24.0 windows/amd64`, Intel Core i7-10510U @ 1.80 GHz.
-The table below reflects a recent run (`-count=1`).
+Environment: `go1.24.0 windows/amd64`, Intel Core i7-10510U @ 1.80 GHz. The table below reflects a recent run (`-count=1`).
 
 ```text
 BenchmarkProvide                          ~538 ns/op      513 B/op      7 allocs/op

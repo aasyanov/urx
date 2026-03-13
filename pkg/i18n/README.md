@@ -1,15 +1,10 @@
 # i18n
 
-File-based internationalization with YAML dictionaries, anchor-based lookups,
-`errx` error translation, and per-string caching.
+File-based internationalization with YAML dictionaries, anchor-based lookups, `errx` error translation, and per-string caching.
 
 ## Philosophy
 
-**One job: translate strings.** `i18n` loads YAML dictionary files, resolves
-anchors by dot-separated keys, formats arguments with `fmt.Sprintf`, and caches
-results. `TranslateError` bridges `errx.Error` to user-facing messages. It does
-not manage locales per request, handle pluralization rules, or generate
-translation files.
+**One job: translate strings.** `i18n` loads YAML dictionary files, resolves anchors by dot-separated keys, formats arguments with `fmt.Sprintf`, and caches results. `TranslateError` bridges `errx.Error` to user-facing messages. It does not manage locales per request, handle pluralization rules, or generate translation files.
 
 ## Quick start
 
@@ -108,35 +103,19 @@ msg := i18n.T("GREETING")
 
 ## Behavior details
 
-- **Dictionary loading**: `Init` scans the folder for `*<ext>` files. Each file
-  is named by language tag (`en.yaml`, `ru.yaml`). The default-language file
-  (`ru.yaml`) is skipped — its phrases come from `NewPhrase` registrations.
-  Files starting with `_` and subdirectories are skipped.
+- **Dictionary loading**: `Init` scans the folder for `*<ext>` files. Each file is named by language tag (`en.yaml`, `ru.yaml`). The default-language file (`ru.yaml`) is skipped — its phrases come from `NewPhrase` registrations. Files starting with `_` and subdirectories are skipped.
 
-- **Anchor resolution**: `T("GREETING")` looks up the anchor in the current
-  language dictionary, falls back to the default language if the language is
-  missing, and returns the anchor name as-is if no translation exists anywhere.
+- **Anchor resolution**: `T("GREETING")` looks up the anchor in the current language dictionary, falls back to the default language if the language is missing, and returns the anchor name as-is if no translation exists anywhere.
 
-- **Formatting**: when `args` are provided, `fmt.Sprintf` is applied. If an
-  argument is of type `Anchor`, it is recursively translated first.
+- **Formatting**: when `args` are provided, `fmt.Sprintf` is applied. If an argument is of type `Anchor`, it is recursively translated first.
 
-- **Caching**: translations **without arguments** are cached per
-  `(language, anchor)` in a `sync.Map`. Translations with arguments bypass the
-  cache (each call runs `fmt.Sprintf`). `ClearCache` resets the cache.
-  `Init` and `Reload` also clear it.
+- **Caching**: translations **without arguments** are cached per `(language, anchor)` in a `sync.Map`. Translations with arguments bypass the cache (each call runs `fmt.Sprintf`). `ClearCache` resets the cache. `Init` and `Reload` also clear it.
 
-- **TranslateError**: for `*errx.Error`, builds an anchor as `Domain + "." + Code`
-  (e.g. `AUTH.UNAUTHORIZED`) and looks it up. Falls back to `errx.Error.Message`
-  if no translation exists. For plain `error` returns `err.Error()`. Nil returns `""`.
+- **TranslateError**: for `*errx.Error`, builds an anchor as `Domain + "." + Code` (e.g. `AUTH.UNAUTHORIZED`) and looks it up. Falls back to `errx.Error.Message` if no translation exists. For plain `error` returns `err.Error()`. Nil returns `""`.
 
-- **Phrase registry freeze**: after `Init`, `NewPhrase` becomes a no-op. Only the
-  first phrase per anchor is stored; duplicates are tracked for DevMode detection.
+- **Phrase registry freeze**: after `Init`, `NewPhrase` becomes a no-op. Only the first phrase per anchor is stored; duplicates are tracked for DevMode detection.
 
-- **DevMode auto-sync**: when `WithDevMode()` is set, `Init`/`Reload` synchronise
-  YAML files on disk — missing anchors are added with default-language values,
-  stale anchors are removed. A `_duplicates.yaml` report is written when the same
-  phrase maps to multiple anchors or vice versa. **Without DevMode, files are
-  read-only** — no disk writes occur during Init/Reload.
+- **DevMode auto-sync**: when `WithDevMode()` is set, `Init`/`Reload` synchronise YAML files on disk — missing anchors are added with default-language values, stale anchors are removed. A `_duplicates.yaml` report is written when the same phrase maps to multiple anchors or vice versa. **Without DevMode, files are read-only** — no disk writes occur during Init/Reload.
 
 - **Fallback chain**: target language → default language → anchor name as-is.
 
@@ -186,8 +165,7 @@ Coverage includes:
 
 ## Benchmarks
 
-Environment: `go1.24.0 windows/amd64`, Intel Core i7-10510U @ 1.80 GHz.
-Each benchmark was run 3 times (`-count=3`); the table shows median values.
+Environment: `go1.24.0 windows/amd64`, Intel Core i7-10510U @ 1.80 GHz. Each benchmark was run 3 times (`-count=3`); the table shows median values.
 
 ```text
 BenchmarkT_Cached                      ~61 ns/op       0 B/op     0 allocs/op

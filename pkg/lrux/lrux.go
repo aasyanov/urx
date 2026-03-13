@@ -257,6 +257,9 @@ func (c *LRU[K, V]) Clear() {
 // Len returns the number of entries in the cache, including expired entries
 // that have not yet been cleaned up.
 func (c *LRU[K, V]) Len() int {
+	if c.closed.Load() {
+		return 0
+	}
 	c.mu.RLock()
 	n := c.len
 	c.mu.RUnlock()
@@ -267,6 +270,9 @@ func (c *LRU[K, V]) Len() int {
 // Returns 0 if the key does not exist or is expired.
 // Returns -1 if the key has no expiration.
 func (c *LRU[K, V]) TTL(key K) time.Duration {
+	if c.closed.Load() {
+		return 0
+	}
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 

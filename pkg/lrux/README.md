@@ -1,15 +1,10 @@
 # lrux
 
-Generic, thread-safe LRU cache with TTL, sharding, eviction callbacks,
-singleflight, and batch operations.
+Generic, thread-safe LRU cache with TTL, sharding, eviction callbacks, singleflight, and batch operations.
 
 ## Philosophy
 
-**One job: in-memory caching.** `lrux` provides `LRU[K, V]` (single-lock cache)
-and `ShardedLRU[K, V]` (partitioned for high-concurrency). Both support TTL,
-eviction callbacks, `GetOrCompute` with optional singleflight dedup, and bulk
-operations. They do not persist to disk, distribute across nodes, or manage
-external cache systems.
+**One job: in-memory caching.** `lrux` provides `LRU[K, V]` (single-lock cache) and `ShardedLRU[K, V]` (partitioned for high-concurrency). Both support TTL, eviction callbacks, `GetOrCompute` with optional singleflight dedup, and bulk operations. They do not persist to disk, distribute across nodes, or manage external cache systems.
 
 ## Quick start
 
@@ -116,42 +111,21 @@ defer sc.Close()
 
 ## Behavior details
 
-- **LRU ordering**: `Get` promotes the entry to the front of the intrusive
-  doubly-linked list. `Peek` reads without promotion (uses read lock).
-  When capacity is exceeded, the tail (least recently used) entry is evicted.
+- **LRU ordering**: `Get` promotes the entry to the front of the intrusive doubly-linked list. `Peek` reads without promotion (uses read lock). When capacity is exceeded, the tail (least recently used) entry is evicted.
 
-- **Intrusive list**: each `node[K, V]` embeds `prev`/`next` pointers directly,
-  avoiding wrapper allocations. `Set` on a non-full cache is 0 allocs.
+- **Intrusive list**: each `node[K, V]` embeds `prev`/`next` pointers directly, avoiding wrapper allocations. `Set` on a non-full cache is 0 allocs.
 
-- **TTL**: entries have an optional expiration time. Expired entries are removed
-  lazily on `Get` / `Keys` / `Values` / `Range`, or eagerly via `ExpireOld` /
-  background cleanup goroutine (`WithCleanupInterval`).
+- **TTL**: entries have an optional expiration time. Expired entries are removed lazily on `Get` / `Keys` / `Values` / `Range`, or eagerly via `ExpireOld` / background cleanup goroutine (`WithCleanupInterval`).
 
-- **GetOrCompute**: if the key is missing or expired, calls the compute function,
-  caches the result, and returns it. Uses double-checked locking: checks after
-  acquiring lock (before compute) and again after compute (before store) to
-  handle concurrent writes. With `WithSingleflight()`, concurrent calls for the
-  same key share a single compute via `singleflight.Group`. Singleflight uses
-  `keyToString` internally — fast-path for `string`, `int`, `int64`, `uint64`;
-  falls back to `fmt.Sprint` for other key types (one allocation per call).
+- **GetOrCompute**: if the key is missing or expired, calls the compute function, caches the result, and returns it. Uses double-checked locking: checks after acquiring lock (before compute) and again after compute (before store) to handle concurrent writes. With `WithSingleflight()`, concurrent calls for the same key share a single compute via `singleflight.Group`. Singleflight uses `keyToString` internally — fast-path for `string`, `int`, `int64`, `uint64`; falls back to `fmt.Sprint` for other key types (one allocation per call).
 
-- **Sharding**: `ShardedLRU` partitions keys by `maphash.Hash` across N
-  independent LRU instances (N rounded up to power of 2, bitmask routing).
-  Reduces lock contention under high concurrency.
+- **Sharding**: `ShardedLRU` partitions keys by `maphash.Hash` across N independent LRU instances (N rounded up to power of 2, bitmask routing). Reduces lock contention under high concurrency.
 
-- **Eviction callbacks**: `WithOnEvict` is called outside the lock for every
-  evicted entry, with the eviction reason. Panics in callbacks are recovered
-  silently to protect the cache.
+- **Eviction callbacks**: `WithOnEvict` is called outside the lock for every evicted entry, with the eviction reason. Panics in callbacks are recovered silently to protect the cache.
 
-- **Panic recovery**: eviction callbacks and compute functions are wrapped with
-  `defer`-based recovery. If a compute function panics, the zero value is
-  returned. Panics are recovered silently — logging is the caller's
-  responsibility (wrap callbacks with `panix.Safe` if observability is needed).
-  This follows the urx convention that no package writes to `slog` directly.
+- **Panic recovery**: eviction callbacks and compute functions are wrapped with `defer`-based recovery. If a compute function panics, the zero value is returned. Panics are recovered silently — logging is the caller's responsibility (wrap callbacks with `panix.Safe` if observability is needed). This follows the urx convention that no package writes to `slog` directly.
 
-- **Batch operations**: `SetMulti`, `GetMulti`, `DeleteMulti` operate under a
-  single lock acquisition on `LRU`. On `ShardedLRU`, batches >=64 items are
-  split by shard and dispatched in parallel via goroutines.
+- **Batch operations**: `SetMulti`, `GetMulti`, `DeleteMulti` operate under a single lock acquisition on `LRU`. On `ShardedLRU`, batches >=64 items are split by shard and dispatched in parallel via goroutines.
 
 ## Thread safety
 
@@ -191,8 +165,7 @@ Coverage includes:
 
 ## Benchmarks
 
-Environment: `go1.24.0 windows/amd64`, Intel Core i7-10510U @ 1.80 GHz.
-Each benchmark was run 3 times (`-count=3`); the table shows median values.
+Environment: `go1.24.0 windows/amd64`, Intel Core i7-10510U @ 1.80 GHz. Each benchmark was run 3 times (`-count=3`); the table shows median values.
 
 ### LRU (single-lock)
 
@@ -246,9 +219,7 @@ BenchmarkSharded_ParallelScaling/16     ~180 ns/op
 
 ### Analysis
 
-**LRU Set:** ~134 ns, 0 allocs. Mutex lock + intrusive list insert + map store.
-Zero allocations for updates (node reused) and for new inserts within capacity
-(node allocated on heap, amortized by Go runtime).
+**LRU Set:** ~134 ns, 0 allocs. Mutex lock + intrusive list insert + map store. Zero allocations for updates (node reused) and for new inserts within capacity (node allocated on heap, amortized by Go runtime).
 
 **LRU Get (hit):** ~89 ns, 0 allocs. Mutex lock + map lookup + list promotion + `accessedAt` update.
 
@@ -260,7 +231,7 @@ Zero allocations for updates (node reused) and for new inserts within capacity
 
 **Parallel scaling (LRU):** degrades from ~197 ns (1 goroutine) to ~364 ns (16 goroutines). Single mutex becomes a bottleneck.
 
-**Parallel scaling (Sharded):** stays at ~170-180 ns from 1 to 16 goroutines. Sharding eliminates the bottleneck.
+**Parallel scaling (Sharded):** stays at ~170–180 ns from 1 to 16 goroutines. Sharding eliminates the bottleneck.
 
 ### Performance summary
 
