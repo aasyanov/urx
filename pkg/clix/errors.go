@@ -63,6 +63,16 @@ const (
 //	}
 var ErrHelp = errors.New("clix: help requested") //nolint:forbidigo // sentinel error
 
+// ErrVersion is the sentinel returned by [Parser.Err] when --version or -V
+// is encountered and [Version] was set. Callers should test with [errors.Is]
+// and print [Parser.Version]:
+//
+//	if errors.Is(p.Err(), clix.ErrVersion) {
+//	    fmt.Println(p.Version())
+//	    os.Exit(0)
+//	}
+var ErrVersion = errors.New("clix: version requested") //nolint:forbidigo // sentinel error
+
 // --- Error constructors ---
 
 // errUnknownCommand builds a structured error for a positional token that

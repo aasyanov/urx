@@ -540,14 +540,59 @@ import "github.com/aasyanov/urx/pkg/clix"
 
 p := clix.New(os.Args[1:], "myapp", "description",
     clix.AddFlag(&port, "port", "p", 8080, "listen port"),
-    clix.AddFlag(&host, "host", "h", "0.0.0.0", "bind address"),
+    clix.AddFlag(&host, "host", "H", "0.0.0.0", "bind address"),
     clix.AddFlag(&level, "level", "l", "info", "log level", clix.Enum("debug","info","warn","error")),
+    clix.AddFlag(&name, "name", "n", "", "user name", clix.Required()),
+    clix.Version("1.0.0"),
     clix.SubCommand("migrate", "run migrations",
+        clix.Alias("m"),
         clix.Run(func(c *clix.Context) error { return runMigrations() }),
     ),
 )
-if err := p.Err(); err != nil { ... }
+
+// Handle sentinels first
+if errors.Is(p.Err(), clix.ErrHelp) {
+    fmt.Println(p.Help())  // help for whichever command was matched
+    os.Exit(0)
+}
+if errors.Is(p.Err(), clix.ErrVersion) {
+    fmt.Println(p.Version())
+    os.Exit(0)
+}
+if err := p.Err(); err != nil {
+    fmt.Fprintln(os.Stderr, err) // structured *errx.Error
+    os.Exit(1)
+}
+if err := p.Run(); err != nil { // execute the matched action
+    fmt.Fprintln(os.Stderr, err)
+    os.Exit(1)
+}
+
+// Key API:
+// New(osArgs, name, desc, opts...) *Parser — parse only, does NOT execute action
+// p.Err() error          — parse error, ErrHelp, or ErrVersion
+// p.Help() string        — help for matched command (works at any nesting level)
+// p.Version() string     — version string set via Version()
+// p.Run() error          — execute matched action (separate from parsing)
+// AddFlag[T]             — string, int, float64, bool, time.Duration, time.Time
+// Required()             — mark flag as mandatory
+// Enum(vals...)          — restrict flag to allowed values
+// SubCommand(name, desc) — nested subcommand
+// Alias(names...)        — alternative names for a subcommand
+// Version(v)             — enable --version / -V
+// Run(fn Action)         — set command action (one per command, duplicate panics)
+// Context.Args()         — positional args (including after --)
+// Context.Command()      — matched command node
+// Context.Parser()       — parser (for help access from within action)
+//
+// Flag syntax: --port 8080, -p 8080, --port=8080, -p=8080
+// POSIX grouped short flags: -vdq, -vp 3000, -vp3000
+// Bool negation: --no-verbose
+// Flag inheritance: parent flags visible in subcommands
+// -h inside POSIX groups triggers help: -vh → ErrHelp
+//
 // Errors: CLI.UNKNOWN_FLAG, CLI.UNKNOWN_COMMAND, CLI.MISSING_VALUE, CLI.INVALID_VALUE, CLI.REQUIRED, CLI.ENUM_VIOLATED
+// Sentinels: ErrHelp (--help/-h), ErrVersion (--version/-V when Version() set)
 ```
 
 ### validx — Validators and fixers

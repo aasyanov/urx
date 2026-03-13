@@ -36,6 +36,9 @@ func BenchmarkNew_SubCommand(b *testing.B) {
 		if p.Err() != nil {
 			b.Fatal(p.Err())
 		}
+		if err := p.Run(); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 

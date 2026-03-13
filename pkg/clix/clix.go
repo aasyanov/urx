@@ -28,6 +28,10 @@
 //	    fmt.Fprintln(os.Stderr, err)
 //	    os.Exit(1)
 //	}
+//	if err := p.Run(); err != nil {
+//	    fmt.Fprintln(os.Stderr, err)
+//	    os.Exit(1)
+//	}
 //
 // # Flag types
 //
@@ -78,6 +82,36 @@
 // [Enum] values must match the flag type at construction time; a type
 // mismatch causes a panic.
 //
+// # Subcommand aliases
+//
+// [SubCommand] can take an [Alias] option to register alternative names:
+//
+//	clix.SubCommand("extract", "extract data",
+//	    clix.Alias("x"),
+//	    clix.Run(extractAction),
+//	)
+//	// Both "app extract" and "app x" match.
+//
+// # Version
+//
+// Pass [Version] to [New] to enable automatic --version / -V handling:
+//
+//	p := clix.New(os.Args[1:], "myapp", "my tool",
+//	    clix.Version("1.2.3"),
+//	)
+//
+// # Parse / Run separation
+//
+// [New] builds the command tree and parses arguments but does NOT execute
+// the matched action. Call [Parser.Run] explicitly to execute:
+//
+//	p := clix.New(os.Args[1:], "app", "desc", ...)
+//	if err := p.Err(); err != nil { ... }  // check parse errors
+//	if err := p.Run(); err != nil { ... }  // execute the action
+//
+// This separation allows callers to inspect parse results, add middleware,
+// or skip execution in tests.
+//
 // # Unknown command detection
 //
 // If a command has registered subcommands but no [Action], any unrecognised
@@ -92,20 +126,21 @@
 // [CodeMissingValue], [CodeInvalidValue], [CodeRequired],
 // [CodeEnumViolated]). Callers can switch on the code for programmatic
 // handling. The special sentinel [ErrHelp] is returned for --help / -h.
+// [ErrVersion] is returned for --version / -V.
 //
 // # Fail-fast panics
 //
 // Programming mistakes are caught at construction time via panics:
 // duplicate flag names or short aliases, duplicate subcommand names,
-// unsupported flag types, and enum type mismatches. These fire on the
-// very first run, making misconfiguration impossible to ship.
+// duplicate [Run] on the same command, unsupported flag types, and enum
+// type mismatches. These fire on the very first run, making
+// misconfiguration impossible to ship.
 //
 // # Help output
 //
 // [Parser.Help] returns a formatted string with USAGE, COMMANDS, FLAGS,
 // and GLOBAL FLAGS sections. It is generated for whichever command was
-// matched (or root if none).
-//
+// matched (or root if none). Column widths adapt to the actual content.
 package clix
 
 import (
@@ -150,8 +185,8 @@ func (c *Context) Command() *Command { return c.command }
 func (c *Context) Parser() *Parser { return c.parser }
 
 // Option configures a [Command] during construction. The built-in options
-// are [AddFlag], [SubCommand], and [Run]. Options compose: they can be
-// nested inside [SubCommand] to build arbitrarily deep command trees.
+// are [AddFlag], [SubCommand], [Run], and [Alias]. Options compose: they
+// can be nested inside [SubCommand] to build arbitrarily deep command trees.
 type Option func(*Command)
 
 // Command represents a node in the CLI command tree. Each command has its
@@ -165,7 +200,10 @@ type Command struct {
 	flags       []*flagMeta
 	subcommands map[string]*Command
 	subOrder    []string
+	aliases     []string
 	action      Action
+	hasAction   bool
+	version     string
 	flagMap     map[string]*flagMeta
 	shortMap    map[string]string
 	args        []string
@@ -196,22 +234,26 @@ type flagMeta struct {
 }
 
 // Parser holds the result of parsing a command line. Create one with [New],
-// then check [Parser.Err] for errors and [Parser.Help] for the formatted
-// help string of the matched command.
+// then check [Parser.Err] for parse errors, [Parser.Help] for the formatted
+// help string, and [Parser.Run] to execute the matched action.
 type Parser struct {
 	root     *Command
 	matched  *Command
+	version  string
 	parseErr error
 }
 
 // --- Constructor ---
 
 // New builds the command tree from opts, parses osArgs, and returns a
-// ready-to-use [Parser]. Parsing and action execution happen synchronously
-// inside New — when it returns, the entire parse is complete.
+// [Parser]. Parsing happens synchronously inside New but the matched
+// action is NOT executed — call [Parser.Run] to run it.
 //
 // If --help or -h is encountered at any level, [Parser.Err] returns
 // [ErrHelp] and [Parser.Help] returns the help text for that level.
+//
+// If --version or -V is encountered and [Version] was provided,
+// [Parser.Err] returns [ErrVersion].
 //
 // All parse errors are [*errx.Error] values with domain [DomainCLI].
 // Use [errors.As] to extract them for programmatic handling.
@@ -221,15 +263,15 @@ func New(osArgs []string, name, desc string, opts ...Option) *Parser {
 		opt(root)
 	}
 
-	p := &Parser{root: root, matched: root}
-	p.parseErr = runParser(root, osArgs, p)
+	p := &Parser{root: root, matched: root, version: root.version}
+	p.parseErr = parseArgs(root, osArgs, p)
 	return p
 }
 
-// Err returns the first error encountered during parsing or action execution,
-// or nil when everything succeeded. Returns [ErrHelp] when --help / -h was
-// encountered — use [errors.Is](err, [ErrHelp]) to distinguish help requests
-// from real errors.
+// Err returns the first error encountered during parsing, or nil when
+// parsing succeeded. Returns [ErrHelp] when --help / -h was encountered
+// and [ErrVersion] when --version / -V was encountered — use
+// [errors.Is] to distinguish them from real errors.
 func (p *Parser) Err() error { return p.parseErr }
 
 // Help returns the formatted help string for whichever command was matched
@@ -237,6 +279,23 @@ func (p *Parser) Err() error { return p.parseErr }
 // The output includes USAGE, COMMANDS, FLAGS, and GLOBAL FLAGS sections
 // as applicable.
 func (p *Parser) Help() string { return p.matched.help() }
+
+// Version returns the version string set via [Version], or "" if none.
+func (p *Parser) Version() string { return p.version }
+
+// Run executes the matched command's action. Returns nil if no action was
+// registered or if parsing failed (check [Parser.Err] first). This method
+// is separate from [New] so callers can inspect parse results, add
+// middleware, or skip execution in tests.
+func (p *Parser) Run() error {
+	if p.parseErr != nil {
+		return nil
+	}
+	if p.matched.action != nil {
+		return p.matched.action(&Context{command: p.matched, parser: p})
+	}
+	return nil
+}
 
 // --- Declarative options ---
 
@@ -258,14 +317,47 @@ func SubCommand(name, desc string, opts ...Option) Option {
 		}
 		parent.subcommands[name] = child
 		parent.subOrder = append(parent.subOrder, name)
+
+		for _, alias := range child.aliases {
+			if _, dup := parent.subcommands[alias]; dup {
+				panic(fmt.Sprintf("clix: duplicate subcommand/alias %q", alias))
+			}
+			parent.subcommands[alias] = child
+		}
 	}
 }
 
-// Run sets the [Action] that is executed when the command is matched. Only
-// one action per command is meaningful — a second Run overwrites the first.
-// If an action returns a non-nil error, that error becomes [Parser.Err].
+// Run sets the [Action] that is executed when the command is matched.
+// Only one Run per command is allowed — a second Run panics.
 func Run(fn Action) Option {
-	return func(c *Command) { c.action = fn }
+	return func(c *Command) {
+		if c.hasAction {
+			panic(fmt.Sprintf("clix: duplicate Run on command %q", c.name))
+		}
+		c.action = fn
+		c.hasAction = true
+	}
+}
+
+// Alias registers alternative names for a subcommand. Aliases are resolved
+// the same way as the primary name. Pass as an option to [SubCommand]:
+//
+//	clix.SubCommand("extract", "extract data",
+//	    clix.Alias("x", "ex"),
+//	)
+func Alias(names ...string) Option {
+	return func(c *Command) {
+		c.aliases = append(c.aliases, names...)
+	}
+}
+
+// Version enables --version / -V handling. When the user passes --version
+// or -V, parsing returns [ErrVersion] and [Parser.Version] returns the
+// string. Pass as an option to [New]:
+//
+//	clix.New(os.Args[1:], "myapp", "my tool", clix.Version("1.2.3"))
+func Version(v string) Option {
+	return func(c *Command) { c.version = v }
 }
 
 // AddFlag registers a typed flag on the command and binds it to target.
@@ -357,10 +449,10 @@ func Enum(vals ...any) func(*flagMeta) { return func(f *flagMeta) { f.enumValues
 
 // --- Parse engine ---
 
-// runParser walks the argument list, dispatching to subcommands, resolving
-// flags (including inherited ones and --no-* negation), collecting positional
-// arguments, and finally executing the matched command's action.
-func runParser(cmd *Command, args []string, p *Parser) error {
+// parseArgs walks the argument list, dispatching to subcommands, resolving
+// flags (including inherited ones and --no-* negation), and collecting
+// positional arguments. It does NOT execute the matched action.
+func parseArgs(cmd *Command, args []string, p *Parser) error {
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 
@@ -374,10 +466,15 @@ func runParser(cmd *Command, args []string, p *Parser) error {
 			return ErrHelp
 		}
 
+		if p.version != "" && (arg == "--version" || arg == "-V") {
+			p.matched = cmd
+			return ErrVersion
+		}
+
 		if !strings.HasPrefix(arg, "-") {
 			if sub, ok := cmd.subcommands[arg]; ok {
 				p.matched = sub
-				return runParser(sub, args[i+1:], p)
+				return parseArgs(sub, args[i+1:], p)
 			}
 			if len(cmd.subcommands) > 0 && cmd.action == nil {
 				return errUnknownCommand(arg, cmd.subOrder)
@@ -392,6 +489,10 @@ func runParser(cmd *Command, args []string, p *Parser) error {
 			chars := arg[1:]
 			for ci := 0; ci < len(chars); ci++ {
 				short := string(chars[ci])
+				if short == "h" {
+					p.matched = cmd
+					return ErrHelp
+				}
 				canonical, ok := resolveShort(cmd, short)
 				if !ok {
 					return errUnknownFlag("-" + short)
@@ -406,7 +507,6 @@ func runParser(cmd *Command, args []string, p *Parser) error {
 					}
 					continue
 				}
-				// Non-bool flag: rest of the group or next arg is the value.
 				if ci+1 < len(chars) {
 					if err := meta.setFunc(chars[ci+1:]); err != nil {
 						return err
@@ -485,9 +585,6 @@ func runParser(cmd *Command, args []string, p *Parser) error {
 		}
 	}
 
-	if cmd.action != nil {
-		return cmd.action(&Context{command: cmd, parser: p})
-	}
 	return nil
 }
 
@@ -535,9 +632,22 @@ func (c *Command) help() string {
 
 	if len(c.subcommands) > 0 {
 		b.WriteString("\nCOMMANDS:\n")
+		labels := make([]string, 0, len(c.subOrder))
 		for _, name := range c.subOrder {
 			sub := c.subcommands[name]
-			writeAligned(&b, name, sub.description, 14)
+			label := name
+			if len(sub.aliases) > 0 {
+				label += ", " + strings.Join(sub.aliases, ", ")
+			}
+			labels = append(labels, label)
+		}
+		cmdWidth := maxLen(labels) + 2
+		if cmdWidth < 14 {
+			cmdWidth = 14
+		}
+		for i, name := range c.subOrder {
+			sub := c.subcommands[name]
+			writeAligned(&b, labels[i], sub.description, cmdWidth)
 		}
 	}
 
@@ -557,6 +667,27 @@ func (c *Command) help() string {
 // writeFlagBlock writes a group of flags to b in a three-column layout:
 // flag names, default value, and usage description.
 func writeFlagBlock(b *strings.Builder, flags []*flagMeta) {
+	flagCol := 0
+	defCol := 0
+	for _, f := range flags {
+		w := flagDisplayWidth(f)
+		if w > flagCol {
+			flagCol = w
+		}
+		w = len(formatDefault(f.defValue))
+		if w > defCol {
+			defCol = w
+		}
+	}
+	flagCol += 2
+	if flagCol < 22 {
+		flagCol = 22
+	}
+	defCol += 2
+	if defCol < 10 {
+		defCol = 10
+	}
+
 	for _, f := range flags {
 		flag := "--" + f.name
 		if f.short != "" {
@@ -573,8 +704,16 @@ func writeFlagBlock(b *strings.Builder, flags []*flagMeta) {
 			comment += " (one of: " + fmt.Sprint(f.enumValues) + ")"
 		}
 
-		writePadded(b, flag, td, comment, 22, 18)
+		writePadded(b, flag, td, comment, flagCol, defCol)
 	}
+}
+
+func flagDisplayWidth(f *flagMeta) int {
+	w := 2 + len(f.name) // "--" + name
+	if f.short != "" {
+		w += 3 + len(f.short) // ", -" + short
+	}
+	return w
 }
 
 // writeAligned writes a two-column row (e.g. subcommand + description)
@@ -636,6 +775,17 @@ func formatDefault(v any) string {
 	default:
 		return "[" + fmt.Sprint(d) + "]"
 	}
+}
+
+// maxLen returns the length of the longest string in the slice.
+func maxLen(ss []string) int {
+	m := 0
+	for _, s := range ss {
+		if len(s) > m {
+			m = len(s)
+		}
+	}
+	return m
 }
 
 // --- Utilities ---

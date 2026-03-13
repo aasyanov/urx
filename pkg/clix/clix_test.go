@@ -289,6 +289,9 @@ func TestSubCommand_Dispatch(t *testing.T) {
 	if err := p.Err(); err != nil {
 		t.Fatal(err)
 	}
+	if err := p.Run(); err != nil {
+		t.Fatal(err)
+	}
 	if !ran {
 		t.Fatal("subcommand action did not run")
 	}
@@ -341,6 +344,9 @@ func TestSubCommand_UnknownCommandWithAction(t *testing.T) {
 	if err := p.Err(); err != nil {
 		t.Fatal(err)
 	}
+	if err := p.Run(); err != nil {
+		t.Fatal(err)
+	}
 	if len(args) != 1 || args[0] != "nope" {
 		t.Fatalf("args = %v, want [nope]", args)
 	}
@@ -359,6 +365,9 @@ func TestArgs_Positional(t *testing.T) {
 	if err := p.Err(); err != nil {
 		t.Fatal(err)
 	}
+	if err := p.Run(); err != nil {
+		t.Fatal(err)
+	}
 	if len(args) != 2 || args[0] != "file1.txt" || args[1] != "file2.txt" {
 		t.Fatalf("args = %v, want [file1.txt file2.txt]", args)
 	}
@@ -375,6 +384,9 @@ func TestArgs_DoubleDash(t *testing.T) {
 		}),
 	)
 	if err := p.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Run(); err != nil {
 		t.Fatal(err)
 	}
 	if port != 3000 {
@@ -396,6 +408,9 @@ func TestArgs_DoubleDashNoFlags(t *testing.T) {
 	if err := p.Err(); err != nil {
 		t.Fatal(err)
 	}
+	if err := p.Run(); err != nil {
+		t.Fatal(err)
+	}
 	if len(args) != 2 || args[0] != "a" || args[1] != "b" {
 		t.Fatalf("args = %v, want [a b]", args)
 	}
@@ -412,6 +427,9 @@ func TestArgs_SubCommandPositional(t *testing.T) {
 		),
 	)
 	if err := p.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Run(); err != nil {
 		t.Fatal(err)
 	}
 	if len(args) != 2 || args[0] != "extra1" || args[1] != "extra2" {
@@ -595,6 +613,9 @@ func TestContext_Command(t *testing.T) {
 	if err := p.Err(); err != nil {
 		t.Fatal(err)
 	}
+	if err := p.Run(); err != nil {
+		t.Fatal(err)
+	}
 	if got == nil || got.Name() != "serve" {
 		t.Fatal("expected command name 'serve'")
 	}
@@ -611,6 +632,9 @@ func TestContext_Parser(t *testing.T) {
 		),
 	)
 	if err := p.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Run(); err != nil {
 		t.Fatal(err)
 	}
 	if gotParser != p {
@@ -678,8 +702,12 @@ func TestAction_ReturnsError(t *testing.T) {
 	p := New(nil, "app", "test",
 		Run(func(ctx *Context) error { return sentinel }),
 	)
-	if !errors.Is(p.Err(), sentinel) {
-		t.Fatalf("expected sentinel error, got %v", p.Err())
+	if err := p.Err(); err != nil {
+		t.Fatalf("parse should succeed, got %v", err)
+	}
+	err := p.Run()
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("expected sentinel error, got %v", err)
 	}
 }
 
@@ -694,6 +722,9 @@ func TestNilArgs_WithAction(t *testing.T) {
 		}),
 	)
 	if err := p.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Run(); err != nil {
 		t.Fatal(err)
 	}
 	if !ran {
@@ -1089,6 +1120,9 @@ func TestSubCommand_ThreeLevelsDeep(t *testing.T) {
 	if err := p.Err(); err != nil {
 		t.Fatal(err)
 	}
+	if err := p.Run(); err != nil {
+		t.Fatal(err)
+	}
 	if !ran {
 		t.Fatal("deeply nested action did not run")
 	}
@@ -1112,11 +1146,275 @@ func TestCommand_Parent(t *testing.T) {
 	if err := p.Err(); err != nil {
 		t.Fatal(err)
 	}
+	if err := p.Run(); err != nil {
+		t.Fatal(err)
+	}
 	if got.Parent() == nil {
 		t.Fatal("expected serve to have a parent")
 	}
 	if got.Parent().Name() != "app" {
 		t.Fatalf("parent name = %q, want %q", got.Parent().Name(), "app")
+	}
+}
+
+// --- Parse/Run separation ---
+
+func TestRun_NotCalledOnParseError(t *testing.T) {
+	p := New([]string{"--unknown"}, "app", "test",
+		Run(func(ctx *Context) error {
+			t.Fatal("action should not run on parse error")
+			return nil
+		}),
+	)
+	if p.Err() == nil {
+		t.Fatal("expected parse error")
+	}
+	if err := p.Run(); err != nil {
+		t.Fatalf("Run should return nil on parse error, got %v", err)
+	}
+}
+
+func TestRun_NoAction(t *testing.T) {
+	p := New(nil, "app", "test")
+	if err := p.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Run(); err != nil {
+		t.Fatalf("Run with no action should return nil, got %v", err)
+	}
+}
+
+func TestRun_ParseThenRun(t *testing.T) {
+	var port int
+	var ran bool
+	p := New([]string{"--port", "3000"}, "app", "test",
+		AddFlag(&port, "port", "p", 8080, "port"),
+		Run(func(ctx *Context) error {
+			ran = true
+			return nil
+		}),
+	)
+	if err := p.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if ran {
+		t.Fatal("action should not run during New")
+	}
+	if port != 3000 {
+		t.Fatalf("port = %d, want 3000 (flags should be parsed in New)", port)
+	}
+	if err := p.Run(); err != nil {
+		t.Fatal(err)
+	}
+	if !ran {
+		t.Fatal("action should have run after p.Run()")
+	}
+}
+
+// --- Duplicate Run panics ---
+
+func TestDuplicateRun_Panics(t *testing.T) {
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("expected panic for duplicate Run")
+		}
+		msg := fmt.Sprint(r)
+		if !strings.Contains(msg, "duplicate Run") {
+			t.Fatalf("unexpected panic message: %s", msg)
+		}
+	}()
+	New(nil, "app", "test",
+		Run(func(ctx *Context) error { return nil }),
+		Run(func(ctx *Context) error { return nil }),
+	)
+}
+
+// --- Aliases ---
+
+func TestAlias_Dispatch(t *testing.T) {
+	var ran bool
+	p := New([]string{"x"}, "app", "test",
+		SubCommand("extract", "extract data",
+			Alias("x"),
+			Run(func(ctx *Context) error {
+				ran = true
+				return nil
+			}),
+		),
+	)
+	if err := p.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Run(); err != nil {
+		t.Fatal(err)
+	}
+	if !ran {
+		t.Fatal("alias should dispatch to the subcommand action")
+	}
+}
+
+func TestAlias_PrimaryNameStillWorks(t *testing.T) {
+	var ran bool
+	p := New([]string{"extract"}, "app", "test",
+		SubCommand("extract", "extract data",
+			Alias("x"),
+			Run(func(ctx *Context) error {
+				ran = true
+				return nil
+			}),
+		),
+	)
+	if err := p.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Run(); err != nil {
+		t.Fatal(err)
+	}
+	if !ran {
+		t.Fatal("primary name should still work with alias registered")
+	}
+}
+
+func TestAlias_MultipleAliases(t *testing.T) {
+	var ran bool
+	p := New([]string{"ex"}, "app", "test",
+		SubCommand("extract", "extract data",
+			Alias("x", "ex"),
+			Run(func(ctx *Context) error {
+				ran = true
+				return nil
+			}),
+		),
+	)
+	if err := p.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Run(); err != nil {
+		t.Fatal(err)
+	}
+	if !ran {
+		t.Fatal("second alias should also dispatch")
+	}
+}
+
+func TestAlias_InHelp(t *testing.T) {
+	p := New([]string{"--help"}, "app", "test",
+		SubCommand("extract", "extract data",
+			Alias("x"),
+		),
+	)
+	if !errors.Is(p.Err(), ErrHelp) {
+		t.Fatalf("expected ErrHelp, got %v", p.Err())
+	}
+	help := p.Help()
+	if !containsAll(help, "extract", "x") {
+		t.Fatalf("help should show alias:\n%s", help)
+	}
+}
+
+func TestAlias_DuplicatePanics(t *testing.T) {
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("expected panic for duplicate alias")
+		}
+		msg := fmt.Sprint(r)
+		if !strings.Contains(msg, "duplicate subcommand/alias") {
+			t.Fatalf("unexpected panic message: %s", msg)
+		}
+	}()
+	New(nil, "app", "test",
+		SubCommand("serve", "first"),
+		SubCommand("extract", "second", Alias("serve")),
+	)
+}
+
+// --- Version ---
+
+func TestVersion_LongFlag(t *testing.T) {
+	p := New([]string{"--version"}, "app", "test",
+		Version("1.2.3"),
+	)
+	if !errors.Is(p.Err(), ErrVersion) {
+		t.Fatalf("expected ErrVersion, got %v", p.Err())
+	}
+	if p.Version() != "1.2.3" {
+		t.Fatalf("version = %q, want %q", p.Version(), "1.2.3")
+	}
+}
+
+func TestVersion_ShortFlag(t *testing.T) {
+	p := New([]string{"-V"}, "app", "test",
+		Version("2.0.0"),
+	)
+	if !errors.Is(p.Err(), ErrVersion) {
+		t.Fatalf("expected ErrVersion, got %v", p.Err())
+	}
+}
+
+func TestVersion_NotSetIgnored(t *testing.T) {
+	p := New([]string{"--version"}, "app", "test")
+	err := p.Err()
+	if errors.Is(err, ErrVersion) {
+		t.Fatal("--version without Version() should not return ErrVersion")
+	}
+	var ex *errx.Error
+	if !errors.As(err, &ex) {
+		t.Fatalf("expected *errx.Error, got %T", err)
+	}
+	if ex.Code != CodeUnknownFlag {
+		t.Fatalf("code = %q, want %q", ex.Code, CodeUnknownFlag)
+	}
+}
+
+func TestVersion_EmptyString(t *testing.T) {
+	p := New(nil, "app", "test")
+	if p.Version() != "" {
+		t.Fatalf("version = %q, want empty", p.Version())
+	}
+}
+
+// --- Grouped -h triggers help ---
+
+func TestGroupedShortFlags_HelpInGroup(t *testing.T) {
+	var verbose bool
+	p := New([]string{"-vh"}, "app", "test",
+		AddFlag(&verbose, "verbose", "v", false, "verbose"),
+	)
+	if !errors.Is(p.Err(), ErrHelp) {
+		t.Fatalf("expected ErrHelp for -vh, got %v", p.Err())
+	}
+}
+
+func TestGroupedShortFlags_HelpInGroupSubCommand(t *testing.T) {
+	var verbose bool
+	p := New([]string{"serve", "-vh"}, "app", "test",
+		AddFlag(&verbose, "verbose", "v", false, "verbose"),
+		SubCommand("serve", "start server"),
+	)
+	if !errors.Is(p.Err(), ErrHelp) {
+		t.Fatalf("expected ErrHelp for serve -vh, got %v", p.Err())
+	}
+	help := p.Help()
+	if !strings.Contains(help, "serve") {
+		t.Fatalf("help should be for 'serve', got:\n%s", help)
+	}
+}
+
+// --- Version sets matched ---
+
+func TestVersion_SetsMatched(t *testing.T) {
+	p := New([]string{"serve", "--version"}, "app", "test",
+		Version("1.0.0"),
+		SubCommand("serve", "start server"),
+	)
+	if !errors.Is(p.Err(), ErrVersion) {
+		t.Fatalf("expected ErrVersion, got %v", p.Err())
+	}
+	help := p.Help()
+	if !strings.Contains(help, "serve") {
+		t.Fatalf("help after ErrVersion should be for 'serve', got:\n%s", help)
 	}
 }
 
