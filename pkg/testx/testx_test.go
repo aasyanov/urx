@@ -268,6 +268,21 @@ func TestWithErrorFunc(t *testing.T) {
 	}
 }
 
+func TestWithErrorFunc_NilReturn_FallsBack(t *testing.T) {
+	s := New(WithFailAlways(), WithErrorFunc(func() *errx.Error { return nil }))
+	err := s.Call()
+	if err == nil {
+		t.Fatal("expected error even when errFn returns nil")
+	}
+	var xe *errx.Error
+	if !errors.As(err, &xe) {
+		t.Fatalf("expected *errx.Error fallback, got %T", err)
+	}
+	if xe.Domain != DomainTest || xe.Code != CodeSimulated {
+		t.Fatalf("expected TEST/SIMULATED fallback, got %s/%s", xe.Domain, xe.Code)
+	}
+}
+
 // ============================================================
 // Stats / Reset
 // ============================================================
@@ -321,6 +336,9 @@ func TestConcurrent_Safety(t *testing.T) {
 	st := s.Stats()
 	if st.Calls != 100 {
 		t.Fatalf("expected 100 calls, got %d", st.Calls)
+	}
+	if st.Failures != 25 {
+		t.Fatalf("expected 25 failures (SSSF pattern over 100 calls), got %d", st.Failures)
 	}
 }
 

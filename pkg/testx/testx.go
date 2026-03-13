@@ -248,7 +248,9 @@ func (s *Simulator) patternFail() bool {
 
 func (s *Simulator) makeError() *errx.Error {
 	if s.cfg.errFn != nil {
-		return s.cfg.errFn()
+		if e := s.cfg.errFn(); e != nil {
+			return e
+		}
 	}
 	return errSimulated(s.cfg.msg)
 }
