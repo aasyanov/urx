@@ -23,8 +23,11 @@ type ObjectStats struct {
 }
 
 // NewObjectPool creates an [ObjectPool] that uses factory to create new
-// instances when the pool is empty.
+// instances when the pool is empty. Panics if factory is nil.
 func NewObjectPool[T any](factory func() T) *ObjectPool[T] {
+	if factory == nil {
+		panic("poolx: nil factory function")
+	}
 	op := &ObjectPool[T]{}
 	op.pool.New = func() any {
 		op.creates.Add(1)

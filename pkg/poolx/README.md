@@ -1,15 +1,10 @@
 # poolx
 
-Bounded worker pools, generic object pools, and batch processors with panic
-recovery and lifecycle management.
+Bounded worker pools, generic object pools, and batch processors with panic recovery and lifecycle management.
 
 ## Philosophy
 
-**Three pools, one package.** `poolx` provides `WorkerPool` (fixed goroutine
-pool for task dispatch), `ObjectPool` (generic `sync.Pool` wrapper), and
-`Batch` (buffered batch processor with periodic flush). Each component recovers
-panics via `panix` and reports structured errors via `errx`. They do not retry,
-circuit-break, or rate-limit.
+**Three pools, one package.** `poolx` provides `WorkerPool` (fixed goroutine pool for task dispatch), `ObjectPool` (generic `sync.Pool` wrapper), and `Batch` (buffered batch processor with periodic flush). Each component recovers panics via `panix` and reports structured errors via `errx`. They do not retry, circuit-break, or rate-limit.
 
 ## Quick start
 
@@ -42,7 +37,7 @@ b.Add(evt)
 | Function / Method | Description |
 |---|---|
 | `NewWorkerPool(opts ...WorkerOption) *WorkerPool` | Create and start a pool (4 workers, 64-slot queue) |
-| `wp.Submit(ctx, fn) error` | Enqueue task (blocks if queue full) |
+| `wp.Submit(ctx, fn) error` | Enqueue task (blocks if queue full; respects context cancellation) |
 | `wp.TrySubmit(ctx, fn) error` | Non-blocking submit; returns `CodeQueueFull` if full |
 | `wp.Stats() WorkerStats` | Point-in-time counters |
 | `wp.ResetStats()` | Zero counters |
@@ -53,17 +48,17 @@ b.Add(evt)
 
 | Function / Method | Description |
 |---|---|
-| `NewObjectPool[T](factory) *ObjectPool[T]` | Create a generic object pool |
+| `NewObjectPool[T](factory) *ObjectPool[T]` | Create a generic object pool. Panics if factory is nil. |
 | `op.Get() T` | Acquire object from pool |
 | `op.Put(v T)` | Return object to pool |
-| `op.Stats() ObjectStats` | Get/Put counters |
+| `op.Stats() ObjectStats` | Get/Put/Creates counters |
 | `op.ResetStats()` | Zero counters |
 
 ### Batch
 
 | Function / Method | Description |
 |---|---|
-| `NewBatch[T](flush, opts...) *Batch[T]` | Create a batch processor (100 items, 1 s interval) |
+| `NewBatch[T](flush, opts...) *Batch[T]` | Create a batch processor (100 items, 1 s interval). Panics if flush is nil. |
 | `b.Add(item) error` | Append item; auto-flushes when batch is full |
 | `b.Flush() error` | Force flush of current buffer |
 | `b.Stats() BatchStats` | Point-in-time counters |
@@ -75,35 +70,24 @@ b.Add(evt)
 
 | Option | Default | Description |
 |---|---|---|
-| `WithWorkers(n)` | `4` | Number of worker goroutines |
-| `WithQueueSize(n)` | `64` | Task queue capacity |
-| `WithBatchSize(n)` | `100` | Items before auto-flush |
-| `WithFlushInterval(d)` | `1s` | Periodic flush interval |
+| `WithWorkers(n)` | `4` | Number of worker goroutines. Values <= 0 are ignored. |
+| `WithQueueSize(n)` | `64` | Task queue capacity. Values <= 0 are ignored. |
+| `WithBatchSize(n)` | `100` | Items before auto-flush. Values <= 0 are ignored. |
+| `WithFlushInterval(d)` | `1s` | Periodic flush interval. Values <= 0 are ignored. |
 
 ## Behavior details
 
-- **Worker lifecycle**: `NewWorkerPool` starts `n` goroutines. Each pulls tasks
-  from a buffered channel. `Close` closes the channel and waits for workers to
-  drain remaining tasks.
+- **Worker lifecycle**: `NewWorkerPool` starts `n` goroutines. Each pulls tasks from a buffered channel. `Close` closes the channel and waits for workers to drain remaining tasks.
 
-- **Submit vs TrySubmit**: `Submit` blocks until a queue slot is available but
-  respects context cancellation — if `ctx.Done()` fires while waiting for a slot,
-  `Submit` returns `CodeCancelled` without enqueuing the task. `TrySubmit` returns
-  immediately with `CodeQueueFull` if the queue is full.
+- **Submit vs TrySubmit**: `Submit` blocks until a queue slot is available but respects context cancellation — if `ctx.Done()` fires while waiting for a slot, `Submit` returns `CodeCancelled` without enqueuing the task. `TrySubmit` returns immediately with `CodeQueueFull` if the queue is full.
 
-- **Batch flush**: `Add` appends to an internal buffer. When the buffer reaches
-  `BatchSize`, or when the `FlushInterval` ticker fires, the batch is flushed
-  by calling the user-provided `flush` function. `Close` flushes any remaining
-  items.
+- **Batch flush**: `Add` appends to an internal buffer. When the buffer reaches `BatchSize`, or when the `FlushInterval` ticker fires, the batch is flushed by calling the user-provided `flush` function. `Close` flushes any remaining items.
 
-- **Panic recovery**: `WorkerPool` wraps each task with `panix.Safe`. `Batch`
-  wraps each flush call with `panix.Safe`. Panics produce structured
-  `*errx.Error` values and are counted in stats.
+- **Panic recovery**: `WorkerPool` wraps each task with `panix.Safe`. `Batch` wraps each flush call with `panix.Safe`. Panics produce structured `*errx.Error` values and are counted in stats.
 
-- **Object pool**: thin wrapper around `sync.Pool` with atomic Get/Put counters.
-  Note: for pointer types, `Put(nil)` is allowed by `sync.Pool` and will cause
-  `Get()` to return `nil`. Callers should guard against this or use the factory
-  to guarantee non-nil values.
+- **Object pool**: thin wrapper around `sync.Pool` with atomic Get/Put counters. Note: for pointer types, `Put(nil)` is allowed by `sync.Pool` and will cause `Get()` to return `nil`. Callers should guard against this or use the factory to guarantee non-nil values.
+
+- **Nil input validation**: `NewObjectPool` panics if factory is nil. `NewBatch` panics if flush is nil. These are programmer errors caught at construction time, not at first use.
 
 ## Error diagnostics
 
@@ -113,10 +97,10 @@ All errors are `*errx.Error` with `Domain = "POOL"`.
 
 | Code | When |
 |---|---|
-| `CLOSED` | Submit/Add on a closed pool or batch |
+| `CLOSED` | Submit/TrySubmit/Add on a closed pool or batch |
 | `QUEUE_FULL` | TrySubmit when queue is at capacity |
 | `CANCELLED` | Context cancelled while waiting for a queue slot |
-| `FLUSH_FAILED` | Batch flush function returned an error |
+| `FLUSH_FAILED` | Batch flush function returned an error or panicked |
 
 ### Example
 
@@ -127,6 +111,8 @@ POOL.CANCELLED: context cancelled while waiting for queue slot | cause: context 
 POOL.FLUSH_FAILED: batch flush failed | cause: <underlying error>
 ```
 
+Multiple errors from a batch flush include the original cause wrapped in a `FLUSH_FAILED` error.
+
 ## Thread safety
 
 - `WorkerPool`: `Submit` / `TrySubmit` use a buffered channel — concurrent safe; `Close` uses `atomic.Bool.CompareAndSwap` (idempotent); `IsClosed` reads `atomic.Bool`
@@ -136,23 +122,22 @@ POOL.FLUSH_FAILED: batch flush failed | cause: <underlying error>
 
 ## Tests
 
-**22 tests, 96.8% statement coverage.**
+**27 tests, 97.8% statement coverage.**
 
-```text
+```bash
 go test -race -count=1 -coverprofile=coverage.out ./...
-ok  github.com/aasyanov/urx/pkg/poolx  coverage: 96.8% of statements
+ok  github.com/aasyanov/urx/pkg/poolx  coverage: 97.8% of statements
 ```
 
 Coverage includes:
-- WorkerPool: submit, queue full, closed pool, panic recovery, concurrent submit
-- ObjectPool: get/put, stats, reset
-- Batch: add, auto-flush, manual flush, close flush, closed batch, flush error
-- Lifecycle: Close idempotent, IsClosed
+- WorkerPool: submit, queue full, closed pool, TrySubmit closed, panic recovery, context cancellation, stats, reset, close idempotent
+- ObjectPool: get/put, reuse, stats, reset, nil factory panic
+- Batch: add, auto-flush, manual flush, close flush, closed batch, flush error, periodic flush, panic recovery, nil flush panic, stats, reset, close idempotent
+- Example: NewWorkerPool
 
 ## Benchmarks
 
-Environment: `go1.24.0 windows/amd64`, Intel Core i7-10510U @ 1.80 GHz.
-Each benchmark was run 3 times (`-count=3`); the table shows median values.
+Environment: `go1.24.0 windows/amd64`, Intel Core i7-10510U @ 1.80 GHz. Each benchmark was run 3 times (`-count=3`); the table shows median values.
 
 ```text
 BenchmarkWorkerPool_Submit   ~1038 ns/op      64 B/op     2 allocs/op
@@ -191,13 +176,14 @@ BenchmarkBatch_Add             ~41 ns/op       8 B/op     0 allocs/op
 
 ```text
 pkg/poolx/
-    poolx.go       -- package doc
-    worker.go      -- WorkerPool, NewWorkerPool(), Submit(), TrySubmit()
-    batch.go       -- Batch, NewBatch(), Add(), Flush()
-    object.go      -- ObjectPool, NewObjectPool(), Get(), Put()
-    errors.go      -- DomainPool, Code constants, error constructors
-    helpers.go     -- asErrx helper
-    poolx_test.go  -- 22 tests, 96.8% coverage
-    bench_test.go  -- 3 benchmarks
+    poolx.go         -- package doc
+    worker.go        -- WorkerPool, NewWorkerPool(), Submit(), TrySubmit()
+    batch.go         -- Batch, NewBatch(), Add(), Flush()
+    object.go        -- ObjectPool, NewObjectPool(), Get(), Put()
+    errors.go        -- DomainPool, Code constants, error constructors
+    helpers.go       -- asErrx helper
+    poolx_test.go    -- 27 tests, 97.8% coverage
+    example_test.go  -- 1 example
+    bench_test.go    -- 3 benchmarks
     README.md
 ```

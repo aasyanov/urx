@@ -41,8 +41,8 @@ func WithBatchSize(n int) BatchOption {
 	}
 }
 
-// WithFlushInterval sets the periodic flush interval. Values <= 0 disable
-// periodic flushing.
+// WithFlushInterval sets the periodic flush interval.
+// Values <= 0 are ignored and the default (1 s) is kept.
 func WithFlushInterval(d time.Duration) BatchOption {
 	return func(c *batchConfig) {
 		if d > 0 {
@@ -80,8 +80,11 @@ type BatchStats struct {
 }
 
 // NewBatch creates a [Batch] that calls flush when the buffer is full or
-// the interval elapses.
+// the interval elapses. Panics if flush is nil.
 func NewBatch[T any](flush func([]T) error, opts ...BatchOption) *Batch[T] {
+	if flush == nil {
+		panic("poolx: nil flush function")
+	}
 	cfg := defaultBatchConfig()
 	for _, opt := range opts {
 		opt(&cfg)

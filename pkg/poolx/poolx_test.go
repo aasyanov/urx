@@ -35,6 +35,24 @@ func TestWorkerPool_Submit(t *testing.T) {
 	}
 }
 
+func TestNewObjectPool_NilFactory_Panics(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("expected panic for nil factory")
+		}
+	}()
+	NewObjectPool[int](nil)
+}
+
+func TestNewBatch_NilFlush_Panics(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("expected panic for nil flush")
+		}
+	}()
+	NewBatch[int](nil)
+}
+
 func TestWorkerPool_SubmitClosed(t *testing.T) {
 	wp := NewWorkerPool()
 	wp.Close()
@@ -392,6 +410,20 @@ func TestBatch_PanicRecovery(t *testing.T) {
 	s := b.Stats()
 	if s.Errors != 1 {
 		t.Fatalf("expected 1 error, got %d", s.Errors)
+	}
+}
+
+func TestWorkerPool_TrySubmitClosed(t *testing.T) {
+	wp := NewWorkerPool()
+	wp.Close()
+
+	err := wp.TrySubmit(context.Background(), func(ctx context.Context) error { return nil })
+	if err == nil {
+		t.Fatal("expected error on closed pool")
+	}
+	var xe *errx.Error
+	if !errors.As(err, &xe) || xe.Code != CodeClosed {
+		t.Fatalf("expected CLOSED error, got %v", err)
 	}
 }
 

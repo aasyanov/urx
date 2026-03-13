@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed (poolx)
+
+- `NewObjectPool` now panics immediately if factory is nil (was deferred to first `Get()` on empty pool).
+- `NewBatch` now panics immediately if flush function is nil (was deferred to first `Flush()`).
+- Fixed `WithFlushInterval` godoc: said "Values <= 0 disable periodic flushing" but actually values <= 0 were ignored and the default was kept.
+- Added `TrySubmit` on closed pool test. Coverage 96.9% → 97.8%, tests 24 → 27.
+
 ### Improved (busx)
 
 - Added `WithOnError` tests (called on panic, not called on success). Coverage 94.6% → 98.9%, tests 39 → 41.
