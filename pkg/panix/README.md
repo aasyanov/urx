@@ -61,7 +61,7 @@ user, err = safeFn(ctx)
 
 ## Tests
 
-**20 tests, 100.0% statement coverage.**
+**21 tests, 100.0% statement coverage.**
 
 ```bash
 go test -race -count=1 -coverprofile=coverage.out ./...
@@ -131,7 +131,7 @@ The no-panic path adds < 16 ns overhead. This is why every `Execute` across the 
 ```text
 pkg/panix/
     panix.go          -- Safe(), SafeGo(), Wrap(), WithOnError()
-    panix_test.go     -- 20 tests, 100% coverage
+    panix_test.go     -- 20 tests + 1 example, 100% coverage
     bench_test.go     -- 7 benchmarks
     example_test.go   -- runnable examples
     README.md

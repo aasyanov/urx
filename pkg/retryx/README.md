@@ -102,7 +102,7 @@ RETRY.ABORTED: retry aborted by caller | cause: rate limited
 
 ## Tests
 
-**40 tests, 100% statement coverage.**
+**42 tests, 100% statement coverage.**
 
 ```bash
 go test -race -count=1 -coverprofile=coverage.out ./...
@@ -172,7 +172,7 @@ BenchmarkDefaultConfig               ~4 ns/op       0 B/op     0 allocs/op
 pkg/retryx/
     retryx.go      -- Do(), RetryController, backoff(), isRetryable()
     errors.go      -- DomainRetry, Code constants, error constructors
-    retryx_test.go -- 40 tests, 100% coverage
+    retryx_test.go -- 42 tests, 100% coverage
     bench_test.go  -- 13 benchmarks
     README.md
 ```

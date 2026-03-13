@@ -10,6 +10,15 @@ import (
 	"github.com/aasyanov/urx/pkg/errx"
 )
 
+func TestNewLazy_NilInit_Panics(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("expected panic for nil init")
+		}
+	}()
+	NewLazy[int](nil)
+}
+
 // ============================================================
 // Lazy
 // ============================================================
@@ -314,9 +323,8 @@ func TestLazy_ConcurrentGetAndReset(t *testing.T) {
 			if err != nil {
 				t.Errorf("unexpected error: %v", err)
 			}
-			// v can be 0 if read after Reset cleared the value
-			if v < 0 {
-				t.Errorf("unexpected value: %d", v)
+			if v < 1 {
+				t.Errorf("expected v >= 1 (init must run), got %d", v)
 			}
 		}()
 		go func() {

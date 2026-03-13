@@ -118,7 +118,7 @@ SHED.CLOSED: shedder closed
 
 ## Tests
 
-**34 tests, 98.3% statement coverage.**
+**35 tests, 98.3% statement coverage.**
 
 ```text
 go test -race -count=1 -coverprofile=coverage.out ./...
@@ -180,7 +180,7 @@ BenchmarkAllow                ~3 ns/op       0 B/op     0 allocs/op
 pkg/shedx/
     shedx.go       -- Shedder, ShedController, Priority, New(), Allow(), Execute()
     errors.go      -- DomainShed, Code constants, error constructors
-    shedx_test.go  -- 34 tests, 98.3% coverage
+    shedx_test.go  -- 35 tests, 98.3% coverage
     bench_test.go  -- 3 benchmarks
     README.md
 ```

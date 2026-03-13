@@ -122,7 +122,7 @@ CIRCUIT.OPEN: circuit breaker is open
 
 ## Tests
 
-**33 tests, 94.4% statement coverage.**
+**34 tests, 94.4% statement coverage.**
 
 ```bash
 go test -race -count=1 -coverprofile=coverage.out ./...
@@ -183,7 +183,7 @@ BenchmarkState               ~2 ns/op       0 B/op     0 allocs/op
 pkg/circuitx/
     circuitx.go      -- Breaker, State, Execute(), CircuitController interface
     errors.go        -- DomainCircuit, Code constants, error constructors
-    circuitx_test.go -- 33 tests, 94.4% coverage
+    circuitx_test.go -- 34 tests, 94.4% coverage
     bench_test.go    -- 4 benchmarks
     README.md
 ```

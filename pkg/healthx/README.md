@@ -67,7 +67,7 @@ hc.RegisterHandlers(mux) // /healthz, /livez, /readyz
 
 ## Error constants
 
-The package exports `DomainHealth`, `CodeUnhealthy`, and `CodeTimeout` constants along with `errUnhealthy` and `errTimeout` constructors for callers who need to build structured health-check errors in their own code.
+The package exports `DomainHealth`, `CodeUnhealthy`, and `CodeTimeout` constants for callers who need to build structured health-check errors in their own code. The `errUnhealthy` and `errTimeout` constructors are internal.
 
 | Code | When |
 |---|---|
@@ -122,7 +122,7 @@ Coverage includes:
 - RegisterHandlers: standard Kubernetes paths `/healthz`, `/livez`, `/readyz`
 - Register: multiple checks, concurrent registration, nil check panic
 - Readiness: nil context normalization
-- Error constructors: errUnhealthy, errTimeout
+- Error constructors: errUnhealthy, errTimeout (internal)
 
 ## Benchmarks
 

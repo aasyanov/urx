@@ -1,9 +1,6 @@
 package syncx
 
-import (
-	"sync"
-	"sync/atomic"
-)
+import "sync"
 
 // Lazy is a generic, thread-safe lazy initializer. The init function runs
 // at most once (until [Lazy.Reset] is called). Subsequent calls to [Lazy.Get]
@@ -17,11 +14,15 @@ type Lazy[T any] struct {
 	mu   sync.Mutex
 	val  T
 	err  error
-	done uint32 // 0 = not initialized, 1 = initialized; atomic
+	done bool
 }
 
 // NewLazy creates a [Lazy] that will call init on the first [Lazy.Get].
+// Panics if init is nil.
 func NewLazy[T any](init func() (T, error)) *Lazy[T] {
+	if init == nil {
+		panic("syncx: nil init function")
+	}
 	return &Lazy[T]{init: init}
 }
 
@@ -30,22 +31,15 @@ func NewLazy[T any](init func() (T, error)) *Lazy[T] {
 // Thread-safe; concurrent callers block until init completes.
 // Safe to call concurrently with [Lazy.Reset].
 func (l *Lazy[T]) Get() (T, error) {
-	if atomic.LoadUint32(&l.done) == 1 {
-		l.mu.Lock()
-		v, e := l.val, l.err
-		l.mu.Unlock()
-		return v, e
-	}
-
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	if l.done == 0 {
+	if !l.done {
 		l.val, l.err = l.init()
 		if l.err != nil {
 			l.err = errInitFailed(l.err)
 		}
-		atomic.StoreUint32(&l.done, 1)
+		l.done = true
 	}
 	return l.val, l.err
 }
@@ -54,7 +48,7 @@ func (l *Lazy[T]) Get() (T, error) {
 // Any cached value is discarded.
 func (l *Lazy[T]) Reset() {
 	l.mu.Lock()
-	atomic.StoreUint32(&l.done, 0)
+	l.done = false
 	var zero T
 	l.val = zero
 	l.err = nil

@@ -183,7 +183,7 @@ The wrapper passes a private implementation as a public interface. The callback 
 | Metric | Value |
 |---|---|
 | Packages | 31 |
-| Tests | 1355 |
+| Tests | 1335 |
 | Benchmarks | 207 |
 | Coverage | 91.6% – 100% per package |
 | Race detector | All tests pass with `-race` |
@@ -198,31 +198,31 @@ The wrapper passes a private implementation as a public interface. The callback 
 | bulkx | 37 | 98.3% | 4 |
 | busx | 41 | 98.9% | 9 |
 | cfgx | 33 | 93.7% | 6 |
-| circuitx | 33 | 94.4% | 4 |
+| circuitx | 34 | 94.4% | 4 |
 | clix | 83 | 96.0% | 4 |
 | cronx | 29 | 97.5% | 3 |
 | ctxx | 38 | 99.1% | 10 |
 | dicx | 67 | 94.1% | 10 |
 | env2x | 34 | 94.7% | — |
 | envx | 37 | 97.5% | 7 |
-| errx | 86 | 100.0% | 23 |
-| fallx | 33 | 96.2% | 3 |
+| errx | 89 | 100.0% | 23 |
+| fallx | 34 | 96.2% | 3 |
 | hashx | 57 | 96.0% | 3 |
 | healthx | 21 | 98.6% | 4 |
 | hedgex | 33 | 98.4% | 1 |
 | i18n | 74 | 97.5% | 14 |
 | logx | 14 | 100.0% | 4 |
 | lrux | 139 | 98.8% | 29 |
-| panix | 20 | 100.0% | 7 |
+| panix | 21 | 100.0% | 7 |
 | poolx | 27 | 97.8% | 3 |
 | quotax | 33 | 95.4% | 3 |
 | ratex | 28 | 94.6% | 5 |
-| retryx | 40 | 100.0% | 13 |
-| shedx | 34 | 98.3% | 3 |
+| retryx | 42 | 100.0% | 13 |
+| shedx | 35 | 98.3% | 3 |
 | signalx | 11 | 97.3% | 4 |
-| syncx | 18 | 100.0% | 3 |
+| syncx | 19 | 100.0% | 3 |
 | testx | 29 | 98.6% | 5 |
-| toutx | 16 | 100.0% | 3 |
+| toutx | 17 | 100.0% | 3 |
 | validx | 67 | 100.0% | 11 |
 | warmupx | 56 | 97.6% | 7 |
 

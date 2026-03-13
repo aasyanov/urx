@@ -7,65 +7,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed (poolx)
-
-- `NewObjectPool` now panics immediately if factory is nil (was deferred to first `Get()` on empty pool).
-- `NewBatch` now panics immediately if flush function is nil (was deferred to first `Flush()`).
-- Fixed `WithFlushInterval` godoc: said "Values <= 0 disable periodic flushing" but actually values <= 0 were ignored and the default was kept.
-- Added `TrySubmit` on closed pool test. Coverage 96.9% → 97.8%, tests 24 → 27.
-
-### Improved (busx)
-
-- Added `WithOnError` tests (called on panic, not called on success). Coverage 94.6% → 98.9%, tests 39 → 41.
-- Updated README: added `WithOnError`, `Stats()`, `ResetStats()` to API table; removed soft line wraps; updated file structure section.
+## [1.3.0] — 2026-03-13
 
 ### Changed (errx)
 
 - **Breaking:** `MarshalJSON` now serializes `cause` recursively. If the cause is `*errx.Error`, it becomes a nested JSON object preserving all structured fields (Domain, Code, Severity, Meta, etc.). Non-`errx` errors remain plain strings. Recursion depth is unlimited.
 
+### Fixed (syncx)
+
+- **Critical race fix:** `Lazy.Get` had a TOCTOU race with `Lazy.Reset`. The atomic fast path observed `done == 1`, but between the check and acquiring the mutex, `Reset` could clear all fields. `Get` then returned `(zero, nil)` — a zero value with no error, without re-running init. Removed the racy fast path; `Get` now always checks `done` under the mutex.
+- `NewLazy` now panics immediately if init is nil (was deferred to first `Get`).
+
+### Fixed (poolx)
+
+- `NewObjectPool` now panics immediately if factory is nil (was deferred to first `Get()` on empty pool).
+- `NewBatch` now panics immediately if flush function is nil (was deferred to first `Flush()`).
+- Fixed `WithFlushInterval` godoc: said "Values <= 0 disable periodic flushing" but actually values <= 0 were ignored and the default was kept.
+
 ### Fixed (testx)
 
-- `makeError` now falls back to default `TEST.SIMULATED` error when a custom `WithErrorFunc` returns nil. Previously, a nil-returning factory silently swallowed the failure — `Call()` returned nil even though `shouldFail()` was true.
-
-### Fixed (signalx)
-
-- `TestContext_NilParent` now actually tests nil context (was using `context.TODO()`, masking uncovered nil path). Coverage restored to 97.3% (was 94.6%).
-
-### Fixed (logx)
-
-- `TestFromContext_Nil` and `TestWithLogger_NilContext` now actually test nil context (were using `context.TODO()`, masking uncovered nil paths). Coverage restored to 100.0% (was 94.7%).
+- `makeError` now falls back to default `TEST.SIMULATED` error when a custom `WithErrorFunc` returns nil. Previously, a nil-returning factory silently swallowed the failure.
 
 ### Fixed (lrux)
 
-- `TTL()` and `Len()` now return 0 on a closed cache, consistent with all other read methods (`Get`, `Peek`, `Has`, `Keys`, `Values`, `Range`).
+- `TTL()` and `Len()` now return 0 on a closed cache, consistent with all other read methods.
 
 ### Fixed (dicx)
 
-- `formatCycle` no longer duplicates the closing element in cyclic dependency error messages (was "A -> B -> A -> A", now "A -> B -> A").
+- `formatCycle` no longer duplicates the closing element in cyclic dependency error messages.
 
 ### Fixed (hashx)
 
-- `WithAlgorithm` and `WithTier` no longer silently discard a previously configured pepper. Option ordering is now irrelevant.
-- `Generate` panics on unsupported `Algorithm` value instead of silently falling back to Argon2id (fail-fast for programmer error).
+- `WithAlgorithm` and `WithTier` no longer silently discard a previously configured pepper.
+- `Generate` panics on unsupported `Algorithm` value instead of silently falling back to Argon2id.
 - `WithBcryptCost` panics on out-of-range cost instead of silently ignoring the value.
 
 ### Fixed (i18n)
 
 - `processDictionaries` now creates the language folder with `0755` permissions (was `0777`).
-- Fixed internal `setLanguage` godoc (claimed "returns the previous one", actually returns the resulting locale).
-- Renamed internal `clearCacheLocked` to `resetCache` (the function does not require the caller to hold a lock).
-- Removed dead code from `BenchmarkTranslateError_PlainError`.
-- Replaced custom `contains`/`containsSubstring` test helpers with `strings.Contains`.
+- Renamed internal `clearCacheLocked` to `resetCache` (misleading name implied caller held a lock).
 
-### Tests (lrux)
+### Improved (busx)
 
-- 139 tests (was 136), 98.8% coverage.
-- Added: `TestTTL_OnClosed`, `TestLen_OnClosed`.
+- Added `WithOnError` tests. Coverage 94.6% → 98.9%, tests 39 → 41.
 
-### Tests (hashx)
+### Improved (logx, signalx)
 
-- 57 tests (was 54), 96.0% coverage (was 95.9%).
-- Added: `TestPepper_PreservedByWithAlgorithm`, `TestPepper_PreservedByWithTier`, `TestWithBcryptCost_InvalidCost_Panics`.
+- Tests now actually exercise nil context paths (were using `context.TODO()`). logx coverage restored to 100.0%, signalx to 97.3%.
+
+### Documentation
+
+- Full re-audit of all 31 packages. Test counts verified via `go test -v ./pkg/...` and synchronized across all package READMEs and main README. Total: 1335 tests, 207 benchmarks.
+- Removed soft line wraps from all READMEs (busx, poolx, syncx, testx, healthx, and 5 Resilience packages).
+- Fixed healthx README: clarified `errUnhealthy`/`errTimeout` are internal.
+- Fixed errx README: 86→89 tests (examples were uncounted).
+- Fixed panix README: 20→21 tests (example was uncounted).
+- Fixed circuitx, fallx, retryx, shedx, toutx README test counts.
 
 ## [1.2.0] — 2026-03-13
 

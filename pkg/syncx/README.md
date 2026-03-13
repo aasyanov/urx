@@ -4,10 +4,7 @@ Generic concurrency primitives for industrial Go services.
 
 ## Philosophy
 
-**Three primitives, one package.** `syncx` provides `Lazy[T]` (thread-safe
-lazy initializer with error handling), `Group` (error-group with `panix.Safe`
-recovery and optional concurrency limiting), and `Map[K, V]` (generic
-concurrent map). Each is minimal and composable.
+**Three primitives, one package.** `syncx` provides `Lazy[T]` (thread-safe lazy initializer with error handling), `Group` (error-group with `panix.Safe` recovery and optional concurrency limiting), and `Map[K, V]` (generic concurrent map). Each is minimal and composable.
 
 ## Quick start
 
@@ -38,7 +35,7 @@ v, ok := m.Load("requests")
 
 | Function / Method | Description |
 |---|---|
-| `NewLazy[T](init) *Lazy[T]` | Create a lazy initializer |
+| `NewLazy[T](init) *Lazy[T]` | Create a lazy initializer. Panics if init is nil. |
 | `l.Get() (T, error)` | Return cached value; runs init on first call |
 | `l.Reset()` | Allow init to run again on next Get |
 
@@ -70,24 +67,13 @@ v, ok := m.Load("requests")
 
 ## Behavior details
 
-- **Lazy initialization**: `Get` uses an atomic fast-path with `sync.Mutex`
-  fallback. The first call runs the init function; subsequent calls return the
-  cached result via atomic check (no lock on the hot path). If init fails, the
-  error is cached and returned on every `Get`. `Reset` clears the cache under
-  the mutex, allowing init to run again. `Get` and `Reset` are safe to call
-  concurrently from different goroutines.
+- **Lazy initialization**: `Get` checks a `done` flag under `sync.Mutex`. The first call runs the init function; subsequent calls return the cached result. If init fails, the error is cached and returned on every `Get`. `Reset` clears the cache under the mutex, allowing init to run again. `Get` and `Reset` are safe to call concurrently — a `Get` that races with `Reset` will always either return the previous cached value or re-run init; it will never return a zero value without an error.
 
-- **Group panic recovery**: every `Go` call wraps the function with
-  `panix.Safe`. If the function panics, the panic is recovered as a structured
-  `*errx.Error` and reported as the group error.
+- **Group panic recovery**: every `Go` call wraps the function with `panix.Safe`. If the function panics, the panic is recovered as a structured `*errx.Error` and reported as the group error.
 
-- **Concurrency limit**: `WithLimit(n)` creates a semaphore channel. `Go`
-  blocks until a slot is available, enforcing at most `n` concurrent goroutines.
+- **Concurrency limit**: `WithLimit(n)` creates a semaphore channel. `Go` blocks until a slot is available, enforcing at most `n` concurrent goroutines.
 
-- **Map type safety**: `Map[K, V]` wraps `sync.Map` with generics. `Len` is
-  maintained via an `atomic.Int64` counter that is incremented on
-  `Store`/`LoadOrStore` (new keys only) and decremented on `Delete` — O(1) with
-  no locking overhead.
+- **Map type safety**: `Map[K, V]` wraps `sync.Map` with generics. `Len` is maintained via a mutex-protected `int64` counter that is incremented on `Store`/`LoadOrStore` (new keys only) and decremented on `Delete` — O(1) without iterating the map.
 
 ## Error diagnostics
 
@@ -107,29 +93,28 @@ SYNC.INIT_FAILED: lazy init failed | cause: connection refused
 
 ## Thread safety
 
-- `Lazy.Get` uses atomic load + `sync.Mutex` fallback — concurrent calls block until init completes; concurrent `Get`/`Reset` is safe
-- `Lazy.Reset` uses `sync.Mutex` — safe for concurrent use
+- `Lazy.Get` and `Lazy.Reset` share a `sync.Mutex` — concurrent `Get`/`Reset` is linearizable with no TOCTOU race
 - `Group.Go` / `Group.Wait` use `sync.WaitGroup` + `sync.Once` for first-error capture — fully concurrent
-- `Map` wraps `sync.Map` — fully concurrent
+- `Map` wraps `sync.Map` — fully concurrent; `Len` is mutex-protected for consistency with `Store`/`Delete`
 
 ## Tests
 
-**17 tests, 100% statement coverage.**
+**19 tests, 100.0% statement coverage.**
 
 ```bash
 go test -race -count=1 -coverprofile=coverage.out ./...
-ok  github.com/aasyanov/urx/pkg/syncx  coverage: 100% of statements
+ok  github.com/aasyanov/urx/pkg/syncx  coverage: 100.0% of statements
 ```
 
 Coverage includes:
-- Lazy: success, error, concurrent Get, Reset
-- Group: single task, multiple tasks, first-error wins, panic recovery, limit
-- Map: Store/Load, Delete, LoadOrStore, Range, Len, concurrent access
+- Lazy: success, error, reset, concurrent Get, concurrent Get+Reset, nil init panic
+- Group: single task, multiple tasks, first-error wins, panic recovery, concurrency limit, context cancellation
+- Map: Store/Load, Delete, Delete missing, LoadOrStore, Range, Len, concurrent access
+- Errors: errInitFailed structure
 
 ## Benchmarks
 
-Environment: `go1.24.0 windows/amd64`, Intel Core i7-10510U @ 1.80 GHz.
-Each benchmark was run 3 times (`-count=3`); the table shows median values.
+Environment: `go1.24.0 windows/amd64`, Intel Core i7-10510U @ 1.80 GHz. Each benchmark was run 3 times (`-count=3`); the table shows median values.
 
 ```text
 BenchmarkLazy_Get           ~3 ns/op       0 B/op     0 allocs/op
@@ -139,7 +124,7 @@ BenchmarkMap_StoreLoad    ~136 ns/op      48 B/op     1 allocs/op
 
 ### Analysis
 
-**Lazy Get (cached):** ~3 ns, 0 allocs. After initialization, `Get` is a single `sync.Once.Do` fast path (atomic load). Effectively free.
+**Lazy Get (cached):** ~3 ns, 0 allocs. After initialization, `Get` acquires the mutex and reads cached values. Effectively free for most workloads.
 
 **Group Go:** ~1.5 us, 5 allocs. Goroutine spawn + `panix.Safe` closure + `WaitGroup` add/done. In production, the function body dominates.
 
@@ -172,7 +157,7 @@ pkg/syncx/
     group.go      -- Group, NewGroup(), Go(), Wait()
     map.go        -- Map[K,V], NewMap(), Load(), Store(), Delete()
     errors.go     -- DomainSync, Code constants, error constructors
-    syncx_test.go -- 17 tests, 100% coverage
+    syncx_test.go -- 19 tests, 100.0% coverage
     bench_test.go -- 3 benchmarks
     README.md
 ```

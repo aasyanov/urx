@@ -103,7 +103,7 @@ data, _ := json.Marshal(err)
 
 ## Tests
 
-**86 tests, 100% statement coverage.**
+**89 tests, 100% statement coverage.**
 
 ```bash
 go test -race -count=1 -coverprofile=coverage.out ./...
@@ -204,7 +204,7 @@ pkg/errx/
     multi.go        -- MultiError, NewMulti(), Add(), Err()
     error_test.go   -- 61 tests
     multi_test.go   -- 25 tests
-    example_test.go -- runnable examples
+    example_test.go -- 3 examples
     bench_test.go   -- 23 benchmarks
     README.md
 ```

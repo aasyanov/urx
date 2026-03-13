@@ -82,7 +82,7 @@ TIMEOUT.CANCELLED: cancelled | op: db.query | cause: context canceled
 
 ## Tests
 
-**16 tests, 100% statement coverage.**
+**17 tests, 100% statement coverage.**
 
 ```bash
 go test -race -count=1 -coverprofile=coverage.out ./...
@@ -140,7 +140,7 @@ For context: any real operation wrapped by `toutx` (HTTP call, DB query) takes 1
 pkg/toutx/
     toutx.go       -- Timer, New(), Execute() (both Timer and package-level)
     errors.go      -- DomainTimeout, Code constants, error constructors
-    toutx_test.go  -- 16 tests, 100% coverage
+    toutx_test.go  -- 17 tests, 100% coverage
     bench_test.go  -- 3 benchmarks
     README.md
 ```

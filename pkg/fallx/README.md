@@ -85,11 +85,11 @@ Panics are converted to `*errx.Error` with stack trace.
 
 ## Tests
 
-**33 tests, 93.6% statement coverage.**
+**34 tests, 96.2% statement coverage.**
 
 ```bash
 go test -race -count=1 -coverprofile=coverage.out ./...
-ok  github.com/aasyanov/urx/pkg/fallx  coverage: 93.6% of statements
+ok  github.com/aasyanov/urx/pkg/fallx  coverage: 96.2% of statements
 ```
 
 Coverage includes:
@@ -121,6 +121,6 @@ Sharded LRU lookup is fast enough for hot-path usage.
 pkg/fallx/
     fallx.go       -- Fallback[T], New(), Do(), DoWithKey(), strategies, cache
     errors.go      -- DomainFallback, Code constants, error constructors
-    fallx_test.go  -- 33 tests + 3 benchmarks, 93.6% coverage
+    fallx_test.go  -- 34 tests + 3 benchmarks, 96.2% coverage
     README.md
 ```
