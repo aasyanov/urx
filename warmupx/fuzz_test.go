@@ -48,13 +48,14 @@ func FuzzMaxRequests(f *testing.F) {
 	f.Fuzz(func(t *testing.T, capacity float64, base int) {
 		w := New(WithMinCapacity(capacity), WithMaxCapacity(1))
 		got := w.MaxRequests(base)
+		effective := w.Capacity()
 		if got < 0 {
-			t.Fatalf("MaxRequests(%d) at capacity %v returned negative %d", base, capacity, got)
+			t.Fatalf("MaxRequests(%d) at capacity %v returned negative %d", base, effective, got)
 		}
-		if base > 0 && capacity <= 0 && got != 0 {
+		if base > 0 && effective <= 0 && got != 0 {
 			t.Fatalf("MaxRequests(%d) at zero capacity returned %d, want 0", base, got)
 		}
-		if base > 0 && capacity > 0 && got > base {
+		if base > 0 && effective > 0 && got > base {
 			t.Fatalf("MaxRequests(%d)=%d exceeds base", base, got)
 		}
 	})

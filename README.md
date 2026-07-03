@@ -408,7 +408,7 @@ Each package README documents its allocation floor and bottleneck in a **Benchma
 
 ## Errors and Panics
 
-- **Sentinel errors** per package in `errors.go` — see [`.cursor/rules/errors.md`](.cursor/rules/errors.md) for project rules.
+- **Sentinel errors** per package in `errors.go` — prefixed with the package name (`retryx: …`), documented with when they are returned, comparable via `errors.Is`; wrapping with `%w` stays in unexported helpers.
 - **Wrapping** with `%w` happens in unexported helpers; public API returns sentinels testable via `errors.Is`.
 - **Panics in callbacks** become `*panix.PanicError` (`errors.As`); they do not crash the process on resilience paths.
 - **No shared `errx` type** in 2.0 — map to your service error model at the boundary if needed.
@@ -417,7 +417,7 @@ Each package README documents its allocation floor and bottleneck in a **Benchma
 
 ## Development and Quality
 
-URX uses a **gate pipeline** (see [`.cursor/rules/gates.md`](.cursor/rules/gates.md)):
+URX uses a **gate pipeline** — sequential quality gates, each including checks from all previous gates:
 
 | Gate | Checks |
 | ---- | ------ |
@@ -438,7 +438,7 @@ URX uses a **gate pipeline** (see [`.cursor/rules/gates.md`](.cursor/rules/gates
 | Fuzz targets | 52 across packages |
 | CI | Go 1.26 on Ubuntu (see [.github/workflows/ci.yml](.github/workflows/ci.yml)) |
 
-Contributing workflow: one package brought to Gate 5 per focused change — audit, fix, test, bench, document ([`.cursor/rules/workflow.md`](.cursor/rules/workflow.md)).
+Contributing workflow: bring one package to Gate 5 per focused change — audit, fix structure and implementation, write tests (unit, concurrent, fuzz), benchmarks, GoDoc, and package README.
 
 ---
 
