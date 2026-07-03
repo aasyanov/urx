@@ -117,7 +117,8 @@ func TestLimiter_Delay_ReturnsComputedDuration(t *testing.T) {
 	l := New(WithRate(2), WithBurst(10))
 	l.mu.Lock()
 	l.tokens = 0
-	l.lastUpdate = time.Now()
+	// Future timestamp so refill() is a no-op and delay is exactly deficit/rate.
+	l.lastUpdate = time.Now().Add(time.Hour)
 	l.mu.Unlock()
 	assert.Equal(t, 2500*time.Millisecond, l.delay(5))
 }
