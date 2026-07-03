@@ -35,6 +35,24 @@ func (c *cancelAfterCtx) Err() error {
 	return c.Context.Err()
 }
 
+// emptyBucket drains the bucket and resets the accrual clock to now so a
+// subsequent wait must sleep at least once before tokens arrive.
+func emptyBucket(l *Limiter) {
+	l.mu.Lock()
+	l.tokens = 0
+	l.lastUpdate = time.Now()
+	l.mu.Unlock()
+}
+
+// freezeEmptyBucket drains the bucket and stops accrual until lastUpdate is
+// reached, keeping take() failing across wait-loop iterations.
+func freezeEmptyBucket(l *Limiter) {
+	l.mu.Lock()
+	l.tokens = 0
+	l.lastUpdate = time.Now().Add(time.Hour)
+	l.mu.Unlock()
+}
+
 // --- Construction & options ---
 
 func TestNew_Defaults(t *testing.T) {
@@ -115,17 +133,14 @@ func TestLimiter_Delay_ReturnsMinWhenComputedSubMillisecond(t *testing.T) {
 
 func TestLimiter_Delay_ReturnsComputedDuration(t *testing.T) {
 	l := New(WithRate(2), WithBurst(10))
-	l.mu.Lock()
-	l.tokens = 0
-	// Future timestamp so refill() is a no-op and delay is exactly deficit/rate.
-	l.lastUpdate = time.Now().Add(time.Hour)
-	l.mu.Unlock()
+	freezeEmptyBucket(l)
 	assert.Equal(t, 2500*time.Millisecond, l.delay(5))
 }
 
 func TestWaitFor_SucceedsAfterSleeping(t *testing.T) {
 	l := New(WithRate(1000), WithBurst(1))
 	require.True(t, l.Allow())
+	emptyBucket(l)
 
 	res, err := l.waitFor(context.Background(), 1)
 	require.NoError(t, err)
@@ -136,6 +151,7 @@ func TestWaitFor_SucceedsAfterSleeping(t *testing.T) {
 func TestWaitFor_CancelledAfterTimerBeforeTake(t *testing.T) {
 	l := New(WithRate(100_000), WithBurst(1))
 	require.True(t, l.Allow())
+	freezeEmptyBucket(l)
 
 	_, err := l.waitFor(&cancelAfterCtx{after: 2}, 1)
 	require.ErrorIs(t, err, ErrCancelled)
@@ -145,6 +161,7 @@ func TestWaitFor_CancelledAfterTimerBeforeTake(t *testing.T) {
 func TestWaitFor_CancelledOnSecondLoopIteration(t *testing.T) {
 	l := New(WithRate(100_000), WithBurst(1))
 	require.True(t, l.Allow())
+	freezeEmptyBucket(l)
 
 	_, err := l.waitFor(&cancelAfterCtx{after: 3}, 1)
 	require.ErrorIs(t, err, ErrCancelled)
@@ -261,6 +278,7 @@ func TestLimiter_Wait_AcquiresImmediately(t *testing.T) {
 func TestLimiter_Wait_BlocksThenSucceeds(t *testing.T) {
 	l := New(WithRate(1000), WithBurst(1))
 	require.True(t, l.Allow())
+	emptyBucket(l)
 
 	start := time.Now()
 	require.NoError(t, l.Wait(context.Background()))
@@ -377,6 +395,7 @@ func TestExecute_CancelledWhileWaiting(t *testing.T) {
 func TestAcquire_CancelledAfterTimerBeforeTake(t *testing.T) {
 	l := New(WithRate(100_000), WithBurst(1))
 	require.True(t, l.Allow())
+	freezeEmptyBucket(l)
 
 	ctx := &cancelAfterCtx{after: 2}
 
@@ -612,6 +631,7 @@ func TestLimiter_Stats_BlockingWaitCountsAllowedOnce(t *testing.T) {
 	// limited, regardless of how many times the wait loop probed the bucket.
 	l := New(WithRate(1000), WithBurst(1))
 	require.True(t, l.Allow())
+	emptyBucket(l)
 
 	ctx, cancel := testx.TimedCtx(time.Second)
 	defer cancel()
@@ -638,6 +658,7 @@ func TestLimiter_Stats_CancelledWaitCountsLimitedOnce(t *testing.T) {
 func TestExecute_Stats_WaitedCountsAllowedOnce(t *testing.T) {
 	l := New(WithRate(1000), WithBurst(1))
 	require.True(t, l.Allow())
+	emptyBucket(l)
 
 	_, err := Execute(l, context.Background(),
 		func(context.Context, RateController) (int, error) { return 1, nil })

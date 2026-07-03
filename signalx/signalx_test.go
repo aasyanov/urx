@@ -14,6 +14,12 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// blockUntilShutdownDone waits for the shutdown context deadline without
+// relying on time.Sleep racing against WithTimeout on loaded CI runners.
+func blockUntilShutdownDone(ctx context.Context) {
+	<-ctx.Done()
+}
+
 func TestTrap_NilParentUsesBackground(t *testing.T) {
 	var nilParent context.Context
 	ctx, cancel := Trap(nilParent)
@@ -84,7 +90,7 @@ func TestWait_SingleHookOverrunReportsTimeout(t *testing.T) {
 	t.Cleanup(ResetHooks)
 
 	err := WaitWith(testx.CancelledCtx(), []Option{WithTimeout(20 * time.Millisecond)},
-		func(context.Context) { time.Sleep(60 * time.Millisecond) },
+		blockUntilShutdownDone,
 	)
 	require.ErrorIs(t, err, ErrShutdownTimeout)
 }
@@ -95,7 +101,7 @@ func TestWait_TimeoutAndHookPanicJoined(t *testing.T) {
 
 	err := WaitWith(testx.CancelledCtx(), []Option{WithTimeout(20 * time.Millisecond)},
 		func(context.Context) { panic("timeout panic") },
-		func(context.Context) { time.Sleep(60 * time.Millisecond) },
+		blockUntilShutdownDone,
 	)
 	require.ErrorIs(t, err, ErrShutdownTimeout)
 	require.ErrorIs(t, err, ErrHookPanic)
@@ -206,7 +212,7 @@ func TestWait_TimeoutStopsRemainingHooks(t *testing.T) {
 
 	var secondRan atomic.Bool
 	err := WaitWith(testx.CancelledCtx(), []Option{WithTimeout(20 * time.Millisecond)},
-		func(context.Context) { time.Sleep(60 * time.Millisecond) },
+		blockUntilShutdownDone,
 		func(context.Context) { secondRan.Store(true) },
 	)
 	require.ErrorIs(t, err, ErrShutdownTimeout)
