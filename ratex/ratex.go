@@ -245,7 +245,7 @@ func (l *Limiter) delay(n int) time.Duration {
 	if deficit <= 0 {
 		return minDelay
 	}
-	d := time.Duration(deficit / l.cfg.rate * float64(time.Second))
+	d := time.Duration(deficit * (float64(time.Second) / l.cfg.rate))
 	if d < minDelay {
 		return minDelay
 	}

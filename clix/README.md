@@ -306,27 +306,43 @@ A `Parser` and its `Command` tree are **not** safe for concurrent use. The inten
 
 ## Benchmarks
 
-> CPU: Intel i7-10510U · OS: Windows 10 · Go 1.24 · `-benchmem -count=3`
+Three environments, two hardware classes, two operating systems. All values are **medians**. `B/op` and `allocs/op` are deterministic — they depend on code, not hardware.
 
+### Environments
 
-| Benchmark         | ns/op | B/op | allocs/op |
-| ----------------- | ----- | ---- | --------- |
-| New_SingleFlag    | 1171  | 1216 | 15        |
-| New_ManyFlags (5) | 5476  | 2560 | 34        |
-| New_Subcommand    | 1990  | 1776 | 21        |
-| Parser_Reset      | 84    | 0    | 0         |
-| Parser_Help       | 1211  | 528  | 10        |
-| New_Parallel      | 1365  | 1544 | 20        |
+| | Laptop | CI Server (Linux) | CI Server (Windows) |
+|---|---|---|---|
+| CPU | Intel Core i7-10510U, 4C/8T | AMD EPYC 7763, 4 vCPU | AMD EPYC 9V74, 4 vCPU |
+| TDP | 15W (mobile, throttles) | 280W (server, stable) | server, stable |
+| OS | Windows 10 | Ubuntu | Windows Server 2022 |
+| Go | 1.26.2 | 1.26 | 1.26 |
+| GOMAXPROCS | 8 | 4 | 4 |
+| Runs | 3 (`-count=3`) | 3 (`-count=3`) | 3 (`-count=3`) |
 
+### Parser Construction
+
+| Benchmark | What it measures | Laptop | Linux | Windows | B/op | allocs/op |
+|---|---|---|---|---|---|---|
+| New_SingleFlag | One typed flag + maps | 766 ns | **678 ns** | 934 ns | 1216 | 15 |
+| New_ManyFlags | Five flags | 2.27 µs | **2.00 µs** | 2.73 µs | 2560 | 34 |
+| New_Subcommand | Subcommand tree | 1.16 µs | **1.01 µs** | 1.40 µs | 1776 | 21 |
+| Parser_Reset | Reuse tree, zero allocs | 54.7 ns | 48.7 ns | **44.9 ns** | 0 | 0 |
+| Parser_Help | Help text render | 800 ns | **765 ns** | 888 ns | 528 | 10 |
+| New_Parallel | Independent `New` per iter | 905 ns | **703 ns** | 1.10 µs | 1544 | 20 |
 
 ### Analysis
 
-- **New_SingleFlag**: ~1 µs and 15 allocs is the construction floor. Each `AddFlag` allocates a `flagMeta`, a closure pair (`setFunc`/`resetFunc`) that escapes to the heap because it captures the bound pointer, and entries in the `flagMap`/`shortMap`. This is a one-time startup cost paid once per process, not per request.
-- **New_ManyFlags**: scales roughly linearly with flag count — five flags cost ~4× the single-flag case, dominated by the per-flag closure and map insertions.
-- **Parser_Reset**: 0 allocs/op. Reset reuses the existing command tree and closures; it only flips `set` markers, nils the positional slice header, and calls the captured `resetFunc`. This is why `Reset` is the right tool for table-driven tests — re-running `New` per case would allocate the whole tree each time.
-- **Parser_Help**: allocations come from `strings.Builder` growth and `strings.Repeat` padding. Help is rendered at most once per invocation (on `--help`), so this is not a hot path.
-- **Allocation floor**: the closures captured per flag are architectural — generic type-safe binding without reflection requires a per-flag setter that closes over `*T`. Eliminating them would mean either reflection (slower, unsafe) or losing compile-time type safety. The 0-alloc `Reset` shows the steady-state cost once the tree exists.
-- **Parallel scaling**: `New_Parallel` builds independent parsers per iteration with no shared state, so it scales with cores and shows no contention.
+**Construction is a one-time startup cost — Linux CI is ~15–40% faster than Windows.** `New_SingleFlag` is 678 ns (Linux) vs 934 ns (Windows). Each `AddFlag` allocates a `flagMeta`, a closure pair (`setFunc`/`resetFunc`) that escapes because it captures the bound pointer, and map entries. This is paid once per process, not per request.
+
+**Scales linearly with flag count.** `New_ManyFlags` (five flags) is ~3× `New_SingleFlag` on Linux (2.0 µs vs 678 ns) — dominated by per-flag closure and map insertions.
+
+**Parser_Reset — 0 allocs on all platforms (~45–55 ns).** Reset reuses the existing command tree; it only clears `set` markers, resets the positional slice header, and calls captured `resetFunc`. Re-running `New` per test case would reallocate the entire tree — `Reset` is the right tool for table-driven tests.
+
+**Parser_Help — not a hot path.** Allocations come from `strings.Builder` growth and padding; help renders at most once per invocation on `--help`.
+
+**Parallel New builds independent parsers.** `New_Parallel` scales with cores and shows no shared-state contention. Linux (703 ns) beats laptop (905 ns) and Windows (1.10 µs) because server CPUs sustain higher single-thread throughput on allocation-heavy setup work.
+
+**Allocation floor is architectural.** Generic type-safe binding without reflection requires a per-flag setter closing over `*T`. Eliminating the closures would mean reflection (slower) or losing compile-time type safety. The 0-alloc `Reset` proves steady-state parse cost once the tree exists.
 
 ## Quality
 

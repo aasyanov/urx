@@ -1,0 +1,605 @@
+goos: linux
+goarch: amd64
+pkg: github.com/aasyanov/urx/adaptx
+cpu: AMD EPYC 7763 64-Core Processor                
+BenchmarkExecute-4            	 2437453	       422.1 ns/op	      52 B/op	       3 allocs/op
+BenchmarkExecute-4            	 3184814	       374.1 ns/op	      52 B/op	       3 allocs/op
+BenchmarkExecute-4            	 3112904	       380.3 ns/op	      52 B/op	       3 allocs/op
+BenchmarkExecute_Parallel-4   	 2237860	       539.9 ns/op	      52 B/op	       3 allocs/op
+BenchmarkExecute_Parallel-4   	 2232639	       544.0 ns/op	      52 B/op	       3 allocs/op
+BenchmarkExecute_Parallel-4   	 2205250	       539.3 ns/op	      52 B/op	       3 allocs/op
+BenchmarkAcquire-4            	 8835438	       136.2 ns/op	      28 B/op	       2 allocs/op
+BenchmarkAcquire-4            	 8879283	       135.3 ns/op	      28 B/op	       2 allocs/op
+BenchmarkAcquire-4            	 8919861	       135.6 ns/op	      28 B/op	       2 allocs/op
+BenchmarkAcquire_Parallel-4   	 6148471	       192.0 ns/op	      28 B/op	       2 allocs/op
+BenchmarkAcquire_Parallel-4   	 6338796	       189.5 ns/op	      28 B/op	       2 allocs/op
+BenchmarkAcquire_Parallel-4   	 6370592	       192.1 ns/op	      28 B/op	       2 allocs/op
+BenchmarkTryAcquire-4         	12537751	        93.36 ns/op	      28 B/op	       2 allocs/op
+BenchmarkTryAcquire-4         	12903246	        93.52 ns/op	      28 B/op	       2 allocs/op
+BenchmarkTryAcquire-4         	13156168	        93.11 ns/op	      28 B/op	       2 allocs/op
+BenchmarkTryExecute-4         	 3673592	       327.3 ns/op	      52 B/op	       3 allocs/op
+BenchmarkTryExecute-4         	 3716234	       321.6 ns/op	      52 B/op	       3 allocs/op
+BenchmarkTryExecute-4         	 3743649	       320.7 ns/op	      52 B/op	       3 allocs/op
+BenchmarkAllow-4              	239151908	         5.045 ns/op	       0 B/op	       0 allocs/op
+BenchmarkAllow-4              	234033744	         5.102 ns/op	       0 B/op	       0 allocs/op
+BenchmarkAllow-4              	236840256	         5.076 ns/op	       0 B/op	       0 allocs/op
+BenchmarkLimit-4              	180156322	         6.659 ns/op	       0 B/op	       0 allocs/op
+BenchmarkLimit-4              	180497948	         6.652 ns/op	       0 B/op	       0 allocs/op
+BenchmarkLimit-4              	180194238	         6.626 ns/op	       0 B/op	       0 allocs/op
+PASS
+ok  	github.com/aasyanov/urx/adaptx	30.899s
+goos: linux
+goarch: amd64
+pkg: github.com/aasyanov/urx/bulkx
+cpu: AMD EPYC 7763 64-Core Processor                
+BenchmarkExecute-4            	13872363	        77.27 ns/op	      24 B/op	       1 allocs/op
+BenchmarkExecute-4            	15391599	        76.74 ns/op	      24 B/op	       1 allocs/op
+BenchmarkExecute-4            	15827350	        77.44 ns/op	      24 B/op	       1 allocs/op
+BenchmarkExecute_Parallel-4   	 7646454	       158.5 ns/op	      24 B/op	       1 allocs/op
+BenchmarkExecute_Parallel-4   	 7589018	       149.7 ns/op	      24 B/op	       1 allocs/op
+BenchmarkExecute_Parallel-4   	11443357	       162.5 ns/op	      24 B/op	       1 allocs/op
+BenchmarkExecute_Reject-4     	41891914	        27.41 ns/op	       0 B/op	       0 allocs/op
+BenchmarkExecute_Reject-4     	146305977	         8.195 ns/op	       0 B/op	       0 allocs/op
+BenchmarkExecute_Reject-4     	147533360	         8.146 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTryExecute-4         	15306618	        75.24 ns/op	      24 B/op	       1 allocs/op
+BenchmarkTryExecute-4         	15962200	        74.21 ns/op	      24 B/op	       1 allocs/op
+BenchmarkTryExecute-4         	15194821	        74.71 ns/op	      24 B/op	       1 allocs/op
+BenchmarkAcquire-4            	17276158	        65.72 ns/op	      16 B/op	       1 allocs/op
+BenchmarkAcquire-4            	18217317	        65.32 ns/op	      16 B/op	       1 allocs/op
+BenchmarkAcquire-4            	19018311	        64.67 ns/op	      16 B/op	       1 allocs/op
+BenchmarkAcquire_Parallel-4   	 9053232	       136.6 ns/op	      16 B/op	       1 allocs/op
+BenchmarkAcquire_Parallel-4   	 8714966	       137.5 ns/op	      16 B/op	       1 allocs/op
+BenchmarkAcquire_Parallel-4   	 8816964	       138.2 ns/op	      16 B/op	       1 allocs/op
+BenchmarkAllow-4              	707244163	         1.689 ns/op	       0 B/op	       0 allocs/op
+BenchmarkAllow-4              	706861000	         1.688 ns/op	       0 B/op	       0 allocs/op
+BenchmarkAllow-4              	712690657	         1.687 ns/op	       0 B/op	       0 allocs/op
+PASS
+ok  	github.com/aasyanov/urx/bulkx	26.378s
+goos: linux
+goarch: amd64
+pkg: github.com/aasyanov/urx/cfgx
+cpu: AMD EPYC 7763 64-Core Processor                
+BenchmarkParse_YAML-4                     	  153811	      7651 ns/op	    7472 B/op	      54 allocs/op
+BenchmarkParse_YAML-4                     	  147973	      7744 ns/op	    7472 B/op	      54 allocs/op
+BenchmarkParse_YAML-4                     	  153001	      7893 ns/op	    7472 B/op	      54 allocs/op
+BenchmarkParse_JSON-4                     	 1407598	       854.4 ns/op	     272 B/op	       7 allocs/op
+BenchmarkParse_JSON-4                     	 1389675	       865.4 ns/op	     272 B/op	       7 allocs/op
+BenchmarkParse_JSON-4                     	 1421185	       839.4 ns/op	     272 B/op	       7 allocs/op
+BenchmarkParse_TOML-4                     	  266272	      4504 ns/op	    3544 B/op	      37 allocs/op
+BenchmarkParse_TOML-4                     	  260122	      4531 ns/op	    3544 B/op	      37 allocs/op
+BenchmarkParse_TOML-4                     	  274149	      4673 ns/op	    3544 B/op	      37 allocs/op
+BenchmarkMarshal_YAML-4                   	  281906	      3907 ns/op	    6832 B/op	      27 allocs/op
+BenchmarkMarshal_YAML-4                   	  314552	      3897 ns/op	    6832 B/op	      27 allocs/op
+BenchmarkMarshal_YAML-4                   	  296979	      4582 ns/op	    6832 B/op	      27 allocs/op
+BenchmarkMarshal_JSON-4                   	 2375090	       507.5 ns/op	      96 B/op	       2 allocs/op
+BenchmarkMarshal_JSON-4                   	 2339568	       511.1 ns/op	      96 B/op	       2 allocs/op
+BenchmarkMarshal_JSON-4                   	 2356950	       505.4 ns/op	      96 B/op	       2 allocs/op
+BenchmarkLoad_InjectedReader-4            	  174768	      6770 ns/op	    7472 B/op	      54 allocs/op
+BenchmarkLoad_InjectedReader-4            	  172015	      6989 ns/op	    7472 B/op	      54 allocs/op
+BenchmarkLoad_InjectedReader-4            	  175596	      6882 ns/op	    7472 B/op	      54 allocs/op
+BenchmarkParse_JSON_Parallel-4            	 3053014	       393.3 ns/op	     272 B/op	       7 allocs/op
+BenchmarkParse_JSON_Parallel-4            	 3023884	       393.3 ns/op	     272 B/op	       7 allocs/op
+BenchmarkParse_JSON_Parallel-4            	 3071750	       393.3 ns/op	     272 B/op	       7 allocs/op
+BenchmarkLoad_InjectedReader_Parallel-4   	  274024	      4347 ns/op	    7472 B/op	      54 allocs/op
+BenchmarkLoad_InjectedReader_Parallel-4   	  303469	      4125 ns/op	    7472 B/op	      54 allocs/op
+BenchmarkLoad_InjectedReader_Parallel-4   	  246568	      4310 ns/op	    7472 B/op	      54 allocs/op
+BenchmarkResolveFormat-4                  	78724995	        14.65 ns/op	       0 B/op	       0 allocs/op
+BenchmarkResolveFormat-4                  	80927995	        14.57 ns/op	       0 B/op	       0 allocs/op
+BenchmarkResolveFormat-4                  	83109088	        14.64 ns/op	       0 B/op	       0 allocs/op
+PASS
+ok  	github.com/aasyanov/urx/cfgx	34.628s
+goos: linux
+goarch: amd64
+pkg: github.com/aasyanov/urx/circuitx
+cpu: AMD EPYC 7763 64-Core Processor                
+BenchmarkExecute_Closed-4               	26382526	        44.31 ns/op	      32 B/op	       1 allocs/op
+BenchmarkExecute_Closed-4               	27811977	        44.26 ns/op	      32 B/op	       1 allocs/op
+BenchmarkExecute_Closed-4               	26797302	        44.50 ns/op	      32 B/op	       1 allocs/op
+BenchmarkExecute_Closed_Parallel-4      	42428974	        28.09 ns/op	      32 B/op	       1 allocs/op
+BenchmarkExecute_Closed_Parallel-4      	41754535	        31.46 ns/op	      32 B/op	       1 allocs/op
+BenchmarkExecute_Closed_Parallel-4      	42418933	        28.42 ns/op	      32 B/op	       1 allocs/op
+BenchmarkExecute_Open-4                 	16740712	        70.42 ns/op	       0 B/op	       0 allocs/op
+BenchmarkExecute_Open-4                 	16692303	        71.64 ns/op	       0 B/op	       0 allocs/op
+BenchmarkExecute_Open-4                 	16773067	        71.37 ns/op	       0 B/op	       0 allocs/op
+BenchmarkExecute_Open_Parallel-4        	37654473	        32.15 ns/op	       0 B/op	       0 allocs/op
+BenchmarkExecute_Open_Parallel-4        	36959278	        32.10 ns/op	       0 B/op	       0 allocs/op
+BenchmarkExecute_Open_Parallel-4        	37052347	        31.66 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTryExecute_Closed-4            	25611369	        45.26 ns/op	      32 B/op	       1 allocs/op
+BenchmarkTryExecute_Closed-4            	25934658	        45.05 ns/op	      32 B/op	       1 allocs/op
+BenchmarkTryExecute_Closed-4            	26585779	        44.96 ns/op	      32 B/op	       1 allocs/op
+BenchmarkTryExecute_Open-4              	16705483	        70.85 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTryExecute_Open-4              	15662491	        76.23 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTryExecute_Open-4              	16733426	        71.62 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTryExecute_Open_Parallel-4     	37597509	        31.78 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTryExecute_Open_Parallel-4     	36513918	        31.77 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTryExecute_Open_Parallel-4     	37327561	        31.74 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTryExecute_Closed_Parallel-4   	42656906	        29.06 ns/op	      32 B/op	       1 allocs/op
+BenchmarkTryExecute_Closed_Parallel-4   	41859512	        29.11 ns/op	      32 B/op	       1 allocs/op
+BenchmarkTryExecute_Closed_Parallel-4   	37274496	        28.92 ns/op	      32 B/op	       1 allocs/op
+BenchmarkState-4                        	474927939	         2.522 ns/op	       0 B/op	       0 allocs/op
+BenchmarkState-4                        	477810669	         2.512 ns/op	       0 B/op	       0 allocs/op
+BenchmarkState-4                        	476466171	         2.516 ns/op	       0 B/op	       0 allocs/op
+BenchmarkStats-4                        	100000000	        11.73 ns/op	       0 B/op	       0 allocs/op
+BenchmarkStats-4                        	100000000	        11.65 ns/op	       0 B/op	       0 allocs/op
+BenchmarkStats-4                        	100000000	        11.66 ns/op	       0 B/op	       0 allocs/op
+PASS
+ok  	github.com/aasyanov/urx/circuitx	36.140s
+goos: linux
+goarch: amd64
+pkg: github.com/aasyanov/urx/clix
+cpu: AMD EPYC 7763 64-Core Processor                
+BenchmarkNew_SingleFlag-4   	 1738352	       690.2 ns/op	    1216 B/op	      15 allocs/op
+BenchmarkNew_SingleFlag-4   	 1788939	       668.3 ns/op	    1216 B/op	      15 allocs/op
+BenchmarkNew_SingleFlag-4   	 1764628	       677.5 ns/op	    1216 B/op	      15 allocs/op
+BenchmarkNew_ManyFlags-4    	  602127	      2004 ns/op	    2560 B/op	      34 allocs/op
+BenchmarkNew_ManyFlags-4    	  586711	      1983 ns/op	    2560 B/op	      34 allocs/op
+BenchmarkNew_ManyFlags-4    	  604570	      2002 ns/op	    2560 B/op	      34 allocs/op
+BenchmarkNew_Subcommand-4   	 1000000	      1014 ns/op	    1776 B/op	      21 allocs/op
+BenchmarkNew_Subcommand-4   	 1000000	      1010 ns/op	    1776 B/op	      21 allocs/op
+BenchmarkNew_Subcommand-4   	 1000000	      1074 ns/op	    1776 B/op	      21 allocs/op
+BenchmarkParser_Reset-4     	24672309	        48.58 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParser_Reset-4     	24662246	        48.72 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParser_Reset-4     	24671832	        48.69 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParser_Help-4      	 1557088	       769.5 ns/op	     528 B/op	      10 allocs/op
+BenchmarkParser_Help-4      	 1562594	       764.6 ns/op	     528 B/op	      10 allocs/op
+BenchmarkParser_Help-4      	 1584264	       759.0 ns/op	     528 B/op	      10 allocs/op
+BenchmarkNew_Parallel-4     	 1655942	       695.7 ns/op	    1544 B/op	      20 allocs/op
+BenchmarkNew_Parallel-4     	 1692273	       708.6 ns/op	    1544 B/op	      20 allocs/op
+BenchmarkNew_Parallel-4     	 1640298	       703.1 ns/op	    1544 B/op	      20 allocs/op
+PASS
+ok  	github.com/aasyanov/urx/clix	23.181s
+goos: linux
+goarch: amd64
+pkg: github.com/aasyanov/urx/envx
+cpu: AMD EPYC 7763 64-Core Processor                
+BenchmarkBind_Int-4        	 8181934	       128.7 ns/op	     160 B/op	       1 allocs/op
+BenchmarkBind_Int-4        	 9330061	       126.2 ns/op	     168 B/op	       1 allocs/op
+BenchmarkBind_Int-4        	 8382307	       150.1 ns/op	     178 B/op	       1 allocs/op
+BenchmarkBind_String-4     	 8415312	       141.7 ns/op	     178 B/op	       1 allocs/op
+BenchmarkBind_String-4     	 8753078	       121.8 ns/op	     174 B/op	       1 allocs/op
+BenchmarkBind_String-4     	 9005238	       143.5 ns/op	     171 B/op	       1 allocs/op
+BenchmarkBind_Duration-4   	 6972460	       170.2 ns/op	     174 B/op	       1 allocs/op
+BenchmarkBind_Duration-4   	 6991761	       158.1 ns/op	     174 B/op	       1 allocs/op
+BenchmarkBind_Duration-4   	 7492786	       175.5 ns/op	     168 B/op	       1 allocs/op
+BenchmarkBind_List-4       	 3671578	       346.2 ns/op	     348 B/op	       3 allocs/op
+BenchmarkBind_List-4       	 3551010	       352.9 ns/op	     351 B/op	       3 allocs/op
+BenchmarkBind_List-4       	 3410662	       367.2 ns/op	     355 B/op	       3 allocs/op
+BenchmarkBind_Absent-4     	 9383212	       122.3 ns/op	     168 B/op	       1 allocs/op
+BenchmarkBind_Absent-4     	10990316	       108.3 ns/op	     174 B/op	       1 allocs/op
+BenchmarkBind_Absent-4     	 9730806	       112.3 ns/op	     164 B/op	       1 allocs/op
+BenchmarkBind_Time-4       	 6655188	       170.4 ns/op	     195 B/op	       1 allocs/op
+BenchmarkBind_Time-4       	 5962658	       175.0 ns/op	     184 B/op	       1 allocs/op
+BenchmarkBind_Time-4       	 6904732	       165.6 ns/op	     191 B/op	       1 allocs/op
+BenchmarkValidate-4        	 3806935	       315.6 ns/op	     184 B/op	       6 allocs/op
+BenchmarkValidate-4        	 3824010	       316.4 ns/op	     184 B/op	       6 allocs/op
+BenchmarkValidate-4        	 3793429	       315.1 ns/op	     184 B/op	       6 allocs/op
+BenchmarkParse_Int-4       	122165186	         9.806 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParse_Int-4       	123298077	         9.735 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParse_Int-4       	122979163	         9.759 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParse_Time-4      	31001079	        38.23 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParse_Time-4      	31070756	        38.23 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParse_Time-4      	31433222	        38.19 ns/op	       0 B/op	       0 allocs/op
+PASS
+ok  	github.com/aasyanov/urx/envx	33.563s
+goos: linux
+goarch: amd64
+pkg: github.com/aasyanov/urx/fallx
+cpu: AMD EPYC 7763 64-Core Processor                
+BenchmarkExecute_StaticSuccess-4            	24083593	        49.58 ns/op	      48 B/op	       1 allocs/op
+BenchmarkExecute_StaticSuccess-4            	24598929	        48.11 ns/op	      48 B/op	       1 allocs/op
+BenchmarkExecute_StaticSuccess-4            	24150268	        49.70 ns/op	      48 B/op	       1 allocs/op
+BenchmarkExecute_StaticSuccess_Parallel-4   	21061376	        56.44 ns/op	      48 B/op	       1 allocs/op
+BenchmarkExecute_StaticSuccess_Parallel-4   	20922642	        56.84 ns/op	      48 B/op	       1 allocs/op
+BenchmarkExecute_StaticSuccess_Parallel-4   	21365594	        56.89 ns/op	      48 B/op	       1 allocs/op
+BenchmarkExecute_StaticFallback-4           	23081340	        52.17 ns/op	      48 B/op	       1 allocs/op
+BenchmarkExecute_StaticFallback-4           	23635743	        51.75 ns/op	      48 B/op	       1 allocs/op
+BenchmarkExecute_StaticFallback-4           	22596200	        52.16 ns/op	      48 B/op	       1 allocs/op
+BenchmarkExecute_FuncFallback-4             	19087102	        63.75 ns/op	      48 B/op	       1 allocs/op
+BenchmarkExecute_FuncFallback-4             	19039030	        63.43 ns/op	      48 B/op	       1 allocs/op
+BenchmarkExecute_FuncFallback-4             	18279109	        63.77 ns/op	      48 B/op	       1 allocs/op
+BenchmarkExecute_CachedHit-4                	 7736581	       153.7 ns/op	      48 B/op	       1 allocs/op
+BenchmarkExecute_CachedHit-4                	 7690363	       153.7 ns/op	      48 B/op	       1 allocs/op
+BenchmarkExecute_CachedHit-4                	 7845573	       153.8 ns/op	      48 B/op	       1 allocs/op
+BenchmarkExecute_CachedHit_Parallel-4       	 5828796	       205.2 ns/op	      48 B/op	       1 allocs/op
+BenchmarkExecute_CachedHit_Parallel-4       	 5833125	       204.9 ns/op	      48 B/op	       1 allocs/op
+BenchmarkExecute_CachedHit_Parallel-4       	 5784154	       205.4 ns/op	      48 B/op	       1 allocs/op
+BenchmarkExecute_CachedStore-4              	 8186817	       145.5 ns/op	      48 B/op	       1 allocs/op
+BenchmarkExecute_CachedStore-4              	 8217283	       145.5 ns/op	      48 B/op	       1 allocs/op
+BenchmarkExecute_CachedStore-4              	 8292792	       144.5 ns/op	      48 B/op	       1 allocs/op
+PASS
+ok  	github.com/aasyanov/urx/fallx	26.925s
+goos: linux
+goarch: amd64
+pkg: github.com/aasyanov/urx/healthx
+cpu: AMD EPYC 7763 64-Core Processor                
+BenchmarkLiveness-4              	757897911	         1.573 ns/op	       0 B/op	       0 allocs/op
+BenchmarkLiveness-4              	764038675	         1.572 ns/op	       0 B/op	       0 allocs/op
+BenchmarkLiveness-4              	764990587	         1.571 ns/op	       0 B/op	       0 allocs/op
+BenchmarkReadiness_NoChecks-4    	 9686988	       123.5 ns/op	       4 B/op	       1 allocs/op
+BenchmarkReadiness_NoChecks-4    	 9684302	       123.3 ns/op	       4 B/op	       1 allocs/op
+BenchmarkReadiness_NoChecks-4    	 9580974	       123.9 ns/op	       4 B/op	       1 allocs/op
+BenchmarkReadiness_OneCheck-4    	  260365	      4847 ns/op	    1456 B/op	      16 allocs/op
+BenchmarkReadiness_OneCheck-4    	  242415	      4757 ns/op	    1456 B/op	      16 allocs/op
+BenchmarkReadiness_OneCheck-4    	  233766	      4745 ns/op	    1456 B/op	      16 allocs/op
+BenchmarkReadiness_TenChecks-4   	   32856	     36463 ns/op	    6321 B/op	      81 allocs/op
+BenchmarkReadiness_TenChecks-4   	   32991	     36208 ns/op	    6319 B/op	      81 allocs/op
+BenchmarkReadiness_TenChecks-4   	   33109	     36183 ns/op	    6319 B/op	      81 allocs/op
+BenchmarkReadiness_Parallel-4    	  193016	      6218 ns/op	    2853 B/op	      37 allocs/op
+BenchmarkReadiness_Parallel-4    	  196798	      6043 ns/op	    2853 B/op	      37 allocs/op
+BenchmarkReadiness_Parallel-4    	  195922	      6015 ns/op	    2853 B/op	      37 allocs/op
+PASS
+ok  	github.com/aasyanov/urx/healthx	18.062s
+goos: linux
+goarch: amd64
+pkg: github.com/aasyanov/urx/hedgex
+cpu: AMD EPYC 7763 64-Core Processor                
+BenchmarkExecute_PrimaryWins-4            	  615086	      1890 ns/op	     792 B/op	      11 allocs/op
+BenchmarkExecute_PrimaryWins-4            	  591619	      1880 ns/op	     792 B/op	      11 allocs/op
+BenchmarkExecute_PrimaryWins-4            	  657807	      1899 ns/op	     792 B/op	      11 allocs/op
+BenchmarkExecute_PrimaryWins_Parallel-4   	 1503285	       793.5 ns/op	     792 B/op	      11 allocs/op
+BenchmarkExecute_PrimaryWins_Parallel-4   	 1497926	       799.5 ns/op	     792 B/op	      11 allocs/op
+BenchmarkExecute_PrimaryWins_Parallel-4   	 1493942	       848.7 ns/op	     792 B/op	      11 allocs/op
+BenchmarkExecute_NoHedging-4              	11802896	        98.77 ns/op	      48 B/op	       1 allocs/op
+BenchmarkExecute_NoHedging-4              	12154186	        99.01 ns/op	      48 B/op	       1 allocs/op
+BenchmarkExecute_NoHedging-4              	12061304	        98.49 ns/op	      48 B/op	       1 allocs/op
+BenchmarkExecuteMulti_PrimaryWins-4       	  598716	      1885 ns/op	     792 B/op	      11 allocs/op
+BenchmarkExecuteMulti_PrimaryWins-4       	  587826	      1894 ns/op	     792 B/op	      11 allocs/op
+BenchmarkExecuteMulti_PrimaryWins-4       	  585772	      1916 ns/op	     792 B/op	      11 allocs/op
+BenchmarkExecute_HedgeWins-4              	     231	   5159324 ns/op	     864 B/op	      13 allocs/op
+BenchmarkExecute_HedgeWins-4              	     231	   5160718 ns/op	     864 B/op	      13 allocs/op
+BenchmarkExecute_HedgeWins-4              	     231	   5167028 ns/op	     864 B/op	      13 allocs/op
+BenchmarkDelays-4                         	33176613	        33.87 ns/op	      64 B/op	       1 allocs/op
+BenchmarkDelays-4                         	35025184	        33.76 ns/op	      64 B/op	       1 allocs/op
+BenchmarkDelays-4                         	35720713	        33.77 ns/op	      64 B/op	       1 allocs/op
+PASS
+ok  	github.com/aasyanov/urx/hedgex	23.648s
+PASS
+ok  	github.com/aasyanov/urx/internal/testx	0.005s
+goos: linux
+goarch: amd64
+pkg: github.com/aasyanov/urx/lrux
+cpu: AMD EPYC 7763 64-Core Processor                
+BenchmarkCache_Set-4                   	16389561	        72.83 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCache_Set-4                   	16217386	        73.56 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCache_Set-4                   	16484641	        72.88 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCache_Get_Hit-4               	13324484	        90.54 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCache_Get_Hit-4               	13098920	        91.76 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCache_Get_Hit-4               	13304968	        90.17 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCache_Get_Miss-4              	95794286	        12.57 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCache_Get_Miss-4              	93900254	        12.42 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCache_Get_Miss-4              	96339577	        12.68 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCache_GetFast_Hit-4           	60272830	        20.20 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCache_GetFast_Hit-4           	61202977	        20.18 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCache_GetFast_Hit-4           	60061474	        19.98 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCache_Mixed-4                 	13353758	        90.25 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCache_Mixed-4                 	13218219	        90.35 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCache_Mixed-4                 	13302537	        90.34 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCache_Get_Parallel-4          	 9728217	       124.6 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCache_Get_Parallel-4          	 9578869	       124.4 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCache_Get_Parallel-4          	 9943239	       122.9 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardedCache_Set_Parallel-4   	 8238988	       156.8 ns/op	      55 B/op	       0 allocs/op
+BenchmarkShardedCache_Set_Parallel-4   	 7135514	       158.1 ns/op	      57 B/op	       0 allocs/op
+BenchmarkShardedCache_Set_Parallel-4   	 7048239	       165.1 ns/op	      64 B/op	       0 allocs/op
+BenchmarkShardedCache_Get_Parallel-4   	16104754	        80.33 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardedCache_Get_Parallel-4   	15502228	        78.09 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardedCache_Get_Parallel-4   	15192537	        78.59 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCache_GetOrCompute_Hit-4      	12865771	        93.71 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCache_GetOrCompute_Hit-4      	12852966	        93.31 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCache_GetOrCompute_Hit-4      	12826914	        93.49 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCache_GetOrCompute_Miss-4     	 2444230	       549.8 ns/op	     174 B/op	       3 allocs/op
+BenchmarkCache_GetOrCompute_Miss-4     	 2506935	       553.5 ns/op	     174 B/op	       3 allocs/op
+BenchmarkCache_GetOrCompute_Miss-4     	 2432347	       559.7 ns/op	     175 B/op	       3 allocs/op
+BenchmarkHasher_String-4               	166994310	         7.181 ns/op	       0 B/op	       0 allocs/op
+BenchmarkHasher_String-4               	166220068	         7.217 ns/op	       0 B/op	       0 allocs/op
+BenchmarkHasher_String-4               	166719075	         7.200 ns/op	       0 B/op	       0 allocs/op
+BenchmarkHasher_Int-4                  	203823256	         5.905 ns/op	       0 B/op	       0 allocs/op
+BenchmarkHasher_Int-4                  	209986360	         5.777 ns/op	       0 B/op	       0 allocs/op
+BenchmarkHasher_Int-4                  	204005644	         5.902 ns/op	       0 B/op	       0 allocs/op
+PASS
+ok  	github.com/aasyanov/urx/lrux	45.100s
+goos: linux
+goarch: amd64
+pkg: github.com/aasyanov/urx/panix
+cpu: AMD EPYC 7763 64-Core Processor                
+BenchmarkSafe_NoPanic-4                	147570434	         8.126 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSafe_NoPanic-4                	147988750	         8.108 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSafe_NoPanic-4                	147632071	         8.155 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSafe_NoPanic_Error-4          	146099512	         8.217 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSafe_NoPanic_Error-4          	146932767	         8.164 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSafe_NoPanic_Error-4          	146181854	         8.212 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSafe_Panic-4                  	  163603	      7434 ns/op	    4160 B/op	       2 allocs/op
+BenchmarkSafe_Panic-4                  	  162544	      7354 ns/op	    4160 B/op	       2 allocs/op
+BenchmarkSafe_Panic-4                  	  159390	      7480 ns/op	    4160 B/op	       2 allocs/op
+BenchmarkSafeVoid_NoPanic-4            	100000000	        10.62 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSafeVoid_NoPanic-4            	100000000	        10.74 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSafeVoid_NoPanic-4            	100000000	        10.70 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSafeVoid_Panic-4              	  139237	      8594 ns/op	    4160 B/op	       2 allocs/op
+BenchmarkSafeVoid_Panic-4              	  135373	      8675 ns/op	    4160 B/op	       2 allocs/op
+BenchmarkSafeVoid_Panic-4              	  139178	      8593 ns/op	    4160 B/op	       2 allocs/op
+BenchmarkSafe_NoPanic_Parallel-4       	310743828	         3.868 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSafe_NoPanic_Parallel-4       	309920264	         3.854 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSafe_NoPanic_Parallel-4       	310668781	         3.857 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSafe_Panic_Parallel-4         	   99500	     11678 ns/op	    4160 B/op	       2 allocs/op
+BenchmarkSafe_Panic_Parallel-4         	  100506	     11702 ns/op	    4160 B/op	       2 allocs/op
+BenchmarkSafe_Panic_Parallel-4         	   98617	     11620 ns/op	    4160 B/op	       2 allocs/op
+BenchmarkSafeVoid_NoPanic_Parallel-4   	270854971	         4.425 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSafeVoid_NoPanic_Parallel-4   	270824972	         4.426 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSafeVoid_NoPanic_Parallel-4   	271167502	         4.437 ns/op	       0 B/op	       0 allocs/op
+BenchmarkWrap_NoPanic-4                	145474094	         8.232 ns/op	       0 B/op	       0 allocs/op
+BenchmarkWrap_NoPanic-4                	146322908	         8.213 ns/op	       0 B/op	       0 allocs/op
+BenchmarkWrap_NoPanic-4                	147927896	         8.111 ns/op	       0 B/op	       0 allocs/op
+BenchmarkWrap_Panic-4                  	  149331	      7872 ns/op	    4160 B/op	       2 allocs/op
+BenchmarkWrap_Panic-4                  	  149170	      7876 ns/op	    4160 B/op	       2 allocs/op
+BenchmarkWrap_Panic-4                  	  153936	      7805 ns/op	    4160 B/op	       2 allocs/op
+BenchmarkWrapVoid_NoPanic-4            	100000000	        10.59 ns/op	       0 B/op	       0 allocs/op
+BenchmarkWrapVoid_NoPanic-4            	100000000	        10.68 ns/op	       0 B/op	       0 allocs/op
+BenchmarkWrapVoid_NoPanic-4            	100000000	        10.66 ns/op	       0 B/op	       0 allocs/op
+BenchmarkWrapVoid_Panic-4              	  108807	      9311 ns/op	    4160 B/op	       2 allocs/op
+BenchmarkWrapVoid_Panic-4              	  128269	      9190 ns/op	    4160 B/op	       2 allocs/op
+BenchmarkWrapVoid_Panic-4              	  130734	      9123 ns/op	    4160 B/op	       2 allocs/op
+BenchmarkSafeGo_NoPanic-4              	 2813464	       425.8 ns/op	      64 B/op	       1 allocs/op
+BenchmarkSafeGo_NoPanic-4              	 2804032	       427.7 ns/op	      64 B/op	       1 allocs/op
+BenchmarkSafeGo_NoPanic-4              	 2800712	       425.2 ns/op	      64 B/op	       1 allocs/op
+BenchmarkSafeGo_Panic-4                	   80067	     16341 ns/op	    4240 B/op	       4 allocs/op
+BenchmarkSafeGo_Panic-4                	   68977	     16507 ns/op	    4240 B/op	       4 allocs/op
+BenchmarkSafeGo_Panic-4                	   78043	     15602 ns/op	    4240 B/op	       4 allocs/op
+BenchmarkCaptureStack-4                	  280106	      3997 ns/op	    4096 B/op	       1 allocs/op
+BenchmarkCaptureStack-4                	  294445	      4006 ns/op	    4096 B/op	       1 allocs/op
+BenchmarkCaptureStack-4                	  302222	      4026 ns/op	    4096 B/op	       1 allocs/op
+PASS
+ok  	github.com/aasyanov/urx/panix	55.687s
+goos: linux
+goarch: amd64
+pkg: github.com/aasyanov/urx/poolx
+cpu: AMD EPYC 7763 64-Core Processor                
+BenchmarkObjectPool_GetPut-4                      	71306395	        16.32 ns/op	       0 B/op	       0 allocs/op
+BenchmarkObjectPool_GetPut-4                      	72164176	        16.33 ns/op	       0 B/op	       0 allocs/op
+BenchmarkObjectPool_GetPut-4                      	73013952	        16.34 ns/op	       0 B/op	       0 allocs/op
+BenchmarkObjectPool_GetPut_WithReset-4            	69377013	        16.93 ns/op	       0 B/op	       0 allocs/op
+BenchmarkObjectPool_GetPut_WithReset-4            	70379199	        17.02 ns/op	       0 B/op	       0 allocs/op
+BenchmarkObjectPool_GetPut_WithReset-4            	70380488	        16.95 ns/op	       0 B/op	       0 allocs/op
+BenchmarkObjectPool_GetPut_Parallel-4             	31474545	        47.94 ns/op	       0 B/op	       0 allocs/op
+BenchmarkObjectPool_GetPut_Parallel-4             	31837646	        47.67 ns/op	       0 B/op	       0 allocs/op
+BenchmarkObjectPool_GetPut_Parallel-4             	31824549	        47.77 ns/op	       0 B/op	       0 allocs/op
+BenchmarkWorkerPool_Submit-4                      	 4173474	       287.1 ns/op	      48 B/op	       1 allocs/op
+BenchmarkWorkerPool_Submit-4                      	 4281388	       279.4 ns/op	      48 B/op	       1 allocs/op
+BenchmarkWorkerPool_Submit-4                      	 4253493	       284.3 ns/op	      48 B/op	       1 allocs/op
+BenchmarkObjectPool_GetPut_WithReset_Parallel-4   	30712120	        47.84 ns/op	       0 B/op	       0 allocs/op
+BenchmarkObjectPool_GetPut_WithReset_Parallel-4   	30707644	        47.63 ns/op	       0 B/op	       0 allocs/op
+BenchmarkObjectPool_GetPut_WithReset_Parallel-4   	30779793	        47.96 ns/op	       0 B/op	       0 allocs/op
+BenchmarkWorkerPool_SubmitWait-4                  	 1593333	       753.2 ns/op	     176 B/op	       3 allocs/op
+BenchmarkWorkerPool_SubmitWait-4                  	 1579804	       758.6 ns/op	     176 B/op	       3 allocs/op
+BenchmarkWorkerPool_SubmitWait-4                  	 1599147	       750.1 ns/op	     176 B/op	       3 allocs/op
+BenchmarkWorkerPool_Submit_Parallel-4             	  965302	      1255 ns/op	     176 B/op	       3 allocs/op
+BenchmarkWorkerPool_Submit_Parallel-4             	  996682	      1230 ns/op	     176 B/op	       3 allocs/op
+BenchmarkWorkerPool_Submit_Parallel-4             	  959070	      1228 ns/op	     176 B/op	       3 allocs/op
+BenchmarkBatch_Add-4                              	167455018	         7.151 ns/op	       8 B/op	       0 allocs/op
+BenchmarkBatch_Add-4                              	167376483	         7.174 ns/op	       7 B/op	       0 allocs/op
+BenchmarkBatch_Add-4                              	167108803	         7.156 ns/op	       8 B/op	       0 allocs/op
+BenchmarkBatch_Add_Parallel-4                     	48523023	        26.11 ns/op	       8 B/op	       0 allocs/op
+BenchmarkBatch_Add_Parallel-4                     	52743780	        26.42 ns/op	       8 B/op	       0 allocs/op
+BenchmarkBatch_Add_Parallel-4                     	50820882	        26.40 ns/op	       8 B/op	       0 allocs/op
+PASS
+ok  	github.com/aasyanov/urx/poolx	40.646s
+goos: linux
+goarch: amd64
+pkg: github.com/aasyanov/urx/quotax
+cpu: AMD EPYC 7763 64-Core Processor                
+BenchmarkAllow_Hit-4                     	 7337751	       164.1 ns/op	       0 B/op	       0 allocs/op
+BenchmarkAllow_Hit-4                     	 7323207	       163.6 ns/op	       0 B/op	       0 allocs/op
+BenchmarkAllow_Hit-4                     	 7329706	       163.6 ns/op	       0 B/op	       0 allocs/op
+BenchmarkAllow_Hit_Parallel-4            	 6614286	       181.4 ns/op	       0 B/op	       0 allocs/op
+BenchmarkAllow_Hit_Parallel-4            	 6322318	       180.4 ns/op	       0 B/op	       0 allocs/op
+BenchmarkAllow_Hit_Parallel-4            	 6605961	       179.7 ns/op	       0 B/op	       0 allocs/op
+BenchmarkAllow_DistinctKeys_Parallel-4   	16689026	        73.00 ns/op	       0 B/op	       0 allocs/op
+BenchmarkAllow_DistinctKeys_Parallel-4   	15541226	        73.79 ns/op	       0 B/op	       0 allocs/op
+BenchmarkAllow_DistinctKeys_Parallel-4   	16056765	        73.78 ns/op	       0 B/op	       0 allocs/op
+BenchmarkExecute-4                       	 3128055	       384.4 ns/op	      48 B/op	       1 allocs/op
+BenchmarkExecute-4                       	 3255829	       369.0 ns/op	      48 B/op	       1 allocs/op
+BenchmarkExecute-4                       	 3117031	       384.9 ns/op	      48 B/op	       1 allocs/op
+BenchmarkExecute_Parallel-4              	 3449958	       348.1 ns/op	      48 B/op	       1 allocs/op
+BenchmarkExecute_Parallel-4              	 3414032	       343.6 ns/op	      48 B/op	       1 allocs/op
+BenchmarkExecute_Parallel-4              	 3454417	       347.7 ns/op	      48 B/op	       1 allocs/op
+BenchmarkTryExecute-4                    	 3928339	       305.8 ns/op	      48 B/op	       1 allocs/op
+BenchmarkTryExecute-4                    	 3907527	       305.9 ns/op	      48 B/op	       1 allocs/op
+BenchmarkTryExecute-4                    	 3937383	       304.9 ns/op	      48 B/op	       1 allocs/op
+PASS
+ok  	github.com/aasyanov/urx/quotax	23.336s
+goos: linux
+goarch: amd64
+pkg: github.com/aasyanov/urx/ratex
+cpu: AMD EPYC 7763 64-Core Processor                
+BenchmarkAllow-4              	13688004	        87.64 ns/op	       0 B/op	       0 allocs/op
+BenchmarkAllow-4              	13671697	        88.06 ns/op	       0 B/op	       0 allocs/op
+BenchmarkAllow-4              	13696770	        87.63 ns/op	       0 B/op	       0 allocs/op
+BenchmarkAllow_Parallel-4     	11034061	       108.5 ns/op	       0 B/op	       0 allocs/op
+BenchmarkAllow_Parallel-4     	11084965	       108.3 ns/op	       0 B/op	       0 allocs/op
+BenchmarkAllow_Parallel-4     	11012145	       108.5 ns/op	       0 B/op	       0 allocs/op
+BenchmarkExecute-4            	 9882686	       121.3 ns/op	      32 B/op	       1 allocs/op
+BenchmarkExecute-4            	 9743740	       121.6 ns/op	      32 B/op	       1 allocs/op
+BenchmarkExecute-4            	 9910102	       121.7 ns/op	      32 B/op	       1 allocs/op
+BenchmarkExecute_Parallel-4   	 7035578	       169.5 ns/op	      32 B/op	       1 allocs/op
+BenchmarkExecute_Parallel-4   	 7071604	       169.6 ns/op	      32 B/op	       1 allocs/op
+BenchmarkExecute_Parallel-4   	 7040974	       169.6 ns/op	      32 B/op	       1 allocs/op
+BenchmarkTryExecute-4         	10026952	       117.9 ns/op	      32 B/op	       1 allocs/op
+BenchmarkTryExecute-4         	10129773	       119.0 ns/op	      32 B/op	       1 allocs/op
+BenchmarkTryExecute-4         	10198088	       117.9 ns/op	      32 B/op	       1 allocs/op
+PASS
+ok  	github.com/aasyanov/urx/ratex	18.833s
+goos: linux
+goarch: amd64
+pkg: github.com/aasyanov/urx/retryx
+cpu: AMD EPYC 7763 64-Core Processor                
+BenchmarkDo_Success-4                	 8327805	       145.1 ns/op	     128 B/op	       2 allocs/op
+BenchmarkDo_Success-4                	 8353333	       144.1 ns/op	     128 B/op	       2 allocs/op
+BenchmarkDo_Success-4                	 8208766	       147.8 ns/op	     128 B/op	       2 allocs/op
+BenchmarkDo_SuccessAfterOneRetry-4   	 2038674	       586.5 ns/op	     440 B/op	       6 allocs/op
+BenchmarkDo_SuccessAfterOneRetry-4   	 2051737	       584.2 ns/op	     440 B/op	       6 allocs/op
+BenchmarkDo_SuccessAfterOneRetry-4   	 2061331	       581.8 ns/op	     440 B/op	       6 allocs/op
+BenchmarkBackoff-4                   	48316785	        25.21 ns/op	       0 B/op	       0 allocs/op
+BenchmarkBackoff-4                   	47798298	        25.19 ns/op	       0 B/op	       0 allocs/op
+BenchmarkBackoff-4                   	48070783	        25.01 ns/op	       0 B/op	       0 allocs/op
+BenchmarkDo_Success_Parallel-4       	16078113	        73.29 ns/op	     128 B/op	       2 allocs/op
+BenchmarkDo_Success_Parallel-4       	17664975	        73.80 ns/op	     128 B/op	       2 allocs/op
+BenchmarkDo_Success_Parallel-4       	16787233	        72.56 ns/op	     128 B/op	       2 allocs/op
+PASS
+ok  	github.com/aasyanov/urx/retryx	14.779s
+goos: linux
+goarch: amd64
+pkg: github.com/aasyanov/urx/shedx
+cpu: AMD EPYC 7763 64-Core Processor                
+BenchmarkExecute_Admit-4               	22636101	        54.02 ns/op	      48 B/op	       1 allocs/op
+BenchmarkExecute_Admit-4               	22429791	        53.90 ns/op	      48 B/op	       1 allocs/op
+BenchmarkExecute_Admit-4               	22477345	        53.84 ns/op	      48 B/op	       1 allocs/op
+BenchmarkExecute_Admit_Parallel-4      	 8757676	       136.4 ns/op	      48 B/op	       1 allocs/op
+BenchmarkExecute_Admit_Parallel-4      	 8827212	       136.2 ns/op	      48 B/op	       1 allocs/op
+BenchmarkExecute_Admit_Parallel-4      	 8889612	       135.3 ns/op	      48 B/op	       1 allocs/op
+BenchmarkExecute_Shed-4                	 5647731	       221.2 ns/op	      80 B/op	       2 allocs/op
+BenchmarkExecute_Shed-4                	 5662587	       213.0 ns/op	      80 B/op	       2 allocs/op
+BenchmarkExecute_Shed-4                	 5595955	       213.8 ns/op	      80 B/op	       2 allocs/op
+BenchmarkTryExecute_Admit-4            	22230026	        54.06 ns/op	      48 B/op	       1 allocs/op
+BenchmarkTryExecute_Admit-4            	21951222	        53.87 ns/op	      48 B/op	       1 allocs/op
+BenchmarkTryExecute_Admit-4            	22604895	        53.83 ns/op	      48 B/op	       1 allocs/op
+BenchmarkTryExecute_Admit_Parallel-4   	 8786769	       135.7 ns/op	      48 B/op	       1 allocs/op
+BenchmarkTryExecute_Admit_Parallel-4   	 8871732	       135.9 ns/op	      48 B/op	       1 allocs/op
+BenchmarkTryExecute_Admit_Parallel-4   	 8860779	       135.8 ns/op	      48 B/op	       1 allocs/op
+BenchmarkTryExecute_Shed-4             	147780092	         8.123 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTryExecute_Shed-4             	147465730	         8.133 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTryExecute_Shed-4             	146376056	         8.199 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTryExecute_Shed_Parallel-4    	37575424	        31.75 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTryExecute_Shed_Parallel-4    	38723330	        31.82 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTryExecute_Shed_Parallel-4    	38266988	        31.48 ns/op	       0 B/op	       0 allocs/op
+BenchmarkAcquire-4                     	38784862	        30.87 ns/op	      16 B/op	       1 allocs/op
+BenchmarkAcquire-4                     	38622727	        30.81 ns/op	      16 B/op	       1 allocs/op
+BenchmarkAcquire-4                     	38906840	        30.68 ns/op	      16 B/op	       1 allocs/op
+BenchmarkAcquire_Parallel-4            	 9556928	       127.1 ns/op	      16 B/op	       1 allocs/op
+BenchmarkAcquire_Parallel-4            	 9485270	       126.7 ns/op	      16 B/op	       1 allocs/op
+BenchmarkAcquire_Parallel-4            	 9525224	       125.8 ns/op	      16 B/op	       1 allocs/op
+BenchmarkAllow-4                       	380799775	         3.144 ns/op	       0 B/op	       0 allocs/op
+BenchmarkAllow-4                       	383948473	         3.124 ns/op	       0 B/op	       0 allocs/op
+BenchmarkAllow-4                       	381189262	         3.141 ns/op	       0 B/op	       0 allocs/op
+PASS
+ok  	github.com/aasyanov/urx/shedx	37.462s
+goos: linux
+goarch: amd64
+pkg: github.com/aasyanov/urx/signalx
+cpu: AMD EPYC 7763 64-Core Processor                
+BenchmarkWait_NoHooks-4               	 1966322	       608.7 ns/op	     376 B/op	       7 allocs/op
+BenchmarkWait_NoHooks-4               	 1896547	       622.8 ns/op	     376 B/op	       7 allocs/op
+BenchmarkWait_NoHooks-4               	 1984257	       602.9 ns/op	     376 B/op	       7 allocs/op
+BenchmarkWait_SingleHook-4            	 1844542	       650.8 ns/op	     384 B/op	       8 allocs/op
+BenchmarkWait_SingleHook-4            	 1827524	       654.9 ns/op	     384 B/op	       8 allocs/op
+BenchmarkWait_SingleHook-4            	 1840387	       651.7 ns/op	     384 B/op	       8 allocs/op
+BenchmarkWait_TenHooks-4              	 1432545	       838.4 ns/op	     456 B/op	       8 allocs/op
+BenchmarkWait_TenHooks-4              	 1439004	       834.1 ns/op	     456 B/op	       8 allocs/op
+BenchmarkWait_TenHooks-4              	 1429063	       841.8 ns/op	     456 B/op	       8 allocs/op
+BenchmarkOnShutdown-4                 	13543418	        80.08 ns/op	      48 B/op	       0 allocs/op
+BenchmarkOnShutdown-4                 	21685675	        69.50 ns/op	      47 B/op	       0 allocs/op
+BenchmarkOnShutdown-4                 	25188879	        47.82 ns/op	      41 B/op	       0 allocs/op
+BenchmarkRunHook-4                    	82996011	        14.26 ns/op	       0 B/op	       0 allocs/op
+BenchmarkRunHook-4                    	74949811	        14.28 ns/op	       0 B/op	       0 allocs/op
+BenchmarkRunHook-4                    	82407558	        14.37 ns/op	       0 B/op	       0 allocs/op
+BenchmarkWait_SingleHook_Parallel-4   	 2601998	       484.8 ns/op	     384 B/op	       8 allocs/op
+BenchmarkWait_SingleHook_Parallel-4   	 2562114	       486.9 ns/op	     384 B/op	       8 allocs/op
+BenchmarkWait_SingleHook_Parallel-4   	 2540389	       476.5 ns/op	     384 B/op	       8 allocs/op
+PASS
+ok  	github.com/aasyanov/urx/signalx	23.352s
+goos: linux
+goarch: amd64
+pkg: github.com/aasyanov/urx/syncx
+cpu: AMD EPYC 7763 64-Core Processor                
+BenchmarkLazy_Get-4             	147526567	         8.127 ns/op	       0 B/op	       0 allocs/op
+BenchmarkLazy_Get-4             	147786127	         8.120 ns/op	       0 B/op	       0 allocs/op
+BenchmarkLazy_Get-4             	147475341	         8.132 ns/op	       0 B/op	       0 allocs/op
+BenchmarkLazy_Get_Parallel-4    	41161417	        27.89 ns/op	       0 B/op	       0 allocs/op
+BenchmarkLazy_Get_Parallel-4    	42583597	        27.68 ns/op	       0 B/op	       0 allocs/op
+BenchmarkLazy_Get_Parallel-4    	44406504	        27.13 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMap_Load_Hit-4         	84895504	        14.51 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMap_Load_Hit-4         	85406972	        14.40 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMap_Load_Hit-4         	83630709	        14.43 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMap_Load_Miss-4        	100000000	        11.03 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMap_Load_Miss-4        	100000000	        11.05 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMap_Load_Miss-4        	100000000	        10.97 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMap_Store-4            	19535377	        60.34 ns/op	      48 B/op	       1 allocs/op
+BenchmarkMap_Store-4            	19284900	        60.71 ns/op	      48 B/op	       1 allocs/op
+BenchmarkMap_Store-4            	19751899	        60.28 ns/op	      48 B/op	       1 allocs/op
+BenchmarkMap_Store_Parallel-4   	 4410156	       342.3 ns/op	      80 B/op	       3 allocs/op
+BenchmarkMap_Store_Parallel-4   	 4415142	       357.3 ns/op	      80 B/op	       3 allocs/op
+BenchmarkMap_Store_Parallel-4   	 4146361	       358.6 ns/op	      80 B/op	       3 allocs/op
+BenchmarkMap_LoadOrStore-4      	50031871	        24.05 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMap_LoadOrStore-4      	48722942	        24.06 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMap_LoadOrStore-4      	48818464	        24.13 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMap_Load_Parallel-4    	185837133	         6.448 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMap_Load_Parallel-4    	186227661	         6.443 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMap_Load_Parallel-4    	186301690	         6.443 ns/op	       0 B/op	       0 allocs/op
+BenchmarkGroup_Go-4             	 1573711	       763.3 ns/op	     240 B/op	       5 allocs/op
+BenchmarkGroup_Go-4             	 1571841	       764.0 ns/op	     240 B/op	       5 allocs/op
+BenchmarkGroup_Go-4             	 1590872	       761.2 ns/op	     240 B/op	       5 allocs/op
+BenchmarkGroup_Go_Parallel-4    	 3750640	       321.2 ns/op	     240 B/op	       5 allocs/op
+BenchmarkGroup_Go_Parallel-4    	 3772221	       321.6 ns/op	     240 B/op	       5 allocs/op
+BenchmarkGroup_Go_Parallel-4    	 3724414	       318.0 ns/op	     240 B/op	       5 allocs/op
+BenchmarkGroup_Go_Limited-4     	  628297	      2080 ns/op	     424 B/op	       9 allocs/op
+BenchmarkGroup_Go_Limited-4     	  513846	      2081 ns/op	     424 B/op	       9 allocs/op
+BenchmarkGroup_Go_Limited-4     	  586752	      2054 ns/op	     424 B/op	       9 allocs/op
+BenchmarkGroup_TryGo-4          	 1586197	       763.2 ns/op	     240 B/op	       5 allocs/op
+BenchmarkGroup_TryGo-4          	 1531552	       773.4 ns/op	     240 B/op	       5 allocs/op
+BenchmarkGroup_TryGo-4          	 1590829	       757.6 ns/op	     240 B/op	       5 allocs/op
+BenchmarkMap_Delete-4           	12928328	        91.38 ns/op	      48 B/op	       1 allocs/op
+BenchmarkMap_Delete-4           	13283328	        91.41 ns/op	      48 B/op	       1 allocs/op
+BenchmarkMap_Delete-4           	13074603	        91.39 ns/op	      48 B/op	       1 allocs/op
+BenchmarkMap_Clear-4            	  893310	      1292 ns/op	    1568 B/op	      21 allocs/op
+BenchmarkMap_Clear-4            	  813612	      1402 ns/op	    1888 B/op	      23 allocs/op
+BenchmarkMap_Clear-4            	  891196	      1282 ns/op	    1568 B/op	      21 allocs/op
+PASS
+ok  	github.com/aasyanov/urx/syncx	54.746s
+goos: linux
+goarch: amd64
+pkg: github.com/aasyanov/urx/toutx
+cpu: AMD EPYC 7763 64-Core Processor                
+BenchmarkExecute_Fast-4            	  709990	      1705 ns/op	     672 B/op	      10 allocs/op
+BenchmarkExecute_Fast-4            	  594868	      1726 ns/op	     672 B/op	      10 allocs/op
+BenchmarkExecute_Fast-4            	  706848	      1705 ns/op	     672 B/op	      10 allocs/op
+BenchmarkExecute_WithTimer-4       	  648742	      1768 ns/op	     672 B/op	      10 allocs/op
+BenchmarkExecute_WithTimer-4       	  635890	      1742 ns/op	     672 B/op	      10 allocs/op
+BenchmarkExecute_WithTimer-4       	  655135	      1743 ns/op	     672 B/op	      10 allocs/op
+BenchmarkExecute_Fast_Parallel-4   	 1726507	       692.5 ns/op	     672 B/op	      10 allocs/op
+BenchmarkExecute_Fast_Parallel-4   	 1741492	       687.5 ns/op	     672 B/op	      10 allocs/op
+BenchmarkExecute_Fast_Parallel-4   	 1705724	       710.1 ns/op	     672 B/op	      10 allocs/op
+PASS
+ok  	github.com/aasyanov/urx/toutx	12.574s
+goos: linux
+goarch: amd64
+pkg: github.com/aasyanov/urx/warmupx
+cpu: AMD EPYC 7763 64-Core Processor                
+BenchmarkWarmer_Allow-4            	68528258	        17.60 ns/op	       0 B/op	       0 allocs/op
+BenchmarkWarmer_Allow-4            	67480752	        17.71 ns/op	       0 B/op	       0 allocs/op
+BenchmarkWarmer_Allow-4            	68692035	        17.41 ns/op	       0 B/op	       0 allocs/op
+BenchmarkWarmer_Allow_Parallel-4   	27553544	        43.69 ns/op	       0 B/op	       0 allocs/op
+BenchmarkWarmer_Allow_Parallel-4   	27414193	        43.72 ns/op	       0 B/op	       0 allocs/op
+BenchmarkWarmer_Allow_Parallel-4   	26144122	        43.72 ns/op	       0 B/op	       0 allocs/op
+BenchmarkWarmer_Capacity-4         	220676682	         5.455 ns/op	       0 B/op	       0 allocs/op
+BenchmarkWarmer_Capacity-4         	220762030	         5.429 ns/op	       0 B/op	       0 allocs/op
+BenchmarkWarmer_Capacity-4         	219282180	         5.463 ns/op	       0 B/op	       0 allocs/op
+BenchmarkWarmer_MaxRequests-4      	164293758	         7.304 ns/op	       0 B/op	       0 allocs/op
+BenchmarkWarmer_MaxRequests-4      	161472115	         7.439 ns/op	       0 B/op	       0 allocs/op
+BenchmarkWarmer_MaxRequests-4      	165041089	         7.265 ns/op	       0 B/op	       0 allocs/op
+BenchmarkExecute-4                 	24400279	        49.46 ns/op	      24 B/op	       1 allocs/op
+BenchmarkExecute-4                 	23868127	        49.80 ns/op	      24 B/op	       1 allocs/op
+BenchmarkExecute-4                 	24349868	        49.50 ns/op	      24 B/op	       1 allocs/op
+BenchmarkExecute_Parallel-4        	24312658	        49.11 ns/op	      24 B/op	       1 allocs/op
+BenchmarkExecute_Parallel-4        	24344091	        49.12 ns/op	      24 B/op	       1 allocs/op
+BenchmarkExecute_Parallel-4        	24521174	        49.58 ns/op	      24 B/op	       1 allocs/op
+BenchmarkTryExecute-4              	23469914	        50.04 ns/op	      24 B/op	       1 allocs/op
+BenchmarkTryExecute-4              	24495355	        49.48 ns/op	      24 B/op	       1 allocs/op
+BenchmarkTryExecute-4              	23602420	        50.01 ns/op	      24 B/op	       1 allocs/op
+BenchmarkTryExecute_Parallel-4     	24474232	        48.65 ns/op	      24 B/op	       1 allocs/op
+BenchmarkTryExecute_Parallel-4     	24639448	        48.68 ns/op	      24 B/op	       1 allocs/op
+BenchmarkTryExecute_Parallel-4     	24746343	        48.62 ns/op	      24 B/op	       1 allocs/op
+BenchmarkTryExecute_Reject-4       	74222762	        15.89 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTryExecute_Reject-4       	75235118	        15.87 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTryExecute_Reject-4       	73917692	        16.04 ns/op	       0 B/op	       0 allocs/op
+BenchmarkWarmer_Stats-4            	13389387	        89.74 ns/op	       0 B/op	       0 allocs/op
+BenchmarkWarmer_Stats-4            	13346910	        89.77 ns/op	       0 B/op	       0 allocs/op
+BenchmarkWarmer_Stats-4            	13417584	        89.20 ns/op	       0 B/op	       0 allocs/op
+PASS
+ok  	github.com/aasyanov/urx/warmupx	36.338s

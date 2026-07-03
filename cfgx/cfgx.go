@@ -85,6 +85,9 @@ import (
 	"reflect"
 )
 
+// pointerKind is reflect.Pointer (Kind iota value 22, stable across Go releases).
+const pointerKind = reflect.Kind(22)
+
 // Load reads a config file at path into dst and applies the [Validator]
 // seam. The format is detected from the file extension unless overridden
 // with [WithFormat].
@@ -178,7 +181,7 @@ func Save(path string, src any, opts ...Option) error {
 		return errInvalidInput("src", "must be non-nil")
 	}
 	rv := reflect.ValueOf(src)
-	if rv.Kind() == reflect.Ptr && rv.IsNil() {
+	if rv.Kind() == pointerKind && rv.IsNil() {
 		return errInvalidInput("src", "must be non-nil")
 	}
 
@@ -241,7 +244,7 @@ func requirePointer(param string, v any) error {
 		return errInvalidInput(param, "must be a non-nil pointer")
 	}
 	rv := reflect.ValueOf(v)
-	if rv.Kind() != reflect.Ptr || rv.IsNil() {
+	if rv.Kind() != pointerKind || rv.IsNil() {
 		return errInvalidInput(param, "must be a non-nil pointer")
 	}
 	return nil

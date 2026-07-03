@@ -219,9 +219,9 @@ func TestWarmer_StopRetainsProgress(t *testing.T) {
 	w := New(WithDuration(time.Second), WithInterval(10*time.Millisecond), WithMinCapacity(0.1))
 	w.Start()
 	testx.Eventually(t, func() bool { return w.Progress() > 0.05 }, 2*time.Second)
-	frozen := w.Progress()
 	w.Stop()
 
+	frozen := w.Progress()
 	assert.False(t, w.IsWarming())
 	assert.Greater(t, frozen, 0.0)
 	testx.Never(t, func() bool { return w.Progress() != frozen }, 100*time.Millisecond)

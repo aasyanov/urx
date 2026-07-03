@@ -13,6 +13,8 @@ go get github.com/aasyanov/urx
 > [!IMPORTANT]
 > **These are three independent primitives that share a package, not a single abstraction.** `Lazy` defers and deduplicates *initialization*, `Group` bounds and supervises *goroutines*, `Map` adds *typing and length* to `sync.Map`. They share conventions — generics, panic safety, `-race`-clean concurrency — but compose through plain Go, not through each other. The common thread is that each fixes a sharp edge in `sync` that every service re-implements (and re-bugs).
 
+
+
 ## The Problem
 
 The standard library's `sync` package is a toolbox of correct-but-low-level primitives. Three patterns recur in every service and are repeatedly re-implemented with subtle bugs:
@@ -36,6 +38,8 @@ The standard library's `sync` package is a toolbox of correct-but-low-level prim
 ❌ NOT a DI container — Lazy memoizes one value, it is not a dependency graph
 ```
 
+
+
 ### Position in the urx Stack
 
 ```text
@@ -45,17 +49,19 @@ The standard library's `sync` package is a toolbox of correct-but-low-level prim
                          │
 ┌────────────────────────▼───────────────────────────────────┐
 │  syncx   Lazy[T] · Group · Map[K,V]                        │
-└──────────────┬─────────────────────────┬────────────────────┘
+└──────────────┬─────────────────────────┬───────────────────┘
                │                         │
-┌──────────────▼─────────────────────────▼────────────────────┐
-│  panix.Safe / SafeVoid  (Lazy init + Group tasks)           │
-│  (panic → PanicError)                                       │
-└─────────────────────────────┬───────────────────────────────┘
+┌──────────────▼─────────────────────────▼───────────────────┐
+│  panix.Safe / SafeVoid  (Lazy init + Group tasks)          │
+│  (panic → PanicError)                                      │
+└─────────────────────────────┬──────────────────────────────┘
                               │
                ┌──────────────▼────────────────────┐
                │  sync · sync/atomic · context     │
                └───────────────────────────────────┘
 ```
+
+
 
 ## Architecture
 
@@ -78,7 +84,11 @@ The standard library's `sync` package is a toolbox of correct-but-low-level prim
                        panix.SafeVoid (panic recovery)
 ```
 
+
+
 ## How It Works
+
+
 
 ### Lazy: double-checked run-once with retry-on-failure
 
@@ -128,19 +138,21 @@ Load / Range / Len:
 ## Normative Contracts
 
 
-| Contract                 | Guarantee                                                                                     |
-| ------------------------ | --------------------------------------------------------------------------------------------- |
-| `Lazy.Get` run-once      | `init` runs at most once per successful initialization; concurrent callers see the same value |
-| `Lazy` failure semantics | A failing `init` is **not** cached — the next `Get` retries                                   |
-| `Lazy` panic safety    | A panicking `init` returns `*panix.PanicError`; it is **not** cached — the next `Get` retries |
-| `Lazy` error wrapping  | A non-nil init error is always wrapped as `ErrInitFailed` (joins the cause)                   |
-| `Group.Wait`             | Blocks until every launched task completes, then cancels the derived context                  |
-| `Group` first error      | Returns the **first** non-nil error or `*panix.PanicError`; siblings are cancelled            |
-| `Group` panic safety     | A panicking task never crashes the process; it becomes a `*panix.PanicError`                  |
-| `Group.TryGo`            | Starts a task only if a concurrency slot is free; returns (started, err)                      |
-| `Group.Go` / `Group.TryGo` nil fn | Return [ErrNilFunc] synchronously; no goroutine is launched              |
-| `Map.Len`                | O(1) snapshot; matches live entries once each mutation completes; may briefly lag [Map.Load] during concurrent writes |
-| `Map` typing             | No runtime type assertions are exposed to the caller                                          |
+| Contract                          | Guarantee                                                                                                             |
+| --------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| `Lazy.Get` run-once               | `init` runs at most once per successful initialization; concurrent callers see the same value                         |
+| `Lazy` failure semantics          | A failing `init` is **not** cached — the next `Get` retries                                                           |
+| `Lazy` panic safety               | A panicking `init` returns `*panix.PanicError`; it is **not** cached — the next `Get` retries                         |
+| `Lazy` error wrapping             | A non-nil init error is always wrapped as `ErrInitFailed` (joins the cause)                                           |
+| `Group.Wait`                      | Blocks until every launched task completes, then cancels the derived context                                          |
+| `Group` first error               | Returns the **first** non-nil error or `*panix.PanicError`; siblings are cancelled                                    |
+| `Group` panic safety              | A panicking task never crashes the process; it becomes a `*panix.PanicError`                                          |
+| `Group.TryGo`                     | Starts a task only if a concurrency slot is free; returns (started, err)                                              |
+| `Group.Go` / `Group.TryGo` nil fn | Return [ErrNilFunc] synchronously; no goroutine is launched                                                           |
+| `Map.Len`                         | O(1) snapshot; matches live entries once each mutation completes; may briefly lag [Map.Load] during concurrent writes |
+| `Map` typing                      | No runtime type assertions are exposed to the caller                                                                  |
+
+
 
 
 ## Quick Start
@@ -190,7 +202,11 @@ func main() {
 func process(ctx context.Context, id int) error { return nil }
 ```
 
+
+
 ## Usage Scenarios
+
+
 
 ### Lazy singleton with a fallible initializer
 
@@ -207,6 +223,8 @@ func Client() (*Client, error) {
 	return c, err
 }
 ```
+
+
 
 ### Bounded fan-out with panic isolation
 
@@ -228,6 +246,8 @@ if err := g.Wait(); err != nil {
 log.Printf("stats: %+v", g.Stats())
 ```
 
+
+
 ### Best-effort scheduling with TryGo
 
 ```go
@@ -243,6 +263,8 @@ for _, job := range jobs {
 }
 _ = g.Wait()
 ```
+
+
 
 ### Type-safe concurrent map with length
 
@@ -260,17 +282,23 @@ _ = prev
 _ = evicted
 ```
 
+
+
 ## API
+
+
 
 ### Lazy
 
 
-| Symbol       | Signature                                                       | Description                                                    |
-| ------------ | --------------------------------------------------------------- | -------------------------------------------------------------- |
-| `NewLazy`    | `func NewLazy[T any](init func() (T, error)) (*Lazy[T], error)` | Create a lazy initializer; returns `ErrNilInit` if init is nil |
+| Symbol       | Signature                                                       | Description                                                           |
+| ------------ | --------------------------------------------------------------- | --------------------------------------------------------------------- |
+| `NewLazy`    | `func NewLazy[T any](init func() (T, error)) (*Lazy[T], error)` | Create a lazy initializer; returns `ErrNilInit` if init is nil        |
 | `Lazy.Get`   | `func (l *Lazy[T]) Get() (T, error)`                            | Return cached value, running init once; errors and panics are retried |
-| `Lazy.Done`  | `func (l *Lazy[T]) Done() bool`                                 | Report whether the value is initialized                        |
-| `Lazy.Reset` | `func (l *Lazy[T]) Reset()`                                     | Discard the cached value so init runs again                    |
+| `Lazy.Done`  | `func (l *Lazy[T]) Done() bool`                                 | Report whether the value is initialized                               |
+| `Lazy.Reset` | `func (l *Lazy[T]) Reset()`                                     | Discard the cached value so init runs again                           |
+
+
 
 
 ### Group
@@ -280,7 +308,7 @@ _ = evicted
 | ------------- | ----------------------------------------------------------------------------------- | ----------------------------------------------------------------- |
 | `NewGroup`    | `func NewGroup(ctx context.Context, opts ...GroupOption) (*Group, context.Context)` | Create a group and its derived context; nil parent → `Background` |
 | `Group.Go`    | `func (g *Group) Go(fn func(ctx context.Context) error) error`                      | Launch a panic-safe task; returns `ErrNilFunc` when fn is nil     |
-| `Group.TryGo` | `func (g *Group) TryGo(fn func(ctx context.Context) error) (bool, error)`             | Launch when a slot is free; `(false, ErrNilFunc)` when fn is nil  |
+| `Group.TryGo` | `func (g *Group) TryGo(fn func(ctx context.Context) error) (bool, error)`           | Launch when a slot is free; `(false, ErrNilFunc)` when fn is nil  |
 | `Group.Wait`  | `func (g *Group) Wait() error`                                                      | Wait for all tasks; return the first error and cancel the context |
 | `Group.Stats` | `func (g *Group) Stats() GroupStats`                                                | Snapshot of started/succeeded/failed/panicked counters            |
 | `WithLimit`   | `func WithLimit(n int) GroupOption`                                                 | Bound concurrency to n (≤0 means unlimited)                       |
@@ -288,23 +316,27 @@ _ = evicted
 | `GroupStats`  | `struct{ Started, Succeeded, Failed, Panicked int64 }`                              | Task counter snapshot                                             |
 
 
+
+
 ### Map
 
 
-| Symbol              | Signature                                                   | Description                          |
-| ------------------- | ----------------------------------------------------------- | ------------------------------------ |
-| `NewMap`            | `func NewMap[K comparable, V any]() *Map[K, V]`             | Create an empty typed concurrent map |
-| `Map.Load`          | `func (m *Map[K, V]) Load(key K) (V, bool)`                 | Read a value                         |
-| `Map.Store`         | `func (m *Map[K, V]) Store(key K, value V)`                 | Set a value                          |
-| `Map.Swap`          | `func (m *Map[K, V]) Swap(key K, value V) (V, bool)`        | Set and return the previous value    |
-| `Map.Delete`        | `func (m *Map[K, V]) Delete(key K)`                         | Remove a key                         |
-| `Map.LoadAndDelete` | `func (m *Map[K, V]) LoadAndDelete(key K) (V, bool)`        | Remove and return a value            |
-| `Map.LoadOrStore`   | `func (m *Map[K, V]) LoadOrStore(key K, value V) (V, bool)` | Get-or-set atomically                |
-| `Map.CompareAndSwap` | `func (m *Map[K, V]) CompareAndSwap(key K, old, new V) bool` | Swap when old matches; no insert    |
-| `Map.CompareAndDelete` | `func (m *Map[K, V]) CompareAndDelete(key K, old V) bool` | Delete when old matches              |
-| `Map.Range`         | `func (m *Map[K, V]) Range(fn func(key K, value V) bool)`   | Iterate; stop when fn returns false  |
-| `Map.Len`           | `func (m *Map[K, V]) Len() int`                             | O(1) entry count                     |
-| `Map.Clear`         | `func (m *Map[K, V]) Clear()`                               | Remove all entries                   |
+| Symbol                 | Signature                                                    | Description                          |
+| ---------------------- | ------------------------------------------------------------ | ------------------------------------ |
+| `NewMap`               | `func NewMap[K comparable, V any]() *Map[K, V]`              | Create an empty typed concurrent map |
+| `Map.Load`             | `func (m *Map[K, V]) Load(key K) (V, bool)`                  | Read a value                         |
+| `Map.Store`            | `func (m *Map[K, V]) Store(key K, value V)`                  | Set a value                          |
+| `Map.Swap`             | `func (m *Map[K, V]) Swap(key K, value V) (V, bool)`         | Set and return the previous value    |
+| `Map.Delete`           | `func (m *Map[K, V]) Delete(key K)`                          | Remove a key                         |
+| `Map.LoadAndDelete`    | `func (m *Map[K, V]) LoadAndDelete(key K) (V, bool)`         | Remove and return a value            |
+| `Map.LoadOrStore`      | `func (m *Map[K, V]) LoadOrStore(key K, value V) (V, bool)`  | Get-or-set atomically                |
+| `Map.CompareAndSwap`   | `func (m *Map[K, V]) CompareAndSwap(key K, old, new V) bool` | Swap when old matches; no insert     |
+| `Map.CompareAndDelete` | `func (m *Map[K, V]) CompareAndDelete(key K, old V) bool`    | Delete when old matches              |
+| `Map.Range`            | `func (m *Map[K, V]) Range(fn func(key K, value V) bool)`    | Iterate; stop when fn returns false  |
+| `Map.Len`              | `func (m *Map[K, V]) Len() int`                              | O(1) entry count                     |
+| `Map.Clear`            | `func (m *Map[K, V]) Clear()`                                | Remove all entries                   |
+
+
 
 
 ## Configuration
@@ -313,6 +345,8 @@ _ = evicted
 | Option         | Default   | Description                                                    |
 | -------------- | --------- | -------------------------------------------------------------- |
 | `WithLimit(n)` | unlimited | Maximum concurrent tasks in a `Group`; `n ≤ 0` means unlimited |
+
+
 
 
 ## Errors
@@ -333,13 +367,13 @@ A panicking `Lazy` init or `Group` task returns a `*panix.PanicError` (use `erro
 > **Lazy** does not cache failures or panics.** A failing or panicking `init` is retried on the next `Get`. This is intentional (transient I/O should be retryable) but means a permanently-broken init will run on every call. Add your own backoff in the init function if needed.
 
 > [!WARNING]
-> **A `Group` must not be reused after `Wait`.** The derived context is cancelled by `Wait`, so tasks launched afterward run with an already-cancelled context. Create a fresh `Group` per fan-out.
+> **A** `Group` **must not be reused after** `Wait`**.** The derived context is cancelled by `Wait`, so tasks launched afterward run with an already-cancelled context. Create a fresh `Group` per fan-out.
 
 > [!WARNING]
 > **Map.Range** is not a snapshot.** Like `sync.Map.Range`, it may observe concurrent insertions or deletions mid-iteration. `Len` taken before `Range` may differ from the number of entries visited.
 
 > [!NOTE]
-> **`Map.Len` is an atomic snapshot.** It matches live entries once each mutating operation completes. A concurrent `Load` may observe an entry before `Len` increments because reads do not take the length mutex.
+> `Map.Len` **is an atomic snapshot.** It matches live entries once each mutating operation completes. A concurrent `Load` may observe an entry before `Len` increments because reads do not take the length mutex.
 
 > [!NOTE]
 > **Map** mutating operations take a short mutex for length accounting.** Reads stay on the `sync.Map` fast path; writes and `Clear` serialize only for `Len` consistency, not for the underlying map storage.
@@ -347,54 +381,86 @@ A panicking `Lazy` init or `Group` task returns a `*panix.PanicError` (use `erro
 > [!NOTE]
 > **Map** is read-optimized.** It inherits `sync.Map`'s trade-offs: excellent for read-mostly or disjoint-key workloads, but a `map` guarded by a `sync.Mutex` can be faster for write-heavy shared keys.
 
+
+
 ## Safety and Concurrency
 
 All three types are safe for concurrent use. `Lazy` serializes through a `sync.Mutex`; init runs under `panix.Safe`; `Get` and `Reset` may race freely. `Group` uses a `sync.WaitGroup`, a `sync.Once` for first-error capture, an optional buffered-channel semaphore, and `atomic.Int64` counters; the derived context propagates parent cancellation and sibling failures to all tasks. `Map` delegates storage to `sync.Map`, maintains `Len` with an `atomic.Int64`, and serializes length updates (including `Clear`) through a `sync.Mutex` while leaving reads lock-free. Every test runs under `-race`.
 
 ## Benchmarks
 
-> CPU: Intel i7-10510U · OS: Windows 10 · Go 1.24 · `-benchmem -count=1`
+Three environments, two hardware classes, two operating systems. All values are **medians**. `B/op` and `allocs/op` are deterministic — they depend on code, not hardware.
 
+### Environments
 
-| Benchmark              | ns/op | B/op | allocs/op |
-| ---------------------- | ----- | ---- | --------- |
-| Lazy_Get               | 49.3  | 0    | 0         |
-| Lazy_Get_Parallel      | 154.5 | 0    | 0         |
-| Map_Load_Hit           | 206.8 | 0    | 0         |
-| Map_Load_Miss          | 91.5  | 0    | 0         |
-| Map_Store              | 1756  | 48   | 1         |
-| Map_Store_Parallel     | 2151  | 73   | 3         |
-| Map_LoadOrStore        | 153.9 | 0    | 0         |
-| Map_Load_Parallel      | 24.3  | 0    | 0         |
-| Map_Delete             | 688.1 | 48   | 1         |
-| Map_Clear              | 13782 | 1728 | 22        |
-| Group_Go               | 6381  | 240  | 5         |
-| Group_Go_Parallel      | 2454  | 240  | 5         |
-| Group_Go_Limited       | 17683 | 425  | 9         |
-| Group_TryGo            | 5500  | 240  | 5         |
+| | Laptop | CI Server (Linux) | CI Server (Windows) |
+|---|---|---|---|
+| CPU | Intel Core i7-10510U, 4C/8T | AMD EPYC 7763, 4 vCPU | AMD EPYC 9V74, 4 vCPU |
+| TDP | 15W (mobile, throttles) | 280W (server, stable) | server, stable |
+| OS | Windows 10 | Ubuntu | Windows Server 2022 |
+| Go | 1.26.2 | 1.26 | 1.26 |
+| GOMAXPROCS | 8 | 4 | 4 |
+| Runs | 3 (`-count=3`) | 3 (`-count=3`) | 3 (`-count=3`) |
 
+### Lazy[T]
+
+| Benchmark | What it measures | Laptop | Linux | Windows | B/op | allocs/op |
+|---|---|---|---|---|---|---|
+| Lazy_Get | First / cached `Get` | 14.6 ns | **8.1 ns** | 7.6 ns | 0 | 0 |
+| Lazy_Get_Parallel | `Get`, 8/4 goroutines | 54.2 ns | 27.7 ns | **17.3 ns** | 0 | 0 |
+
+### Map[K,V]
+
+| Benchmark | What it measures | Laptop | Linux | Windows | B/op | allocs/op |
+|---|---|---|---|---|---|---|
+| Map_Load_Hit | Typed load, key present | 16.0 ns | **14.4 ns** | 14.9 ns | 0 | 0 |
+| Map_Load_Miss | Typed load, key absent | 10.9 ns | 11.0 ns | **10.0 ns** | 0 | 0 |
+| Map_Load_Parallel | Read-only `sync.Map` path | 5.0 ns | **6.4 ns** | 6.8 ns | 0 | 0 |
+| Map_LoadOrStore | First-store fast path | 32.8 ns | **24.1 ns** | 23.9 ns | 0 | 0 |
+| Map_Store | Insert + length track | 77.2 ns | **60.3 ns** | 83.0 ns | 48 | 1 |
+| Map_Store_Parallel | Concurrent stores | 350 ns | **357 ns** | 460 ns | 80 | 3 |
+| Map_Delete | Remove + length dec | 139 ns | **91 ns** | 110 ns | 48 | 1 |
+| Map_Clear | Drain all entries | 1.97 µs | **1.29 µs** | 1.83 µs | 1568 | 21 |
+
+### Group
+
+| Benchmark | What it measures | Laptop | Linux | Windows | B/op | allocs/op |
+|---|---|---|---|---|---|---|
+| Group_Go | One goroutine + errgroup | 1.19 µs | **763 ns** | 1.95 µs | 240 | 5 |
+| Group_Go_Parallel | `Go` from parallel bench | 341 ns | **321 ns** | 358 ns | 240 | 5 |
+| Group_Go_Limited | `Go` with semaphore limit | 3.59 µs | **2.08 µs** | 7.16 µs | 424 | 9 |
+| Group_TryGo | Non-blocking `TryGo` | 1.20 µs | **763 ns** | 2.02 µs | 240 | 5 |
 
 ### Analysis
 
-- **Lazy_Get**: 0 allocs — the hot path is a `sync.Mutex` lock plus a `done` check; the value is returned by copy from a struct field, with no heap escape. The parallel variant (155 ns) is dominated by mutex contention since every `Get` takes the same lock.
-- **Map_Load**: 0 allocs; parallel reads (24 ns) hit `sync.Map`'s read-only path with no mutex. Serial `Map_Load_Hit` (207 ns) reflects Windows scheduler noise on a cold benchmark run — the parallel variant is the reliable read baseline.
-- **Map_Store**: 1 alloc / 48 B is the architectural floor from `sync.Map` interface boxing. The length mutex adds latency versus an uncounted `sync.Map` but keeps `Len` correct under concurrent `Clear`. **Map_Store_Parallel** (2.2 µs, 3 allocs) reflects mutex contention when every goroutine writes distinct keys.
-- **Map_Delete** and **Map_Clear**: inherit `sync.Map` mutation cost plus the length mutex. **Map_Clear** allocates from rebuilding entries in the benchmark loop (16 stores per iteration).
-- **Group_Go**: 5 allocs covers `context.WithCancel`, the goroutine, and the `panix.SafeVoid` deferred-recover frame. This is per-*group*, not per-request. **Group_TryGo** shares the same floor. The limited variant adds semaphore channel bookkeeping (9 allocs for 4 tasks).
-- **Allocation floor**: `Lazy` and `Map` reads are genuinely 0-alloc. `Map.Store` and `Group` allocations are dictated by `sync.Map` interface boxing and `context` machinery respectively — neither is reducible without changing semantics.
+**Map reads are genuinely 0-alloc on all platforms.** `Map_Load_Parallel` at ~6 ns on CI is the `sync.Map` read-only fast path — no mutex, no interface boxing on cache hits. Serial `Map_Load_Hit` (~14 ns) adds typed key conversion overhead; both are far below earlier single-run laptop numbers that reflected scheduler noise, not steady-state cost.
+
+**Map_Store — 1 alloc / 48 B is the `sync.Map` interface boxing floor.** The length-tracking mutex adds latency versus a raw `sync.Map` but keeps `Len`/`Clear` correct under concurrent mutation. `Map_Store_Parallel` (~360 ns Linux, 460 ns Windows) reflects write contention when every goroutine inserts a distinct key — **Windows ~1.3× slower** under parallel stores, consistent with heavier kernel mutex paths.
+
+**Lazy_Get — 0 allocs, mutex on first init only.** Cached `Get` is ~8 ns on CI (lock + `done` check + return by copy). `Lazy_Get_Parallel` spreads to 17–54 ns because every goroutine hits the same mutex until initialization completes; after warmup, contention drops to the cached path.
+
+**Group_Go — 5 allocs is per-group, not per-task.** Covers `context.WithCancel`, the goroutine, and the `panix.SafeVoid` recover frame. Linux CI (763 ns) is **2.5× faster** than Windows sequential (1.95 µs) — goroutine spawn + scheduler latency on Windows inflates the one-shot `Go` benchmark. `Group_Go_Parallel` (321 ns) amortizes that setup across concurrent iterations.
+
+**Group_Go_Limited — 9 allocs, semaphore channel bookkeeping.** 2.08 µs (Linux) vs 7.16 µs (Windows) — the limited variant adds channel send/receive per task; Windows pays a larger penalty on the combined spawn + semaphore path.
+
+**Map_Clear — bulk rebuild cost.** ~1.3 µs on Linux, 21 allocs from draining and re-inserting entries in the benchmark loop; not a per-key hot path.
+
+
 
 ## Quality
 
 
-| Metric         | Value                                            |
-| -------------- | ------------------------------------------------ |
-| Test functions | 44                                               |
-| Benchmarks     | 14                                               |
-| Fuzz targets   | 3 (`FuzzMap`, `FuzzLazy`, `FuzzGroup`)           |
-| Examples       | 6                                                |
-| Coverage       | 100.0%                                           |
-| Race detector  | All pass (CI matrix)                             |
-| External deps  | 0 (panix; testify in dev only)                   |
+| Metric         | Value                                  |
+| -------------- | -------------------------------------- |
+| Test functions | 44                                     |
+| Benchmarks     | 14                                     |
+| Fuzz targets   | 3 (`FuzzMap`, `FuzzLazy`, `FuzzGroup`) |
+| Examples       | 6                                      |
+| Coverage       | 100.0%                                 |
+| Race detector  | All pass (CI matrix)                   |
+| External deps  | 0 (panix; testify in dev only)         |
+
+
 
 
 ## File Structure
@@ -416,6 +482,8 @@ syncx/
 ├── footprint_test.go   # struct size guards
 └── README.md           # this file
 ```
+
+
 
 ## License
 

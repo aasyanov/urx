@@ -376,14 +376,17 @@ All types (`Simulator`, `LatencySim`) are safe for concurrent use. Counters use 
 
 ## Quality
 
-
-| Metric                | Value          |
-| --------------------- | -------------- |
-| Test functions        | 56             |
-| Table-driven subtests | 23             |
-| Coverage              | 100.0%         |
-| Race detector         | All pass       |
-| External deps         | testify, panix |
+| Metric | Value |
+|---|---|
+| Test functions | 56 |
+| Table-driven subtests | 23 |
+| Benchmarks | 0 (test helpers — not a runtime package) |
+| Coverage | 100.0% |
+| Race detector | All tests pass with `-race` |
+| Linter | 0 issues (`golangci-lint`) |
+| CI matrix | 6 configurations (2 OS × 3 Go versions) |
+| Go version | 1.24+ |
+| External deps | testify, panix |
 
 
 ## File Structure

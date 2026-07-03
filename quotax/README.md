@@ -326,25 +326,37 @@ Keys are partitioned across `WithShards` shards, each guarded by its own `sync.R
 
 ## Benchmarks
 
-> CPU: Intel i7-10510U · OS: Windows 10 · Go 1.24 · `-benchmem -count=3`
+Three environments, two hardware classes, two operating systems. All values are **medians** of `-count=3` runs. `B/op` and `allocs/op` are deterministic — they depend on code, not hardware.
 
+### Environments
 
-| Benchmark                   | ns/op  | B/op | allocs/op |
-| --------------------------- | ------ | ---- | --------- |
-| Allow_Hit                   | ~220   | 0    | 0         |
-| Allow_Hit_Parallel          | ~430   | 0    | 0         |
-| Allow_DistinctKeys_Parallel | ~170   | 0    | 0         |
-| Execute                     | ~1000  | 48   | 1         |
-| Execute_Parallel            | ~1250  | 48   | 1         |
-| TryExecute                  | ~800   | 48   | 1         |
+| | Laptop | CI Server (Linux) | CI Server (Windows) |
+|---|---|---|---|
+| CPU | Intel Core i7-10510U, 4C/8T | AMD EPYC 7763, 4 vCPU | AMD EPYC 9V74, 4 vCPU |
+| TDP | 15W (mobile, throttles) | 280W (server, stable) | server, stable |
+| OS | Windows 10 | Ubuntu | Windows Server 2022 |
+| Go | 1.26 | 1.26 | 1.26 |
+| GOMAXPROCS | 8 | 4 | 4 |
+| Source | `quality.result` | `benchmark-ubuntu-latest.txt` | `benchmark-windows-latest.txt` |
 
+| Benchmark | What it measures | Laptop | Linux | Windows | B/op | allocs/op |
+|---|---|---|---|---|---|---|
+| `Allow_Hit` | Steady-state hit on a warm key | 73.3 ns | 163.6 ns | **43.0 ns** | 0 | 0 |
+| `Allow_Hit_Parallel` | Same key, 8/4 goroutines | 153.2 ns | 180.4 ns | **73.0 ns** | 0 | 0 |
+| `Allow_DistinctKeys_Parallel` | 1024 keys spread across shards | 52.4 ns | 73.8 ns | **46.0 ns** | 0 | 0 |
+| `Execute` | Admit + empty callback | 166.4 ns | 384.4 ns | **129.2 ns** | 48 | 1 |
+| `Execute_Parallel` | `Execute`, parallel | 358.0 ns | 347.7 ns | **191.6 ns** | 48 | 1 |
+| `TryExecute` | Boolean admit variant | 165.6 ns | 305.8 ns | **114.9 ns** | 48 | 1 |
 
 ### Analysis
 
-- **Allow_Hit**: 0 allocs — the steady-state path is `maphash` (allocation-free) + an `RLock` map read + the underlying `ratex.AllowN` (a refill + compare + subtract under one short mutex). Key creation is the only allocating path, and it happens once per key, not per request. This is the architectural floor for per-key token-bucket admission.
-- **Allow_DistinctKeys_Parallel** (~~47 ns) is *faster* than the single-key parallel benchmark (~~146 ns): spreading requests across 1024 keys spreads them across all 64 shards, so the per-shard `RWMutex` and each key's `ratex` mutex are essentially uncontended. The single-key parallel case funnels every goroutine through one shard and one bucket mutex — the ~2.3× slowdown versus the sequential hit is exactly that serialisation, and it is the intended trade-off for exact per-key accounting.
-- **Execute / TryExecute**: 1 alloc / 48 B is the controller-pattern floor: one heap allocation for quotax's per-call `execution` struct escaping into `panix.Safe`. Callers that do not need the controller or panic safety should use `Allow`/`Wait` for the zero-alloc path.
-- **Parallel scaling**: `Execute_Parallel` tracks the sequential figure closely because the shard and bucket locks are held only for the brief admission step; the (empty) user function and the two controller allocations parallelise cleanly across cores.
+**Zero-alloc admission on all platforms.** `Allow_Hit` is 0 allocs/op everywhere — the steady-state path is allocation-free key hashing + an `RLock` map read + the underlying `ratex.AllowN` (refill + compare + subtract under one short mutex). Key creation is the only allocating path, and it happens once per key, not per request.
+
+**Distinct keys beat single-key parallelism — by design.** `Allow_DistinctKeys_Parallel` (46–74 ns) is *faster* than `Allow_Hit_Parallel` (73–180 ns) on every platform: spreading requests across 1024 keys spreads them across all 64 shards, so per-shard `RWMutex` and per-key `ratex` mutexes stay essentially uncontended. The single-key parallel case funnels every goroutine through one shard and one bucket mutex — the 2–2.5× slowdown versus sequential is exactly that serialisation, and it is the intended trade-off for exact per-key accounting.
+
+**CI Linux vs Windows — platform and VM variance, not a logic bug.** On the hit path, Linux CI (163 ns) is ~3.8× slower than Windows CI (43 ns) despite both being server-class EPYC. The Linux runner uses EPYC 7763; Windows uses EPYC 9V74 — different generations with different mutex fast-path characteristics. The hit path chains two locks (`RWMutex` + `ratex` mutex); small differences in `futex` vs `SRWLock` timing amplify across the chain. Laptop numbers (73 ns) sit between the two CI figures, confirming this is hardware/OS variance, not a regression in quotax itself.
+
+**Execute / TryExecute: 1 alloc / 48 B is the controller-pattern floor.** One heap allocation for quotax's per-call `execution` struct escaping into `panix.Safe`. Callers that do not need the controller or panic safety should use `Allow`/`Wait` for the zero-alloc path. `Execute_Parallel` tracks the sequential figure closely because shard and bucket locks are held only for the brief admission step; the (empty) user function runs outside all locks.
 
 ## Quality
 

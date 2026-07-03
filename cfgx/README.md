@@ -13,6 +13,8 @@ go get github.com/aasyanov/urx
 > [!IMPORTANT]
 > cfgx owns **one step** of the configuration pipeline: the file ↔ struct boundary. It does not read environment variables or parse CLI flags. Those are the jobs of `envx` and `clix`. The three compose through plain pointer sharing — cfgx imports neither of them — so you assemble the precedence chain yourself in `main()` (see [The Precedence Pipeline](#the-precedence-pipeline)).
 
+
+
 ## The Problem
 
 A production service reads its configuration from several sources at once: compiled-in defaults, a config file shipped with the deployment, environment variables injected by the orchestrator, and command-line flags for ad-hoc overrides. The hard parts are rarely the file format itself:
@@ -44,7 +46,7 @@ It is the deliberately small piece the other layers build on.
 └────────────────────────┬─────────────────────────────────┘
                          │ file ↔ struct
 ┌────────────────────────▼─────────────────────────────────┐
-│  cfgx   Load/Parse/Save · YAML/JSON/TOML · Validator      │
+│  cfgx   Load/Parse/Save · YAML/JSON/TOML · Validator     │
 └──────────────┬───────────────────────┬───────────────────┘
                │                        │
 ┌──────────────▼─────────┐   ┌──────────▼───────────────────┐
@@ -52,6 +54,8 @@ It is the deliberately small piece the other layers build on.
 │  BindTo shared fields  │   │  flags → shared fields       │
 └────────────────────────┘   └──────────────────────────────┘
 ```
+
+
 
 ## Architecture
 
@@ -77,6 +81,8 @@ It is the deliberately small piece the other layers build on.
     Save(path)/Marshal(data):  struct ──► marshal(format) ──► writer/bytes
 ```
 
+
+
 ## How It Works
 
 `Load` runs a fixed sequence:
@@ -92,16 +98,18 @@ It is the deliberately small piece the other layers build on.
 ## Normative Contracts
 
 
-| Invariant           | Guarantee                                                                                  |
-| ------------------- | ------------------------------------------------------------------------------------------ |
-| Partial-file safety | Fields not present in the file retain their prior values.                                  |
-| Validator timing    | `Validate` runs after a successful decode, or before writing when creating a missing file. |
+| Invariant           | Guarantee                                                                                                                                                |
+| ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Partial-file safety | Fields not present in the file retain their prior values.                                                                                                |
+| Validator timing    | `Validate` runs after a successful decode, or before writing when creating a missing file.                                                               |
 | AutoFix reporting   | When `fix=true` repairs values but violations remain, they are joined under `ErrValidationFailed`. A validator that returns `nil` after repair succeeds. |
-| Marshal safety      | Unencodable values (including YAML encoder panics) return `ErrWriteFailed`; callers never crash. |
-| Text-file newline   | Every [`Marshal`]/`Save` payload ends with a trailing `\n`.                                |
-| Sentinel errors     | Every failure wraps a package sentinel; use [`errors.Is`].                                 |
-| Injectable I/O      | `Load`/`Save` never touch disk when [`WithReader`]/[`WithWriter`] are supplied.            |
-| No urx imports      | cfgx imports no other urx subpackage; layering is via pointer sharing.                     |
+| Marshal safety      | Unencodable values (including YAML encoder panics) return `ErrWriteFailed`; callers never crash.                                                         |
+| Text-file newline   | Every [`Marshal`]/`Save` payload ends with a trailing `\n`.                                                                                              |
+| Sentinel errors     | Every failure wraps a package sentinel; use [`errors.Is`].                                                                                               |
+| Injectable I/O      | `Load`/`Save` never touch disk when [`WithReader`]/[`WithWriter`] are supplied.                                                                          |
+| No urx imports      | cfgx imports no other urx subpackage; layering is via pointer sharing.                                                                                   |
+
+
 
 
 ## Quick Start
@@ -134,7 +142,11 @@ func main() {
 }
 ```
 
+
+
 ## Usage Scenarios
+
+
 
 ### The Precedence Pipeline
 
@@ -175,6 +187,8 @@ if err := cfgx.Parse(data, &cfg, cfgx.WithFormat(cfgx.FormatJSON)); err != nil {
 }
 ```
 
+
+
 ### First-run config generation
 
 ```go
@@ -185,12 +199,16 @@ err := cfgx.Load("config.toml", &cfg,
 )
 ```
 
+
+
 ### Persist after auto-fix
 
 ```go
 cfgx.Load("config.yaml", &cfg, cfgx.WithAutoFix())
 cfgx.Save("config.yaml", &cfg) // write the corrected values back
 ```
+
+
 
 ## API
 
@@ -212,6 +230,8 @@ cfgx.Save("config.yaml", &cfg) // write the corrected values back
 | `WithWriter`          | `WithWriter(fn func(string, []byte, os.FileMode) error) Option` | Inject the file writer.                                 |
 
 
+
+
 ## Configuration
 
 
@@ -223,6 +243,8 @@ cfgx.Save("config.yaml", &cfg) // write the corrected values back
 | `WithFileMode`        | `0o644`        | Applied by `Save` and create-if-missing.    |
 | `WithReader`          | `os.ReadFile`  | nil is ignored.                             |
 | `WithWriter`          | `os.WriteFile` | nil is ignored.                             |
+
+
 
 
 ## Errors
@@ -237,6 +259,8 @@ cfgx.Save("config.yaml", &cfg) // write the corrected values back
 | `ErrParseFailed`       | Data cannot be decoded into the struct.                              |
 | `ErrWriteFailed`       | Encoding or writing failed.                                          |
 | `ErrValidationFailed`  | `Validator` reported errors that remain after the fix pass.          |
+
+
 
 
 ## Pitfalls
@@ -256,36 +280,58 @@ cfgx.Save("config.yaml", &cfg) // write the corrected values back
 > [!NOTE]
 > Every [`Save`] and create-if-missing write ends with a trailing newline (POSIX text-file convention). Codecs may still normalise strings: JSON rewrites invalid UTF-8 to U+FFFD and YAML trims surrounding whitespace. Treat config values as well-formed UTF-8; do not rely on byte-exact preservation of pathological strings.
 
+
+
 ## Safety and Concurrency
 
 `Load`, `Parse`, `Save`, and `Marshal` are pure functions over their arguments and hold no package state — they are safe to call concurrently *as long as each call targets a distinct struct*. Concurrent calls that share the same `dst`/`src` pointer race, exactly as any concurrent struct access would. There is no global state, no caching, and no background goroutine.
 
 ## Benchmarks
 
-> CPU: Intel i7-10510U · OS: Windows 10 · Go 1.24 · `-benchmem -count=1`
+Three environments, two hardware classes, two operating systems. All values are **medians**. `B/op` and `allocs/op` are deterministic — they depend on code, not hardware.
 
+### Environments
 
-| Benchmark                    | ns/op | B/op | allocs/op |
-| ---------------------------- | ----- | ---- | --------- |
-| Parse_YAML                   | 28486 | 7472 | 54        |
-| Parse_JSON                   | 6467  | 272  | 7         |
-| Parse_TOML                   | 23544 | 3544 | 37        |
-| Parse_JSON_Parallel          | 2037  | 272  | 7         |
-| Marshal_YAML                 | 18981 | 6832 | 27        |
-| Marshal_JSON                 | 1936  | 96   | 2         |
-| Load_InjectedReader          | 22626 | 7472 | 54        |
-| Load_InjectedReader_Parallel | 36580 | 7472 | 54        |
-| ResolveFormat                | 60    | 0    | 0         |
+| | Laptop | CI Server (Linux) | CI Server (Windows) |
+|---|---|---|---|
+| CPU | Intel Core i7-10510U, 4C/8T | AMD EPYC 7763, 4 vCPU | AMD EPYC 9V74, 4 vCPU |
+| TDP | 15W (mobile, throttles) | 280W (server, stable) | server, stable |
+| OS | Windows 10 | Ubuntu | Windows Server 2022 |
+| Go | 1.26.2 | 1.26 | 1.26 |
+| GOMAXPROCS | 8 | 4 | 4 |
+| Runs | 3 (`-count=3`) | 3 (`-count=3`) | 3 (`-count=3`) |
 
+### Parse / Marshal
+
+| Benchmark | What it measures | Laptop | Linux | Windows | B/op | allocs/op |
+|---|---|---|---|---|---|---|
+| Parse_YAML | yaml.v3 decode | **6.59 µs** | 7.74 µs | 9.22 µs | 7472 | 54 |
+| Parse_JSON | stdlib JSON decode | **823 ns** | 854 ns | 915 ns | 272 | 7 |
+| Parse_TOML | BurntSushi decode | **4.22 µs** | 4.53 µs | 5.59 µs | 3544 | 37 |
+| Parse_JSON_Parallel | JSON decode, parallel | **389 ns** | 393 ns | 467 ns | 272 | 7 |
+| Marshal_YAML | yaml.v3 encode | 4.30 µs | **3.91 µs** | 5.76 µs | 6832 | 27 |
+| Marshal_JSON | stdlib JSON encode | **497 ns** | 508 ns | 496 ns | 96 | 2 |
+| Load_InjectedReader | Parse via `io.Reader` | **6.81 µs** | 6.88 µs | 9.70 µs | 7472 | 54 |
+| Load_InjectedReader_Parallel | Load, parallel | 6.01 µs | **4.31 µs** | 6.80 µs | 7472 | 54 |
+| ResolveFormat | Extension → `Format` | **13.8 ns** | 14.6 ns | 14.3 ns | 0 | 0 |
 
 ### Analysis
 
-- **JSON is the cheapest codec by an order of magnitude** — `Parse_JSON` is ~10× faster than YAML and allocates 7 objects versus 54. The stdlib `encoding/json` decoder reuses buffers aggressively; YAML (gopkg.in/yaml.v3) builds an intermediate node tree, which dominates both its time and allocation count.
-- **TOML sits between the two.** BurntSushi/toml decodes in a single pass but still allocates per-key metadata.
-- **ResolveFormat is 0 allocs / ~43 ns** — extension detection is a lowercase + switch, off the decode hot path entirely.
-- **Load_InjectedReader ≈ Parse_YAML + reader overhead.** The gap reflects the closure call and the reflect-based pointer check in `requirePointer`; both are one-time per load.
-- **Parallel benchmarks** (`Parse_JSON_Parallel`, `Load_InjectedReader_Parallel`) confirm the package is stateless: no mutex, no shared cache — goroutines scale linearly because each call owns its own `dst`.
-- **Allocation floor is the codec's, not cfgx's.** cfgx adds a constant handful of allocations (the option closure application and the validator interface check); everything else is the third-party decoder. Config loading happens once at startup, so absolute speed matters less than correctness — but JSON is the clear choice when it does.
+**JSON is an order of magnitude cheaper than YAML.** `Parse_JSON` (~850 ns, 7 allocs) vs `Parse_YAML` (~7.7 µs, 54 allocs) on Linux CI. The stdlib decoder reuses buffers aggressively; yaml.v3 builds an intermediate node tree that dominates both time and heap traffic. TOML sits between (~4.5 µs, 37 allocs).
+
+**Linux wins decode; laptop wins YAML on this run.** Linux CI is ~15% faster on YAML parse (7.74 µs vs 9.22 µs Windows) and ~7% on JSON. The laptop beat both CI platforms on YAML decode (6.59 µs) — likely turbo on a cold, short benchmark — but CI medians are more stable for regression tracking.
+
+**Marshal_JSON is flat across all three environments (~500 ns, 2 allocs).** Encode is CPU-bound and OS-independent; differences are within noise. `Marshal_YAML` spreads wider (3.9 µs Linux vs 5.8 µs Windows) because yaml.v3 reflection work amplifies small CPU/OS gaps.
+
+**ResolveFormat is 0 allocs / ~14 ns** — extension detection is a lowercase pass + switch, completely off the decode hot path.
+
+**Load_InjectedReader ≈ Parse + reader overhead.** The delta over bare `Parse_YAML` is the injected reader call and the reflect-based pointer check in `requirePointer` — both paid once per load.
+
+**Parallel benchmarks confirm statelessness.** `Parse_JSON_Parallel` scales to ~390 ns/op on CI because each goroutine owns its own `dst` — no mutex, no shared cache. `Load_InjectedReader_Parallel` is faster than serial on Linux (4.3 µs vs 6.9 µs) because four decoders saturate cores; laptop parallel load (6.0 µs) does not beat serial due to memory bandwidth limits on 15W silicon.
+
+**Allocation floor is the codec's, not cfgx's.** cfgx adds a handful of allocations (option closures, validator interface check); everything else is the third-party decoder. Config loading runs once at startup — pick JSON when format choice is yours.
+
+
 
 ## Quality
 
@@ -299,6 +345,8 @@ cfgx.Save("config.yaml", &cfg) // write the corrected values back
 | Coverage       | 99.2%                                             |
 | Race detector  | All pass                                          |
 | External deps  | 2 (yaml.v3, BurntSushi/toml; testify in dev only) |
+
+
 
 
 ## File Structure
@@ -317,6 +365,8 @@ cfgx/
 ├── example_test.go    # runnable GoDoc examples (incl. the pipeline)
 └── README.md          # this file
 ```
+
+
 
 ## License
 

@@ -13,6 +13,8 @@ go get github.com/aasyanov/urx
 > [!IMPORTANT]
 > **Liveness and readiness are not the same probe.** `Liveness` reflects only a manual up/down flag and runs *no* component checks — it answers "is the process alive enough to keep running?" and must stay cheap. `Readiness` runs *every* registered check and answers "should this instance receive traffic right now?". Wiring your database ping into the liveness probe is the classic mistake: a transient DB blip then triggers a pod *restart* (liveness) instead of a temporary *traffic removal* (readiness).
 
+
+
 ## The Problem
 
 A production service depends on a handful of components — a database, a cache, a message broker, a downstream API — any of which can degrade independently. The orchestrator (Kubernetes, a load balancer, a service mesh) needs two distinct yes/no answers, on two distinct endpoints, with correct semantics:
@@ -37,11 +39,13 @@ Hand-rolled health endpoints repeatedly get this wrong: blocking liveness probes
 ❌ NOT a uptime/alerting service (it answers a probe; alerting lives elsewhere)
 ```
 
+
+
 ### Position in the urx Stack
 
 ```text
 ┌──────────────────────────────────────────────────────────┐
-│  service code: HTTP server, orchestrator probes           │
+│  service code: HTTP server, orchestrator probes          │
 └────────────────────────┬─────────────────────────────────┘
                          │
 ┌────────────────────────▼─────────────────────────────────┐
@@ -81,7 +85,11 @@ Checker
                                         ▼ Report{Status, Components, Duration}
 ```
 
+
+
 ## How It Works
+
+
 
 ### Liveness
 
@@ -133,16 +141,18 @@ On `SIGTERM`, call `MarkDown()` before draining. Readiness immediately returns `
 ## Normative Contracts
 
 
-| Contract                             | Guarantee                                                                                                                               |
-| ------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------- |
-| Liveness never runs checks           | `Liveness` is a single atomic load; it never blocks or calls a dependency                                                               |
-| Readiness is concurrent              | All registered checks run in parallel; latency ≈ slowest check                                                                          |
-| Every check is timeout-bounded       | Each check runs under `context.WithTimeout(ctx, checkTimeout)`                                                                          |
-| A check never crashes the probe      | Every check runs under `panix.SafeVoid`; a panic becomes `StatusDown`                                                                   |
+| Contract                             | Guarantee                                                                                                                                                                         |
+| ------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Liveness never runs checks           | `Liveness` is a single atomic load; it never blocks or calls a dependency                                                                                                         |
+| Readiness is concurrent              | All registered checks run in parallel; latency ≈ slowest check                                                                                                                    |
+| Every check is timeout-bounded       | Each check runs under `context.WithTimeout(ctx, checkTimeout)`                                                                                                                    |
+| A check never crashes the probe      | Every check runs under `panix.SafeVoid`; a panic becomes `StatusDown`                                                                                                             |
 | A check never wedges the probe       | Result collection is bounded by `checkTimeout + 100ms`; buffered results are drained before force-timeout; a context-ignoring check is reported timed out and `Readiness` returns |
-| A slow check never blocks `Register` | Checks run after the registry snapshot is copied and the lock released                                                                  |
-| MarkDown short-circuits readiness    | While marked down, readiness returns `StatusDown` without running checks                                                                |
-| Down ⇒ 503, Up ⇒ 200                 | HTTP handlers map `StatusDown` to 503 and `StatusUp` to 200                                                                             |
+| A slow check never blocks `Register` | Checks run after the registry snapshot is copied and the lock released                                                                                                            |
+| MarkDown short-circuits readiness    | While marked down, readiness returns `StatusDown` without running checks                                                                                                          |
+| Down ⇒ 503, Up ⇒ 200                 | HTTP handlers map `StatusDown` to 503 and `StatusUp` to 200                                                                                                                       |
+
+
 
 
 ## Quick Start
@@ -175,7 +185,11 @@ func main() {
 }
 ```
 
+
+
 ## Usage Scenarios
+
+
 
 ### Kubernetes probes
 
@@ -188,6 +202,8 @@ hc.RegisterHandlers(mux)
 // livenessProbe:  httpGet /healthz   (cheap, never calls the DB)
 // readinessProbe: httpGet /readyz    (pings the DB, 503 removes the pod from Service endpoints)
 ```
+
+
 
 ### Graceful shutdown drain
 
@@ -204,6 +220,8 @@ time.Sleep(5 * time.Second) // let load balancers observe the change
 server.Shutdown(context.Background())
 ```
 
+
+
 ### Manual probing inside the app
 
 ```go
@@ -217,6 +235,8 @@ if rep.Status == healthx.StatusDown {
 }
 ```
 
+
+
 ### Observability
 
 ```go
@@ -225,28 +245,32 @@ metrics.Gauge("health.components", float64(st.Registered))
 metrics.Gauge("health.readiness.failures", float64(st.ReadinessFailures))
 ```
 
+
+
 ## API
 
 
-| Symbol                     | Signature                                                                          | Description                                               |
-| -------------------------- | ---------------------------------------------------------------------------------- | --------------------------------------------------------- |
-| `New`                      | `func New(opts ...Option) *Checker`                                                | Create a checker (default 5s per-check timeout)           |
+| Symbol                     | Signature                                                                          | Description                                                      |
+| -------------------------- | ---------------------------------------------------------------------------------- | ---------------------------------------------------------------- |
+| `New`                      | `func New(opts ...Option) *Checker`                                                | Create a checker (default 5s per-check timeout)                  |
 | `Checker.Register`         | `func (c *Checker) Register(name string, check func(ctx) error)`                   | Register a named check (panics if name is empty or check is nil) |
-| `Checker.Liveness`         | `func (c *Checker) Liveness(ctx) Report`                                           | Cheap up/down report; runs no checks                      |
-| `Checker.Readiness`        | `func (c *Checker) Readiness(ctx) Report`                                          | Run all checks concurrently, aggregate                    |
-| `Checker.MarkDown`         | `func (c *Checker) MarkDown()`                                                     | Force down (for graceful shutdown)                        |
-| `Checker.MarkUp`           | `func (c *Checker) MarkUp()`                                                       | Clear the down flag                                       |
-| `Checker.IsDown`           | `func (c *Checker) IsDown() bool`                                                  | Report manual down state                                  |
-| `Checker.Stats`            | `func (c *Checker) Stats() CheckerStats`                                           | Snapshot counters                                         |
-| `Checker.ResetStats`       | `func (c *Checker) ResetStats()`                                                   | Zero the readiness counters                               |
-| `Checker.LiveHandler`      | `func (c *Checker) LiveHandler() http.Handler`                                     | Liveness HTTP handler (200/503 + JSON)                    |
-| `Checker.ReadyHandler`     | `func (c *Checker) ReadyHandler() http.Handler`                                    | Readiness HTTP handler (200/503 + JSON)                   |
-| `Checker.RegisterHandlers` | `func (c *Checker) RegisterHandlers(mux *http.ServeMux)`                           | Register /healthz, /livez, /readyz (panics if mux is nil) |
-| `WithTimeout`              | `func WithTimeout(d time.Duration) Option`                                         | Per-check timeout (default 5s)                            |
-| `Status`                   | `type Status string`                                                               | `StatusUp` / `StatusDown`                                 |
-| `Report`                   | `type Report struct{ Status; Components; Duration }`                               | Aggregate probe result (JSON)                             |
-| `ComponentStatus`          | `type ComponentStatus struct{ Status; Error; Duration }`                           | Per-component result (JSON)                               |
-| `CheckerStats`             | `type CheckerStats struct{ Registered; Down; ReadinessChecks; ReadinessFailures }` | Counter snapshot                                          |
+| `Checker.Liveness`         | `func (c *Checker) Liveness(ctx) Report`                                           | Cheap up/down report; runs no checks                             |
+| `Checker.Readiness`        | `func (c *Checker) Readiness(ctx) Report`                                          | Run all checks concurrently, aggregate                           |
+| `Checker.MarkDown`         | `func (c *Checker) MarkDown()`                                                     | Force down (for graceful shutdown)                               |
+| `Checker.MarkUp`           | `func (c *Checker) MarkUp()`                                                       | Clear the down flag                                              |
+| `Checker.IsDown`           | `func (c *Checker) IsDown() bool`                                                  | Report manual down state                                         |
+| `Checker.Stats`            | `func (c *Checker) Stats() CheckerStats`                                           | Snapshot counters                                                |
+| `Checker.ResetStats`       | `func (c *Checker) ResetStats()`                                                   | Zero the readiness counters                                      |
+| `Checker.LiveHandler`      | `func (c *Checker) LiveHandler() http.Handler`                                     | Liveness HTTP handler (200/503 + JSON)                           |
+| `Checker.ReadyHandler`     | `func (c *Checker) ReadyHandler() http.Handler`                                    | Readiness HTTP handler (200/503 + JSON)                          |
+| `Checker.RegisterHandlers` | `func (c *Checker) RegisterHandlers(mux *http.ServeMux)`                           | Register /healthz, /livez, /readyz (panics if mux is nil)        |
+| `WithTimeout`              | `func WithTimeout(d time.Duration) Option`                                         | Per-check timeout (default 5s)                                   |
+| `Status`                   | `type Status string`                                                               | `StatusUp` / `StatusDown`                                        |
+| `Report`                   | `type Report struct{ Status; Components; Duration }`                               | Aggregate probe result (JSON)                                    |
+| `ComponentStatus`          | `type ComponentStatus struct{ Status; Error; Duration }`                           | Per-component result (JSON)                                      |
+| `CheckerStats`             | `type CheckerStats struct{ Registered; Down; ReadinessChecks; ReadinessFailures }` | Counter snapshot                                                 |
+
+
 
 
 ## Configuration
@@ -255,6 +279,8 @@ metrics.Gauge("health.readiness.failures", float64(st.ReadinessFailures))
 | Option           | Default | Description                                                               |
 | ---------------- | ------- | ------------------------------------------------------------------------- |
 | `WithTimeout(d)` | `5s`    | Per-check timeout applied to every readiness check. Non-positive ignored. |
+
+
 
 
 ## Errors
@@ -285,6 +311,8 @@ Both are sentinel errors created with `errors.New` and joined via `%w` into inte
 > [!WARNING]
 > **Readiness** allocates per check.** It spawns one goroutine and one timeout context per registered check. This is appropriate for probe-frequency calls (seconds apart), not for a hot request path. Do not call `Readiness` per inbound request.
 
+
+
 ## Safety and Concurrency
 
 **Thread safety.** `Checker` is safe for concurrent use. The check registry is guarded by a `sync.RWMutex`; the down flag and readiness counters use `sync/atomic`. `Register`, `Liveness`, `Readiness`, `MarkDown`/`MarkUp`, and `Stats` may all be called concurrently.
@@ -295,39 +323,59 @@ Both are sentinel errors created with `errors.New` and joined via `%w` into inte
 
 ## Benchmarks
 
-> CPU: Intel i7-10510U · OS: Windows 10 · Go 1.24 · `-benchmem -count=3`
+Three environments, two hardware classes, two operating systems. All values are **medians**. `B/op` and `allocs/op` are deterministic — they depend on code, not hardware.
 
+### Environments
 
-| Benchmark                       | ns/op  | B/op  | allocs/op |
-| ------------------------------- | ------ | ----- | --------- |
-| `Liveness`                      | 1      | 0     | 0         |
-| `Readiness_NoChecks`            | 52     | 2     | 1         |
-| `Readiness_OneCheck`            | 3,200  | 1,444 | 16        |
-| `Readiness_TenChecks`           | 18,800 | 6,246 | 81        |
-| `Readiness_Parallel` (4 checks) | 2,440  | 2,818 | 37        |
+| | Laptop | CI Server (Linux) | CI Server (Windows) |
+|---|---|---|---|
+| CPU | Intel Core i7-10510U, 4C/8T | AMD EPYC 7763, 4 vCPU | AMD EPYC 9V74, 4 vCPU |
+| TDP | 15W (mobile, throttles) | 280W (server, stable) | 280W (server, stable) |
+| OS | Windows 10 (NTFS) | Ubuntu (ext4) | Windows Server 2022 (NTFS) |
+| Go | 1.24 | 1.26 | 1.26 |
+| GOMAXPROCS | 8 | 4 | 4 |
+| Runs | 3 (`-count=3`) | 3 (`-count=3`) | 3 (`-count=3`) |
 
+| Benchmark | What it measures | Laptop | Linux | Windows | B/op | allocs/op |
+|---|---|---|---|---|---|---|
+| Liveness | `atomic.Bool` load + stack Report | 1 ns | **1.6 ns** | 2.0 ns | 0 | 0 |
+| Readiness_NoChecks | Report with zero registered checks | 52 ns | **124 ns** | 44 ns | 4 | 1 |
+| Readiness_OneCheck | One no-op check + full machinery | 3.2 µs | **4.8 µs** | 7.7 µs | 1456 | 16 |
+| Readiness_TenChecks | Ten concurrent no-op checks | 18.8 µs | **36.2 µs** | 28.8 µs | 6321 | 81 |
+| Readiness_Parallel | Four checks, 4 concurrent callers | 2.4 µs | **6.0 µs** | 3.0 µs | 2853 | 37 |
 
 ### Analysis
 
-- **Liveness**: ~2 ns, 0 allocs.** A single `atomic.Bool` load plus building a small stack `Report`. This is the architectural floor and the reason liveness can be polled aggressively — it is effectively free.
-- **Readiness_NoChecks**: ~75 ns, 1 alloc.** The one allocation is the `time.Since` duration formatting (`Duration.String`). With no checks there is no goroutine fan-out, so this is the fixed overhead of producing a `Report`.
-- **Readiness_OneCheck**: ~3,200 ns, 16 allocs.** Dominated by the per-check machinery: a `context.WithTimeout` (timer + cancel), one goroutine, the result channel, the `panix.SafeVoid` deferred frame, and the components map, plus the one-per-call collection-deadline `time.Timer` that backstops context-ignoring checks. This is the cost of *bounded, panic-safe, concurrent, non-wedgeable* checking.
-- **Readiness_TenChecks**: ~18,800 ns, 81 allocs.** Latency grows sub-linearly with check count because the checks run **concurrently** (the no-op checks here are CPU-bound, so they still serialise on the scheduler; real I/O-bound checks overlap fully and wall-clock latency approaches the single slowest check). The per-call collection timer is a fixed ~3-alloc overhead amortised across all checks; the rest grows ~linearly as each check adds its own context, goroutine, and map entry.
-- **Readiness_Parallel**: ~2,440 ns for 4 checks.** Multiple concurrent `Readiness` callers scale well — there is no shared mutable state on the hot path beyond the `RLock` snapshot and atomic counters, so contention is minimal.
-- **Allocation floor.** `Liveness` is 0 allocs by design. `Readiness`'s per-check allocations are the architectural minimum for giving each check an independent timeout, an isolated goroutine, and a panic boundary; removing them would mean giving up the timeout, the concurrency, or the panic safety.
+**Two performance regimes: liveness vs readiness.** Liveness is a single atomic load (~1.6 ns, 0 allocs) — poll it as aggressively as your load balancer allows. Readiness is goroutine-per-check concurrency with bounded collection — its cost is structural, not optimizable without giving up timeout isolation or panic safety.
+
+**Liveness: sub-2 ns everywhere.** A single `atomic.Bool` load plus building a small stack `Report`. Linux (1.6 ns) and Windows (2.0 ns) differ by one cache-resident atomic read — noise, not architecture.
+
+**Readiness_NoChecks: fixed Report overhead.** Linux shows 124 ns vs Windows 44 ns — the spread comes from `time.Since` + `Duration.String` (the one allocation) and scheduler timing on an empty check list, not from check fan-out. With no checks there is no goroutine spawn.
+
+**Readiness_OneCheck: ~5–8 µs, 16 allocs — the per-check machinery.** Dominated by `context.WithTimeout` (timer + cancel func), one goroutine, the result channel, the `panix.SafeVoid` deferred frame, the components map, and the one-per-call collection-deadline `time.Timer` that backstops context-ignoring checks. This is the cost of *bounded, panic-safe, concurrent, non-wedgeable* checking. Linux (4.8 µs) vs laptop (3.2 µs): the laptop's higher single-core boost helps the timer/goroutine setup path.
+
+**Readiness_TenChecks: sub-linear with check count.** 36.2 µs (Linux) vs 18.8 µs (laptop) for ten checks — ~3.6 µs per check vs 4.8 µs for one, because checks run **concurrently** and the collection timer is amortised. The benchmark uses CPU-bound no-op checks that still serialize on the scheduler; real I/O-bound checks overlap fully and wall-clock latency approaches the single slowest check.
+
+**Readiness_Parallel: concurrent callers scale.** 6.0 µs (Linux) for 4 checks with 4 concurrent `Readiness` callers — contention is limited to the `RLock` registry snapshot and atomic counters. Windows (3.0 µs) is faster here due to shorter goroutine scheduling latency on this runner, not fewer allocations (37 allocs/op on both).
+
+**Allocation floor.** `Liveness` is 0 allocs by design. `Readiness`'s per-check allocations are the architectural minimum for giving each check an independent timeout, an isolated goroutine, and a panic boundary; removing them would mean giving up the timeout, the concurrency, or the panic safety.
 
 ## Quality
 
+| Metric | Value |
+|---|---|
+| Test functions | 33 |
+| Benchmarks | 5 |
+| Fuzz targets | 3 (all pass, 30s each) |
+| Examples | 2 |
+| Coverage | 100.0% |
+| Race detector | All tests pass with `-race` |
+| Linter | 0 issues (`golangci-lint`) |
+| CI matrix | 6 configurations (2 OS × 3 Go versions) |
+| Go version | 1.24+ |
+| External deps | 0 (urx/panix internally; testify in tests only) |
 
-| Metric         | Value                                           |
-| -------------- | ----------------------------------------------- |
-| Test functions | 33                                              |
-| Benchmarks     | 5                                               |
-| Fuzz targets   | 3                                               |
-| Examples       | 2                                               |
-| Coverage       | 100.0%                                          |
-| Race detector  | All pass                                        |
-| External deps  | 0 (urx/panix internally; testify in tests only) |
+
 
 
 ## File Structure
@@ -347,6 +395,8 @@ healthx/
 ├── footprint_test.go   # Struct size guards
 └── README.md           # This file
 ```
+
+
 
 ## License
 

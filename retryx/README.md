@@ -308,24 +308,37 @@ A panicking attempt that exhausts the budget surfaces as `ErrExhausted` wrapping
 
 ## Benchmarks
 
-> CPU: Intel i7-10510U · OS: Windows 10 · Go 1.24 · `-benchmem -count=3`
+Three environments, two hardware classes, two operating systems. All values are **medians** of `-count=3` runs. `B/op` and `allocs/op` are deterministic — they depend on code, not hardware.
 
+### Environments
 
-| Benchmark               | ns/op  | B/op | allocs/op |
-| ----------------------- | ------ | ---- | --------- |
-| Do_Success              | 90     | 112  | 2         |
-| Do_Success_Parallel     | 61     | 112  | 2         |
-| Do_SuccessAfterOneRetry | 392644 | 424  | 6         |
-| Backoff                 | 24     | 0    | 0         |
+| | Laptop | CI Server (Linux) | CI Server (Windows) |
+|---|---|---|---|
+| CPU | Intel Core i7-10510U, 4C/8T | AMD EPYC 7763, 4 vCPU | AMD EPYC 9V74, 4 vCPU |
+| TDP | 15W (mobile, throttles) | 280W (server, stable) | server, stable |
+| OS | Windows 10 | Ubuntu | Windows Server 2022 |
+| Go | 1.26 | 1.26 | 1.26 |
+| GOMAXPROCS | 8 | 4 | 4 |
+| Source | `quality.result` | `benchmark-ubuntu-latest.txt` | `benchmark-windows-latest.txt` |
 
+| Benchmark | What it measures | Laptop | Linux | Windows | B/op | allocs/op |
+|---|---|---|---|---|---|---|
+| `Do_Success` | First-attempt success | 102.4 ns | 145.1 ns | **117.1 ns** | 128 | 2 |
+| `Do_Success_Parallel` | Success, 8/4 goroutines | **72.8 ns** | 73.3 ns | 91.8 ns | 128 | 2 |
+| `Do_SuccessAfterOneRetry` | Fail once, 1 ns backoff | 463.8 µs | **584.2 ns** | 550.4 µs | 440 | 6 |
+| `Backoff` | Delay calculation only | 27.1 ns | **25.2 ns** | 25.8 ns | 0 | 0 |
 
 ### Analysis
 
-- **Do_Success**: 2 allocs / 112 B is the success-path floor. One allocation is the `attempt` controller (it escapes because it is passed through the `panix.Safe` closure as an interface); the other is that closure itself. Both are inherent to handing the callback a controller under panic recovery. A controller-free, panic-free fast path could reach 0 allocs but would drop two of the package's guarantees.
-- **Do_Success_Parallel**: ~61 ns, *faster* per op than serial — the path takes no lock and touches no shared counter, so it scales cleanly across cores; `math/rand/v2` is not even reached on the success path.
-- **Do_SuccessAfterOneRetry**: ~~393 µs is dominated entirely by the real backoff sleep. Even with a 1 ns configured backoff, `time.NewTimer` cannot fire faster than the OS timer resolution (~~1 ms on Windows, coarser under load). This benchmark measures wall-clock sleep, not CPU work — the per-retry CPU cost is a handful of allocations for the timer and error wrapping.
-- **Backoff**: 0 allocs, 24 ns — pure float math plus one `math/rand/v2` call; no heap involvement. This is the per-retry compute cost, dwarfed by the sleep it schedules.
-- **Allocation floor**: the success path's 2 allocs are architectural (controller + recovery closure). The retry path adds the timer and error-wrapping allocations, which only occur on failure and are negligible next to the backoff sleep.
+**Do_Success: 2 allocs / 128 B is the success-path floor.** One allocation is the `attempt` controller (it escapes through the `panix.Safe` closure as an interface); the other is that closure itself. Both are inherent to handing the callback a controller under panic recovery. A controller-free, panic-free fast path could reach 0 allocs but would drop two of the package's guarantees.
+
+**Do_Success_Parallel scales cleanly.** 73–92 ns per op under parallelism — the path takes no lock and touches no shared counter, so it scales across cores. `math/rand/v2` is not even reached on the success path. Laptop sequential (102 ns) is slightly slower than parallel (73 ns) due to benchmark loop overhead at low iteration counts.
+
+**Do_SuccessAfterOneRetry: OS timer resolution dominates — not CPU.** Configured with `WithBackoff(time.Nanosecond)` and jitter disabled, yet Linux CI completes in **584 ns** while Windows CI and the laptop take **463–550 µs**. On Linux, `time.NewTimer` with a 1 ns duration can fire immediately when the runtime coalesces sub-millisecond timers; on Windows the OS timer granularity (~0.5–1 ms) forces a real sleep. This benchmark measures wall-clock backoff, not retry logic — the 6 allocs (440 B) are the timer, error wrapping, and controller overhead, negligible next to the sleep on Windows.
+
+**Backoff: 0 allocs, ~25 ns — pure compute.** Float math plus one `math/rand/v2` call; no heap involvement. This is the per-retry scheduling cost, dwarfed by any realistic sleep interval.
+
+**Allocation floor.** The success path's 2 allocs are architectural (controller + recovery closure). The retry path adds timer and error-wrapping allocations, which only occur on failure and are negligible next to production backoff intervals.
 
 ## Quality
 

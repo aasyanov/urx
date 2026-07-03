@@ -314,29 +314,44 @@ A panicking callback surfaces as a `*panix.PanicError` returned by `Execute`/`Tr
 
 ## Benchmarks
 
-> CPU: Intel i7-10510U · OS: Windows 10 · Go 1.24 · `-benchmem` (best of 3)
+Three environments, two hardware classes, two operating systems. All values are **medians**. `B/op` and `allocs/op` are deterministic — they depend on code, not hardware.
 
+### Environments
 
-| Benchmark        | ns/op | B/op | allocs/op |
-| ---------------- | ----- | ---- | --------- |
-| Execute          | 134   | 24   | 1         |
-| Execute_Parallel | 256   | 24   | 1         |
-| Execute_Reject   | 13    | 0    | 0         |
-| TryExecute       | 110   | 24   | 1         |
-| Acquire          | 98    | 16   | 1         |
-| Acquire_Parallel | 216   | 16   | 1         |
-| Allow            | 1.4   | 0    | 0         |
+| | Laptop | CI Server (Linux) | CI Server (Windows) |
+|---|---|---|---|
+| CPU | Intel Core i7-10510U, 4C/8T | AMD EPYC 7763, 4 vCPU | AMD EPYC 9V74, 4 vCPU |
+| TDP | 15W (mobile, throttles) | 280W (server, stable) | server, stable |
+| OS | Windows 10 | Ubuntu | Windows Server 2022 |
+| Go | 1.26.2 | 1.26 | 1.26 |
+| GOMAXPROCS | 8 | 4 | 4 |
+| Runs | 3 (`-count=3`) | 3 (`-count=3`) | 3 (`-count=3`) |
 
+### Admission Path
+
+| Benchmark | What it measures | Laptop | Linux | Windows | B/op | allocs/op |
+|---|---|---|---|---|---|---|
+| Execute | Admit + callback + release | 97.5 ns | **77.3 ns** | 78.0 ns | 24 | 1 |
+| Execute_Parallel | Execute, 8/4 goroutines | 240 ns | **158 ns** | 160 ns | 24 | 1 |
+| Execute_Reject | Full bulkhead, non-blocking reject | 12.6 ns | **8.2 ns** | 8.4 ns | 0 | 0 |
+| TryExecute | Non-blocking execute | 102 ns | **74.7 ns** | 76.5 ns | 24 | 1 |
+| Acquire | Token hand-off (no callback) | 83.8 ns | **65.3 ns** | 65.1 ns | 16 | 1 |
+| Acquire_Parallel | Acquire, 8/4 goroutines | 206 ns | **138 ns** | 136 ns | 16 | 1 |
+| Allow | Best-effort slot check | **1.3 ns** | 1.7 ns | 1.8 ns | 0 | 0 |
 
 ### Analysis
 
-- **Execute**: 1 alloc / 24 B is the admit-path floor — the `execution` controller, which escapes because it is handed to the callback through the `panix.Safe` closure as an interface. The optimistic channel send, the `active`/`executed` counters, and the deferred release are all alloc-free. A controller-free fast path could reach 0 allocs but would drop the occupancy snapshot that justifies the package.
-- **Execute_Parallel**: ~253 ns, ~1.5× the serial cost at 8 goroutines. The slowdown is contention on the shared semaphore channel and the `active` counter cache line — there is no mutex, so this scales predictably with core count.
-- **Execute_Reject**: 0 allocs, ~13 ns — measured via `TryExecute` against a full bulkhead. Rejection is a single non-blocking channel send that fails plus a `rejected` increment; it never allocates and never touches the timer. This is the fast, cheap "shed now" path.
-- **TryExecute**: same 1 alloc / 24 B as `Execute` on the admit path, but without the timer machinery — it is the lowest-latency way to run a guarded operation when blocking is unacceptable.
-- **Acquire**: 1 alloc / 16 B is the `Token` itself, which must escape to the caller. Everything else is the channel send and counter work.
-- **Allow**: 0 allocs, ~1.4 ns — a single atomic load plus a comparison, no channel and no reservation. This is the cheapest way to ask "is a slot free?" and the right tool for edge rejection, at the cost of being a best-effort hint rather than a binding decision.
-- **Allocation floor**: the admit path's 1 alloc is architectural (the controller). `Execute_Reject` and `Allow` prove the underlying admission decision is alloc-free; the controller and token allocations exist only because those APIs hand an object back to the caller.
+**Linux and Windows CI are within ~3% on serial paths.** `Execute` (77 ns vs 78 ns), `Acquire` (65 ns), and `TryExecute` (75 ns vs 77 ns) differ only within run-to-run noise. The bulkhead hot path is a buffered channel plus atomics — no mutex — so OS impact is minimal compared to packages that take locks on every call.
+
+**Parallel cost is predictable: ~1.5–2× serial on CI, ~2.5× on laptop.** `Execute_Parallel` is 158 ns vs 77 ns serial on Linux (2.0×). The slowdown is contention on the shared semaphore channel and the `active` counter cache line, not a lock convoy. Laptop parallel numbers are higher (240 ns) because eight benchmark goroutines compete for four CI-equivalent slots.
+
+**Execute_Reject proves the shed path is alloc-free.** 8 ns on CI, 0 B/op — a failed non-blocking channel send plus a `rejected` counter increment. No timer, no callback, no controller. This is the cheapest way to turn away load when the bulkhead is full.
+
+**Execute / TryExecute — 1 alloc / 24 B is the controller floor.** The `execution` controller escapes because it is handed through the `panix.Safe` closure as an interface. Channel send, `active`/`executed` counters, and deferred release are otherwise alloc-free.
+
+**Acquire — 1 alloc / 16 B is the Token.** The token must escape to the caller; everything else is channel + counter work.
+
+**Allow — 0 allocs, ~1.3–1.8 ns.** A single atomic load and comparison — no channel reservation. A hint only, not a binding decision; pair with `TryExecute` when you need an atomic admit/reject.
 
 ## Quality
 

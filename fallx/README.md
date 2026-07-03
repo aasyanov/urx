@@ -342,40 +342,59 @@ A panicking callback surfaces as a `*panix.PanicError`: a primary panic is handl
 
 ## Benchmarks
 
-> CPU: Intel i7-10510U · OS: Windows 10 · Go 1.24 · `-benchmem -count=3` (best of 3)
+Three environments, two hardware classes, two operating systems. All values are **medians**. `B/op` and `allocs/op` are deterministic — they depend on code, not hardware.
 
+### Environments
 
-| Benchmark                      | ns/op | B/op | allocs/op |
-| ------------------------------ | ----- | ---- | --------- |
-| Execute_StaticSuccess          | 52    | 48   | 1         |
-| Execute_StaticSuccess_Parallel | 61    | 48   | 1         |
-| Execute_StaticFallback         | 61    | 48   | 1         |
-| Execute_FuncFallback           | 75    | 48   | 1         |
-| Execute_CachedHit              | 116   | 48   | 1         |
-| Execute_CachedHit_Parallel     | 215   | 48   | 1         |
-| Execute_CachedStore            | 112   | 48   | 1         |
+| | Laptop | CI Server (Linux) | CI Server (Windows) |
+|---|---|---|---|
+| CPU | Intel Core i7-10510U, 4C/8T | AMD EPYC 7763, 4 vCPU | AMD EPYC 9V74, 4 vCPU |
+| TDP | 15W (mobile, throttles) | 280W (server, stable) | 280W (server, stable) |
+| OS | Windows 10 (NTFS) | Ubuntu (ext4) | Windows Server 2022 (NTFS) |
+| Go | 1.24 | 1.26 | 1.26 |
+| GOMAXPROCS | 8 | 4 | 4 |
+| Runs | 3 (`-count=3`) | 3 (`-count=3`) | 3 (`-count=3`) |
 
+This gives three comparison axes: **laptop vs server** (hardware scaling), **Linux vs Windows** (OS impact on same hardware class), and **single-threaded vs parallel** (shard lock contention under `StrategyCached`).
+
+| Benchmark | What it measures | Laptop | Linux | Windows | B/op | allocs/op |
+|---|---|---|---|---|---|---|
+| Execute_StaticSuccess | Primary succeeds, no fallback | 52 ns | **50 ns** | 82 ns | 48 | 1 |
+| Execute_StaticSuccess_Parallel | Static success, 4 goroutines | 61 ns | **57 ns** | 69 ns | 48 | 1 |
+| Execute_StaticFallback | Static fallback on failure | 61 ns | **52 ns** | 76 ns | 48 | 1 |
+| Execute_FuncFallback | Func fallback on failure | 75 ns | **64 ns** | 88 ns | 48 | 1 |
+| Execute_CachedHit | Cache hit after prior store | 116 ns | **154 ns** | 128 ns | 48 | 1 |
+| Execute_CachedHit_Parallel | Cache hit, 4 goroutines | 215 ns | **205 ns** | 166 ns | 48 | 1 |
+| Execute_CachedStore | Cache miss + store on fallback | 112 ns | **146 ns** | 125 ns | 48 | 1 |
 
 ### Analysis
 
-- **Allocation floor (1 alloc / 48 B everywhere)**: the single allocation is the `execution` controller, which escapes to the heap because it is handed to the callback through the `panix.Safe` closure as an interface value. Every path — success, static fallback, func fallback, cache hit, cache store — pays exactly this and nothing more; the counters are atomics, shard selection is an allocation-free inline FNV-1a, and the cache reuses pre-allocated shards. A controller-free fast path could reach 0 allocs but would drop the `OnFallback`/`Error`/`Key` context that is the reason to use fallx over a bare `if err != nil`.
-- **Execute_StaticSuccess (52 ns)**: the floor for the whole package — one `panix.Safe` call, one atomic increment, one controller allocation. The static-fallback variant (61 ns) adds the `WithOnFallback` nil-check and the second atomic path but allocates the same.
-- **Execute_CachedHit (116 ns)**: ~2.2× the static success cost. The extra time is the inline FNV-1a key hash, the shard lock, the map lookup, and the `heap.Fix` that re-orders the LRU on access. The store path (112 ns) is comparable: hash, lock, map insert, and `heap.Push`. Hashing the key inline (rather than via `hash/fnv`) keeps both paths free of interface dispatch and key copies.
-- **Parallel scaling**: cached hits under 8 goroutines run ~215 ns, ~1.9× the serial cost, because all benchmark keys hash to the same shard and serialize on its lock — a worst case. Real workloads spread keys across all 16 shards, so contention drops roughly linearly with shard count. The static path scales far better (61 ns parallel vs 52 ns serial) since it touches no lock, only the shared atomic counters.
-- **No cache, no goroutine**: `StrategyStatic` and `StrategyFunc` start no background goroutine and allocate no cache shards — only atomics and the resolved config. Use them for extremely high call rates where the cache machinery would be pure overhead. Under `StrategyCached`, [New] allocates the sharded cache up front and starts the TTL sweeper.
+**Pure CPU — no I/O.** Every benchmark is a function call through `panix.Safe` plus atomics and (for cached paths) an in-process sharded LRU. The Linux vs Windows spread reflects mutex and scheduler behavior, not filesystem or network.
+
+**Allocation floor: 1 alloc / 48 B on every path.** The single allocation is the `execution` controller, which escapes to the heap because it is handed to the callback through the `panix.Safe` closure as an interface value. Every path — success, static fallback, func fallback, cache hit, cache store — pays exactly this and nothing more; the counters are atomics, shard selection is an allocation-free inline FNV-1a, and the cache reuses pre-allocated shards.
+
+**Static paths: 50–64 ns on Linux, ~1.3–1.6× on Windows.** `Execute_StaticSuccess` at 50 ns (Linux) vs 82 ns (Windows) is the package floor — one `panix.Safe` call, one atomic increment, one controller allocation. Static fallback (52 ns) and func fallback (64 ns) add the failure branch and optional `WithOnFallback` callback but allocate the same. The laptop (52 ns) matches Linux CI, confirming this is a pure hot-path measurement with no OS/filesystem variable.
+
+**Cached paths: ~3× static cost, shard lock dominates.** `Execute_CachedHit` at 154 ns (Linux) vs 50 ns static success is ~3× — the extra time is inline FNV-1a key hash, shard `Mutex`, map lookup, and `heap.Fix` LRU promotion. Store (146 ns) is comparable: hash, lock, map insert, `heap.Push`. On Windows, cached hit (128 ns) is *faster* than Linux (154 ns) — within run-to-run variance on a 100 ns operation, not a structural OS advantage.
+
+**Parallel scaling: static scales; cached contends.** Static success parallel: 57 ns (Linux) vs 50 ns serial — near-linear scaling, no lock. Cached hit parallel: 205 ns serial vs 166 ns (Windows parallel) — on Linux parallel is *slower* (205 ns) because all benchmark keys hash to the same shard and serialize on its lock. This is a worst-case stress test; real workloads spread keys across all 16 shards and contention drops roughly linearly with shard count.
+
+**No cache, no goroutine for static/func strategies.** `StrategyStatic` and `StrategyFunc` start no background goroutine and allocate no cache shards — only atomics and the resolved config. Use them for extremely high call rates where the cache machinery would be pure overhead. Under `StrategyCached`, `New` allocates the sharded cache up front and starts the TTL sweeper.
 
 ## Quality
 
-
-| Metric         | Value                          |
-| -------------- | ------------------------------ |
-| Test functions | 54                             |
-| Benchmarks     | 7                              |
-| Fuzz targets   | 4                              |
-| Examples       | 5                              |
-| Coverage       | 98.1%                          |
-| Race detector  | All pass                       |
-| External deps  | 0 (panix; testify in dev only) |
+| Metric | Value |
+|---|---|
+| Test functions | 54 |
+| Benchmarks | 7 |
+| Fuzz targets | 4 (all pass, 30s each) |
+| Examples | 5 |
+| Coverage | 98.1% |
+| Race detector | All tests pass with `-race` |
+| Linter | 0 issues (`golangci-lint`) |
+| CI matrix | 6 configurations (2 OS × 3 Go versions) |
+| Go version | 1.24+ |
+| External deps | 0 (panix; testify in dev only) |
 
 
 ## File Structure

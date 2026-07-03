@@ -341,32 +341,44 @@ All are sentinel errors created with `errors.New`; compare with `errors.Is`. A p
 
 ## Benchmarks
 
-> CPU: Intel i7-10510U · OS: Windows 10 · Go 1.24 · `-benchmem -count=3`
+Three environments, two hardware classes, two operating systems. All values are **medians** of `-count=3` runs. `B/op` and `allocs/op` are deterministic — they depend on code, not hardware.
 
+### Environments
 
-| Benchmark                              | ns/op | B/op | allocs/op |
-| -------------------------------------- | ----- | ---- | --------- |
-| `ObjectPool_GetPut`                    | 55    | 0    | 0         |
-| `ObjectPool_GetPut_WithReset`          | 67    | 0    | 0         |
-| `ObjectPool_GetPut_Parallel`           | 88    | 0    | 0         |
-| `ObjectPool_GetPut_WithReset_Parallel` | 89    | 0    | 0         |
-| `Batch_Add`                            | 45    | 7    | 0         |
-| `Batch_Add_Parallel`                   | 93    | 9    | 0         |
-| `WorkerPool_Submit`                    | 1,500 | 48   | 1         |
-| `WorkerPool_SubmitWait`                | 3,600 | 176  | 3         |
-| `WorkerPool_Submit_Parallel`           | 3,300 | 176  | 3         |
+| | Laptop | CI Server (Linux) | CI Server (Windows) |
+|---|---|---|---|
+| CPU | Intel Core i7-10510U, 4C/8T | AMD EPYC 7763, 4 vCPU | AMD EPYC 9V74, 4 vCPU |
+| TDP | 15W (mobile, throttles) | 280W (server, stable) | server, stable |
+| OS | Windows 10 | Ubuntu | Windows Server 2022 |
+| Go | 1.26 | 1.26 | 1.26 |
+| GOMAXPROCS | 8 | 4 | 4 |
+| Source | `quality.result` | `benchmark-ubuntu-latest.txt` | `benchmark-windows-latest.txt` |
 
+| Benchmark | What it measures | Laptop | Linux | Windows | B/op | allocs/op |
+|---|---|---|---|---|---|---|
+| `ObjectPool_GetPut` | `sync.Pool` get/put round trip | 23.2 ns | **16.3 ns** | 16.8 ns | 0 | 0 |
+| `ObjectPool_GetPut_WithReset` | Get/put with `Reset` callback | 24.1 ns | **16.9 ns** | 18.1 ns | 0 | 0 |
+| `ObjectPool_GetPut_Parallel` | Get/put, 8/4 goroutines | 50.5 ns | **47.8 ns** | 51.8 ns | 0 | 0 |
+| `ObjectPool_GetPut_WithReset_Parallel` | Get/put + reset, parallel | 52.4 ns | **47.8 ns** | 43.2 ns | 0 | 0 |
+| `Batch_Add` | Mutex + slice append | 15.4 ns | **7.2 ns** | 8.0 ns | 8 | 0 |
+| `Batch_Add_Parallel` | `Add` under contention | 53.6 ns | **26.4 ns** | 27.2 ns | 8 | 0 |
+| `WorkerPool_Submit` | Fire-and-forget enqueue | 599.8 ns | **284.3 ns** | 540.3 ns | 48 | 1 |
+| `WorkerPool_SubmitWait` | Enqueue + result round trip | 1.29 µs | **753.2 ns** | 2.27 µs | 176 | 3 |
+| `WorkerPool_Submit_Parallel` | `SubmitWait`, parallel | 1.69 µs | **1.23 µs** | 1.66 µs | 176 | 3 |
 
 ### Analysis
 
-- **ObjectPool_GetPut**: ~55 ns, 0 allocs.** The happy path is a `sync.Pool.Get`/`Put` round trip plus two atomic increments. Zero allocations because the buffer is reused.
-- **ObjectPool_GetPut_WithReset**: ~67 ns, 0 allocs.** `bytes.Buffer.Reset` adds negligible cost versus the plain round trip.
-- **ObjectPool_GetPut_Parallel / WithReset_Parallel**: ~88–89 ns, 0 allocs.** ~1.6× sequential cost under 8-way parallelism. `sync.Pool` shards per-P; contention is on the atomic counters, not the pool itself.
-- **Batch_Add**: ~45 ns, 0 allocs/op (7 B/op amortized).** A mutex lock, a slice append, and a length check. The 7 B/op is backing-array growth during the benchmark's append sequence; in steady state with a pre-sized buffer there are no heap allocations per call.
-- **WorkerPool_Submit**: ~1,500 ns, 1 alloc (48 B).** Fire-and-forget enqueue: one closure allocation, no result channel. Appropriate for I/O-bound fan-out where the caller does not need the task result.
-- **WorkerPool_SubmitWait**: ~3,600 ns, 3 allocs (176 B).** Dominated by cross-goroutine handoff: enqueue, worker wakeup, and the result channel round trip. The 3 allocations are the task closure, the result channel, and the `panix.SafeVoid` deferred frame.
-- **Parallel worker scaling: ~3,300 ns.** Nearly flat versus sequential `SubmitWait` — the shared queue channel is the coordination point; 8 workers keep it saturated without per-submit cost degrading.
-- **Allocation floor.** `ObjectPool` and `Batch` hot paths are 0 allocs/op by design. `WorkerPool.Submit` costs 1 alloc/op (closure only); `SubmitWait` costs 3 (closure + result channel + recovery frame).
+**Pure in-memory work — no I/O.** Every benchmark is a CPU + synchronization operation: `sync.Pool` bookkeeping, mutex acquire/release, channel handoff, or slice append. Cross-platform gaps reflect scheduler and mutex implementation, not filesystem or network behavior.
+
+**Laptop vs CI server — 1.4–2.1× on ObjectPool and Batch.** `ObjectPool_GetPut`: 23.2 ns (laptop) vs 16.3 ns (Linux) = 1.4×. `Batch_Add`: 15.4 ns vs 7.2 ns = **2.1×**. The i7-10510U's 15W envelope throttles under sustained load; EPYC's stable clocks and wider pipeline dominate on short critical sections. `sync.Pool` and atomic counters scale predictably — parallel overhead is ~2–3× sequential on both platforms.
+
+**WorkerPool is scheduler-bound, not CPU-bound.** `SubmitWait` on Linux CI: 753 ns — a full cross-goroutine round trip (enqueue, worker wakeup, result channel) in under a microsecond. The same benchmark on Windows CI: 2.27 µs (**3× slower**) and on the laptop: 1.29 µs. This spread is goroutine scheduling and channel wakeup latency, not poolx logic. `Submit` (fire-and-forget, no result channel) shows the same pattern: 284 ns (Linux) vs 540 ns (Windows). Use `Submit` when the caller does not need the result; reserve `SubmitWait` for fan-in where the latency cost is acceptable.
+
+**Parallel worker scaling is flat by design.** `WorkerPool_Submit_Parallel` (1.23 µs Linux) is within noise of sequential `SubmitWait` (753 ns) scaled by contention — the shared task channel is the coordination point, and 8 workers on the laptop saturate it without per-op degradation beyond the inherent channel cost.
+
+**ObjectPool and Batch: 0 allocs/op on all platforms.** The happy path is a `sync.Pool.Get`/`Put` round trip plus two atomic increments (ObjectPool), or a mutex lock + slice append (Batch). The reported B/op on Batch (8 B) is amortized backing-array growth during the benchmark sequence; with a pre-sized buffer, steady-state `Add` is allocation-free.
+
+**Allocation floor.** `ObjectPool` and `Batch` hot paths are 0 allocs/op by design. `WorkerPool.Submit` costs 1 alloc/op (closure only); `SubmitWait` costs 3 (closure + result channel + `panix.SafeVoid` recovery frame).
 
 ## Quality
 

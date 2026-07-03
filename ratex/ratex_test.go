@@ -99,6 +99,7 @@ func TestLimiter_Delay_ReturnsMinWhenTokensAlreadyAvailable(t *testing.T) {
 	l := New(WithRate(100), WithBurst(10))
 	l.mu.Lock()
 	l.tokens = 10
+	l.lastUpdate = time.Now()
 	l.mu.Unlock()
 	assert.Equal(t, minDelay, l.delay(5))
 }
@@ -107,6 +108,7 @@ func TestLimiter_Delay_ReturnsMinWhenComputedSubMillisecond(t *testing.T) {
 	l := New(WithRate(1_000_000), WithBurst(10))
 	l.mu.Lock()
 	l.tokens = 0.999999
+	l.lastUpdate = time.Now()
 	l.mu.Unlock()
 	assert.Equal(t, minDelay, l.delay(1))
 }
@@ -115,6 +117,7 @@ func TestLimiter_Delay_ReturnsComputedDuration(t *testing.T) {
 	l := New(WithRate(2), WithBurst(10))
 	l.mu.Lock()
 	l.tokens = 0
+	l.lastUpdate = time.Now()
 	l.mu.Unlock()
 	assert.Equal(t, 2500*time.Millisecond, l.delay(5))
 }

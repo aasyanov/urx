@@ -372,54 +372,82 @@ if err != nil {
 
 ## Benchmarks
 
-> CPU: Intel i7-10510U · OS: Windows 10 · Go 1.24 · `-benchmem -count=3`
+Three environments, two hardware classes, two operating systems. All values are **medians**. `B/op` and `allocs/op` are deterministic — they depend on code, not hardware.
 
+### Environments
 
-| Benchmark               | ns/op  | B/op  | allocs/op |
-| ----------------------- | ------ | ----- | --------- |
-| `Safe_NoPanic`          | 26     | 0     | 0         |
-| `Safe_NoPanic_Error`    | 27     | 0     | 0         |
-| `Safe_Panic`            | 18,000 | 4,160 | 2         |
-| `SafeVoid_NoPanic`      | 27     | 0     | 0         |
-| `SafeVoid_Panic`        | 27,000 | 4,160 | 2         |
-| `Safe_NoPanic_Parallel` | 8      | 0     | 0         |
-| `Safe_Panic_Parallel`   | 38,000 | 4,160 | 2         |
-| `SafeVoid_NoPanic_Parallel` | 8  | 0     | 0         |
-| `Wrap_NoPanic`          | 32     | 0     | 0         |
-| `Wrap_Panic`            | 130,000| 4,160 | 2         |
-| `WrapVoid_NoPanic`      | 50     | 0     | 0         |
-| `WrapVoid_Panic`        | 43,000 | 4,160 | 2         |
-| `SafeGo_NoPanic`        | 2,200  | 64    | 1         |
-| `SafeGo_Panic`          | 48,000 | 4,240 | 4         |
-| `CaptureStack`          | 36,000 | 4,096 | 1         |
+| | Laptop | CI Server (Linux) | CI Server (Windows) |
+|---|---|---|---|
+| CPU | Intel Core i7-10510U, 4C/8T | AMD EPYC 7763, 4 vCPU | AMD EPYC 9V74, 4 vCPU |
+| TDP | 15W (mobile, throttles) | 280W (server, stable) | 280W (server, stable) |
+| OS | Windows 10 (NTFS) | Ubuntu (ext4) | Windows Server 2022 (NTFS) |
+| Go | 1.24 | 1.26 | 1.26 |
+| GOMAXPROCS | 8 | 4 | 4 |
+| Runs | 3 (`-count=3`) | 3 (`-count=3`) | 3 (`-count=3`) |
 
+### Happy Path (no panic)
+
+| Benchmark | Laptop | Linux | Windows | B/op | allocs/op |
+|---|---|---|---|---|---|
+| Safe_NoPanic | 26 ns | **8.1 ns** | 11 ns | 0 | 0 |
+| Safe_NoPanic_Error | 27 ns | **8.2 ns** | 11 ns | 0 | 0 |
+| SafeVoid_NoPanic | 27 ns | **11 ns** | 11 ns | 0 | 0 |
+| Wrap_NoPanic | 32 ns | **8.2 ns** | 11 ns | 0 | 0 |
+| WrapVoid_NoPanic | 50 ns | **11 ns** | 10 ns | 0 | 0 |
+| Safe_NoPanic_Parallel | 8 ns | **3.9 ns** | 3.8 ns | 0 | 0 |
+| SafeVoid_NoPanic_Parallel | 8 ns | **4.4 ns** | 4.8 ns | 0 | 0 |
+
+### Panic Path
+
+| Benchmark | Laptop | Linux | Windows | B/op | allocs/op |
+|---|---|---|---|---|---|
+| Safe_Panic | 18 µs | **7.4 µs** | 7.9 µs | 4160 | 2 |
+| SafeVoid_Panic | 27 µs | **8.6 µs** | 9.2 µs | 4160 | 2 |
+| Wrap_Panic | 130 µs | **7.9 µs** | 8.3 µs | 4160 | 2 |
+| WrapVoid_Panic | 43 µs | **9.2 µs** | 9.5 µs | 4160 | 2 |
+| Safe_Panic_Parallel | 38 µs | **11.7 µs** | 11.4 µs | 4160 | 2 |
+| CaptureStack | 36 µs | **4.0 µs** | 4.2 µs | 4096 | 1 |
+
+### Goroutine Path
+
+| Benchmark | Laptop | Linux | Windows | B/op | allocs/op |
+|---|---|---|---|---|---|
+| SafeGo_NoPanic | 2.2 µs | **426 ns** | 1.2 µs | 64 | 1 |
+| SafeGo_Panic | 48 µs | **16.3 µs** | 16.0 µs | 4240 | 4 |
 
 ### Analysis
 
-- **Happy path (`Safe_NoPanic`): 26 ns, 0 allocs.** The deferred `recover()` adds approximately 20 ns over a raw function call. This is the cost of the safety net. The 0-allocation guarantee means `Safe` can be used on hot paths without GC pressure.
-- **Parallel scaling (`Safe_NoPanic_Parallel`): 8 ns/op.** Under 8-way parallelism, `Safe` scales linearly because there is no shared mutable state — each goroutine has its own deferred closure. The 3× speedup over sequential is expected from CPU cache line independence.
-- **Panic path (`Safe_Panic`): 18,000 ns, 2 allocs (4,160 B).** Dominated by `runtime.Stack` (4 KB buffer allocation + stack walk). The second allocation is the `PanicError` struct itself. This is ~700× slower than the happy path — panics are exceptional by definition.
-- **CaptureStack**: 36,000 ns, 1 alloc (4,096 B).** Pure `runtime.Stack` cost without the `recover()` overhead. This is the irreducible floor for any stack-capturing recovery mechanism.
-- **SafeGo_NoPanic**: 2,200 ns, 1 alloc (64 B).** Goroutine launch overhead dominates. Suitable for background tasks; not appropriate for per-request hot loops.
-- **SafeGo_Panic**: 48,000 ns, 4 allocs (4,240 B).** Two `SafeVoid` layers (fn + onError path) plus goroutine scheduling on the panic path.
-- **SafeVoid_NoPanic**: 27 ns, 0 allocs.** ~1 ns overhead versus `Safe` due to the `struct{}` wrapping layer. Negligible in practice.
-- **Wrap_NoPanic**: 32 ns, 0 allocs.** Thin closure over `Safe` — no additional abstraction cost beyond one indirection.
-- **WrapVoid_NoPanic**: 50 ns, 0 allocs.** Thin closure over `SafeVoid`.
-- **Allocation floor:** On the panic path, 2 allocations (4,160 B) is the architectural minimum: 4,096 B for the stack buffer + 64 B for the `PanicError` struct. This cannot be reduced without sacrificing stack trace capture.
+**Happy path: ~8–11 ns, 0 allocs — the deferred `recover()` tax.** `Safe_NoPanic` at 8.1 ns (Linux) adds approximately 8 ns over a raw function call. The 0-allocation guarantee means `Safe` can be used on hot paths without GC pressure. Linux CI is ~3× faster than the laptop (26 ns) because the EPYC server runs at stable clocks without mobile throttling.
+
+**Parallel scaling: 3–4 ns/op under 4 goroutines.** `Safe_NoPanic_Parallel` at 3.9 ns (Linux) vs 8.1 ns serial — each goroutine has its own deferred closure with no shared mutable state. The sub-serial number is expected from `b.RunParallel` work distribution across P's.
+
+**Panic path: ~7–12 µs, 2 allocs (4160 B) — dominated by `runtime.Stack`.** ~700× slower than the happy path. The 4096 B buffer allocation + stack walk is the irreducible floor for any stack-capturing recovery mechanism. Linux (7.4 µs) vs laptop (18 µs): server hardware walks stacks faster; the allocation count is identical.
+
+**CaptureStack: 4.0 µs, 1 alloc (4096 B).** Pure `runtime.Stack` cost without the `recover()` overhead. OS-independent within 5%.
+
+**SafeGo_NoPanic: 426 ns (Linux) vs 1.2 µs (Windows) — goroutine launch dominates.** One 64 B allocation for the goroutine descriptor. Suitable for background tasks; not appropriate for per-request hot loops. The Windows CI VM adds ~3× scheduling overhead vs Linux on this micro-benchmark.
+
+**SafeGo_Panic: ~16 µs, 4 allocs.** Two `SafeVoid` layers (fn + onError path) plus goroutine scheduling on the panic path.
+
+**Wrap/WrapVoid: thin closures, no meaningful overhead.** `Wrap_NoPanic` at 8.2 ns vs `Safe_NoPanic` at 8.1 ns — one indirection, negligible in practice.
+
+**Allocation floor on panic path.** 2 allocations (4160 B) is the architectural minimum: 4096 B for the stack buffer + 64 B for the `PanicError` struct. This cannot be reduced without sacrificing stack trace capture.
 
 ## Quality
 
-
-| Metric                | Value                     |
-| --------------------- | ------------------------- |
-| Test functions        | 39                        |
-| Table-driven subtests | 11                        |
-| Benchmarks            | 15                        |
-| Fuzz targets          | 4                         |
-| Examples              | 7                         |
-| Coverage              | 100%                      |
-| Race detector         | All pass                  |
-| External deps         | 0 (testify in tests only) |
+| Metric | Value |
+|---|---|
+| Test functions | 39 |
+| Table-driven subtests | 11 |
+| Benchmarks | 15 |
+| Fuzz targets | 4 (all pass, 30s each) |
+| Examples | 7 |
+| Coverage | 100.0% |
+| Race detector | All tests pass with `-race` |
+| Linter | 0 issues (`golangci-lint`) |
+| CI matrix | 6 configurations (2 OS × 3 Go versions) |
+| Go version | 1.24+ |
+| External deps | 0 (testify in tests only) |
 
 
 ## File Structure

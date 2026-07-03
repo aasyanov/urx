@@ -323,41 +323,60 @@ A panicking copy surfaces as a `*panix.PanicError` joined under `ErrAllFailed` (
 
 ## Benchmarks
 
-> CPU: Intel i7-10510U · OS: Windows 10 · Go 1.24 · `-benchmem -count=3`
+Three environments, two hardware classes, two operating systems. All values are **medians**. `B/op` and `allocs/op` are deterministic — they depend on code, not hardware.
 
+### Environments
 
-| Benchmark                    | ns/op | B/op | allocs/op |
-| ---------------------------- | ----- | ---- | --------- |
-| Execute_NoHedging            | 57    | 48   | 1         |
-| Execute_PrimaryWins          | 2035  | 792  | 11        |
-| Execute_PrimaryWins_Parallel | 570   | 792  | 11        |
-| Execute_HedgeWins            | 5390000 | 897  | 13        |
-| ExecuteMulti_PrimaryWins     | 2060  | 792  | 11        |
-| Delays                       | 37    | 64   | 1         |
+| | Laptop | CI Server (Linux) | CI Server (Windows) |
+|---|---|---|---|
+| CPU | Intel Core i7-10510U, 4C/8T | AMD EPYC 7763, 4 vCPU | AMD EPYC 9V74, 4 vCPU |
+| TDP | 15W (mobile, throttles) | 280W (server, stable) | 280W (server, stable) |
+| OS | Windows 10 (NTFS) | Ubuntu (ext4) | Windows Server 2022 (NTFS) |
+| Go | 1.24 | 1.26 | 1.26 |
+| GOMAXPROCS | 8 | 4 | 4 |
+| Runs | 3 (`-count=3`) | 3 (`-count=3`) | 3 (`-count=3`) |
 
+| Benchmark | What it measures | Laptop | Linux | Windows | B/op | allocs/op |
+|---|---|---|---|---|---|---|
+| Execute_NoHedging | Sync path, `MaxParallel == 1` | 57 ns | **99 ns** | 63 ns | 48 | 1 |
+| Execute_PrimaryWins | Hedged call, primary wins before hedge | 2.0 µs | **1.9 µs** | 4.9 µs | 792 | 11 |
+| Execute_PrimaryWins_Parallel | Primary wins, 4 goroutines | 570 ns | **800 ns** | 820 ns | 792 | 11 |
+| ExecuteMulti_PrimaryWins | `ExecuteMulti`, primary wins | 2.1 µs | **1.9 µs** | 5.0 µs | 792 | 11 |
+| Execute_HedgeWins | Hedge copy fires and wins | 5.4 ms | **5.16 ms** | 5.29 ms | 864 | 13 |
+| Delays | Delay schedule computation | 37 ns | **34 ns** | 45 ns | 64 | 1 |
 
 ### Analysis
 
-- **Execute_NoHedging**: 57 ns / 1 alloc is the synchronous fast path (`MaxParallel == 1`), taken directly by `Execute` without even building a fan-out slice. The single allocation is the `HedgeController` handed to the callback — the same architectural floor as `shedx`'s admit path. No goroutine, channel, cancel context, or timer is created, so a `Hedger` guarding an un-hedged call site costs almost nothing. This is the dominant case for "hedging available but disabled here".
-- **Execute_PrimaryWins**: ~2.1 µs / 11 allocs is the hedged path when the original wins before any hedge fires (the common good case). The allocations are inherent to speculative concurrency: `context.WithCancel` (2), the buffered result channel (1), the `delays` slice (1), the spawned goroutine and its `execution` controller, and the timer. CPU is dominated by `context.WithCancel` and goroutine scheduling, not by `hedgex` logic. This is the price of being *able* to race; it is paid once per hedged call regardless of how many copies ultimately launch.
-- **Execute_PrimaryWins_Parallel**: ~600 ns/op — *faster* per-op than serial because `b.RunParallel` spreads the goroutine-creation and context cost across 8 cores; the atomic counter contention is negligible (four independent `Add`s on separate cache lines). Throughput scales near-linearly with cores.
-- **Execute_HedgeWins**: ~5.4 ms / 13 allocs — the hedged path when a hedge copy actually fires and wins while the primary is cancelled. The extra allocs versus `Execute_PrimaryWins` come from the losing primary goroutine completing after cancellation; latency is dominated by the deliberate `WithDelay` wait plus goroutine scheduling.
-- **ExecuteMulti_PrimaryWins**: matches `Execute` — the dispatch machinery is identical; only the function source differs.
-- **Delays**: ~37 ns / 1 alloc — the schedule slice (`count-1` durations) is the only allocation; the computation is integer arithmetic. It runs once per hedged call.
-- **Allocation floor**: the hedged path's 11 allocs are architectural — racing N copies *requires* a cancel context, a goroutine, and a result channel. The fast path proves the non-racing case reaches the 1-alloc controller floor. There is no allocation-free way to hedge.
+**Two paths: sync fast path vs hedged concurrency.** `Execute_NoHedging` proves a `Hedger` at an un-hedged call site costs almost nothing. The hedged path pays for speculative concurrency up front — whether or not a hedge actually fires.
+
+**Execute_NoHedging: 63–99 ns, 1 alloc.** The synchronous fast path (`MaxParallel == 1`) — no goroutine, channel, cancel context, or timer. The single allocation is the `HedgeController` handed to the callback. Linux (99 ns) is slightly slower than Windows (63 ns) on this micro-benchmark — within scheduler noise for a ~80 ns operation with one heap allocation.
+
+**Execute_PrimaryWins: ~2 µs / 11 allocs — price of being able to race.** The hedged path when the original wins before any hedge fires (the common good case). Allocations are inherent: `context.WithCancel` (2), buffered result channel (1), `delays` slice (1), spawned goroutine + controller, timer. CPU is dominated by `context.WithCancel` and goroutine scheduling, not `hedgex` logic. Windows (4.9 µs) is ~2.6× Linux (1.9 µs) — goroutine and timer setup is structurally heavier on Windows Server in this CI VM.
+
+**Execute_PrimaryWins_Parallel: throughput scales.** 800 ns (Linux) vs 1.9 µs serial — `b.RunParallel` amortizes goroutine-creation and context cost across 4 cores. Linux and Windows converge (800 vs 820 ns) under parallel load because the atomic counter contention is negligible (four independent `Add`s).
+
+**Execute_HedgeWins: ~5.2 ms — dominated by deliberate delay.** When a hedge copy fires and wins while the primary is cancelled. Latency is set by `WithDelay` (5 ms in the benchmark) plus goroutine scheduling — OS-independent within 3%. The extra 2 allocs vs primary-wins come from the losing primary goroutine completing after cancellation.
+
+**ExecuteMulti_PrimaryWins: identical dispatch to Execute.** Same machinery; only the function source differs.
+
+**Delays: ~34–45 ns / 1 alloc.** The schedule slice (`count-1` durations) is the only allocation; the rest is integer arithmetic. Runs once per hedged call.
+
+**Allocation floor.** The hedged path's 11 allocs are architectural — racing copies *requires* a cancel context, a goroutine, and a result channel. The sync fast path proves the non-racing case reaches the 1-alloc controller floor.
 
 ## Quality
 
-
-| Metric         | Value                          |
-| -------------- | ------------------------------ |
-| Test functions | 51                             |
-| Benchmarks     | 6                              |
-| Fuzz targets   | 3                              |
-| Examples       | 4                              |
-| Coverage       | 100.0%                         |
-| Race detector  | All pass                       |
-| External deps  | 0 (panix; testify in dev only) |
+| Metric | Value |
+|---|---|
+| Test functions | 51 |
+| Benchmarks | 6 |
+| Fuzz targets | 3 (`FuzzExecute`, `FuzzDelays` pass; `FuzzExecuteMulti` fails on negative len — see `testdata/fuzz/`) |
+| Examples | 4 |
+| Coverage | 100.0% |
+| Race detector | All tests pass with `-race` |
+| Linter | 0 issues (`golangci-lint`) |
+| CI matrix | 6 configurations (2 OS × 3 Go versions) |
+| Go version | 1.24+ |
+| External deps | 0 (panix; testify in dev only) |
 
 
 ## File Structure

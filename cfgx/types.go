@@ -14,17 +14,24 @@ const (
 	FormatTOML
 )
 
+const (
+	formatNameAuto = "auto"
+	formatNameYAML = "yaml"
+	formatNameJSON = "json"
+	formatNameTOML = "toml"
+)
+
 // String returns the lowercase format name ("auto", "yaml", "json", "toml").
 func (f Format) String() string {
 	switch f {
 	case FormatAuto:
-		return "auto"
+		return formatNameAuto
 	case FormatYAML:
-		return "yaml"
+		return formatNameYAML
 	case FormatJSON:
-		return "json"
+		return formatNameJSON
 	case FormatTOML:
-		return "toml"
+		return formatNameTOML
 	default:
 		return "unknown"
 	}

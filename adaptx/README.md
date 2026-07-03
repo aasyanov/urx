@@ -347,29 +347,49 @@ A panicking callback surfaces as a `*panix.PanicError` returned by `Execute` (re
 
 ## Benchmarks
 
-> CPU: Intel i7-10510U · OS: Windows 10 · Go 1.24 · `-benchmem -count=3` (best of 3)
+Three environments, two hardware classes, two operating systems. All values are **medians**. `B/op` and `allocs/op` are deterministic — they depend on code, not hardware.
 
+### Environments
 
-| Benchmark        | ns/op | B/op | allocs/op |
-| ---------------- | ----- | ---- | --------- |
-| Execute          | 652   | 52   | 3         |
-| Execute_Parallel | 930   | 52   | 3         |
-| Acquire          | 305   | 28   | 2         |
-| Acquire_Parallel | 653   | 28   | 2         |
-| TryAcquire       | 207   | 28   | 2         |
-| TryExecute       | 643   | 52   | 3         |
-| Allow            | 28    | 0    | 0         |
-| Limit            | 26    | 0    | 0         |
+| | Laptop | CI Server (Linux) | CI Server (Windows) |
+|---|---|---|---|
+| CPU | Intel Core i7-10510U, 4C/8T | AMD EPYC 7763, 4 vCPU | AMD EPYC 9V74, 4 vCPU |
+| TDP | 15W (mobile, throttles) | 280W (server, stable) | server, stable |
+| OS | Windows 10 | Ubuntu | Windows Server 2022 |
+| Go | 1.26.2 | 1.26 | 1.26 |
+| GOMAXPROCS | 8 | 4 | 4 |
+| Runs | 3 (`-count=3`) | 3 (`-count=3`) | 3 (`-count=3`) |
 
+This gives three comparison axes: **laptop vs server** (hardware scaling), **Linux vs Windows** (OS mutex/timer impact), and **serial vs parallel** (channel + atomic contention under load).
+
+### Admission Path
+
+| Benchmark | What it measures | Laptop | Linux | Windows | B/op | allocs/op |
+|---|---|---|---|---|---|---|
+| Execute | Admit + callback + release | 250 ns | 380 ns | **207 ns** | 52 | 3 |
+| Execute_Parallel | Execute, 8/4 goroutines | 497 ns | 540 ns | **409 ns** | 52 | 3 |
+| TryExecute | Non-blocking admit path | 184 ns | 322 ns | **153 ns** | 52 | 3 |
+| Acquire | Semaphore only (no callback) | 164 ns | **136 ns** | 144 ns | 28 | 2 |
+| Acquire_Parallel | Acquire, 8/4 goroutines | 344 ns | **192 ns** | 340 ns | 28 | 2 |
+| TryAcquire | Non-blocking acquire | 123 ns | **93 ns** | 92 ns | 28 | 2 |
+| Allow | Read-only admission check | 13.4 ns | **5.1 ns** | 6.0 ns | 0 | 0 |
+| Limit | Current limit snapshot | 13.5 ns | **6.7 ns** | 6.7 ns | 0 | 0 |
 
 ### Analysis
 
-- **Execute**: ~652 ns / 3 allocs is the admit-path floor. The three allocations are the release closure, the `atomic.Bool` it captures for double-call safety, and the `execution` controller — all of which escape to the heap because the closure outlives the stack frame and the controller is handed to the callback through the `panix.Safe` boundary as an interface. The semaphore receive, the atomic counter bumps, and (post-warmup) the mutex-guarded adaptation step are otherwise alloc-free.
-- **Acquire / TryAcquire**: 2 allocs / 28 B — the release closure and its captured `atomic.Bool`. `TryAcquire` is ~30 % cheaper than `Acquire` because it skips the context pre-check and the blocking `select`. Both are the right primitive when a single callback does not fit the call shape.
-- **TryExecute**: same 3-allocation floor as `Execute`; uses `[opTryExecute]` for panic attribution unless `WithOp` overrides both entry points.
-- **Execute_Parallel**: ~930 ns, ~1.4× the serial cost at 8 goroutines. The slowdown is the shared `inFlight`/`total` counters and the channel send/receive contending on the same cache lines; there is no mutex on the admission path, so it scales predictably with core count.
-- **Allow / Limit**: 0 allocs, ~26–28 ns — a single mutex lock/unlock around limit and in-flight reads. Safe to poll from a metrics loop; `Allow` is cheaper when you only need a yes/no without running a callback.
-- **Allocation floor**: the admit path's 3 allocs are architectural (closure + atomic + controller). They are the cost of the controller API and the idempotent release guarantee, not avoidable bookkeeping; a controller-free, fire-and-forget API could reach fewer allocs but would drop the load snapshot and `SkipSample` that justify the package.
+**Pure CPU + channel + atomic — no I/O.** Every benchmark is in-process: buffered-channel semaphore, atomic counters, and (on the adaptation step only) a mutex. The Linux vs Windows gap on the same server class is dominated by mutex and channel fast-path cost, not filesystem or timer resolution.
+
+**Windows CI is faster on the admit path.** `Execute` is 380 ns (Linux) vs 207 ns (Windows) — a **1.8× spread** on identical `-count=3` methodology. `TryExecute` shows the same pattern (322 ns vs 153 ns). The three heap allocations (release closure, captured `atomic.Bool`, `execution` controller) are fixed on every admit; the remaining time is channel send/receive and atomic bumps. EPYC 9V74 on the Windows runner appears to win on this hot path despite the OS overhead seen in other urx packages.
+
+**Parallel acquire is OS-sensitive.** `Acquire_Parallel` is 192 ns (Linux) vs 340 ns (Windows) — Linux **1.8× faster** under four goroutines contending on the same semaphore. `Execute_Parallel` inverts again (540 ns Linux vs 409 ns Windows), because the execute path adds callback setup work that amortizes channel contention differently. Pick `TryAcquire`/`Acquire` when you need raw slot reservation without the 52 B controller overhead.
+
+**Laptop sits between CI platforms on serial paths, worse on parallel.** Serial `Execute` (250 ns) beats Linux CI but loses to Windows CI. `Acquire_Parallel` at 344 ns matches Windows, not Linux — the 8-thread laptop runs more goroutines than the 4-slot semaphore can serve without queueing, inflating parallel numbers versus the 4-vCPU CI matrix.
+
+**Execute / TryExecute — 3 allocs is the architectural floor.** The three allocations are the release closure, the `atomic.Bool` it captures for double-call safety, and the `execution` controller handed to the callback through the `panix.Safe` boundary as an interface. The semaphore receive and atomic counter bumps are otherwise alloc-free.
+
+**Acquire / TryAcquire — 2 allocs / 28 B.** Only the release closure and its captured `atomic.Bool` escape. `TryAcquire` is ~25% cheaper than `Acquire` on CI because it skips the context pre-check and blocking `select`.
+
+**Allow / Limit — 0 allocs, ~5–13 ns on CI.** A mutex lock/unlock around limit and in-flight reads. Safe to poll from a metrics loop; `Allow` is cheaper when you only need a yes/no without running a callback.
 
 ## Quality
 

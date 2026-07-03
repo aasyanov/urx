@@ -13,6 +13,8 @@ go get github.com/aasyanov/urx
 > [!IMPORTANT]
 > envx does not panic or exit on a missing or malformed variable. Binding records the problem; you decide what to do with it by calling [`Env.Validate`] once, after all binds. This lets a service report *every* configuration problem at startup in a single error, instead of failing on the first one.
 
+
+
 ## The Problem
 
 Reading configuration from the environment by hand produces the same boilerplate in every service:
@@ -34,11 +36,13 @@ envx **is** the environment layer of a configuration pipeline: string env → ty
 - a reflection-based struct populator — bindings are explicit and type-checked at compile time;
 - a secrets manager — it reads strings, it does not fetch or decrypt them.
 
+
+
 ### Position in the urx Stack
 
 ```text
 ┌──────────────────────────────────────────────────────────┐
-│  main(): assemble config from defaults + file + env + CLI │
+│ main(): assemble config from defaults + file + env + CLI │
 └────────────────────────┬─────────────────────────────────┘
                          │ overlays typed fields
 ┌────────────────────────▼─────────────────────────────────┐
@@ -50,6 +54,8 @@ envx **is** the environment layer of a configuration pipeline: string env → ty
 │  Load → struct         │   │  parse → struct fields       │
 └────────────────────────┘   └──────────────────────────────┘
 ```
+
+
 
 ## Architecture
 
@@ -73,6 +79,8 @@ envx **is** the environment layer of a configuration pipeline: string env → ty
                                                  ErrInvalid  (parseErr != "")
                                                )
 ```
+
+
 
 ## How It Works
 
@@ -100,6 +108,8 @@ This is why a service can surface all configuration errors at once. [`BindTo`] w
 | No urx imports          | envx composes with cfgx/clix through pointers, not imports.                                    |
 
 
+
+
 ## Quick Start
 
 ```go
@@ -117,7 +127,11 @@ fmt.Printf("%s:%d (secret loaded)\n", host.Value(), port.Value())
 _ = secret
 ```
 
+
+
 ## Usage Scenarios
+
+
 
 ### The Precedence Pipeline (cfgx → envx → clix)
 
@@ -140,6 +154,8 @@ if err := errors.Join(env.Validate(), p.Err()); err != nil {
 }
 ```
 
+
+
 ### Required variables, reported together
 
 ```go
@@ -152,6 +168,8 @@ if err := env.Validate(); err != nil {
 }
 ```
 
+
+
 ### List values
 
 ```go
@@ -160,6 +178,8 @@ origins := envx.Bind(env, "CORS_ORIGINS", []string{"localhost"})
 // CORS_ORIGINS="a.com, b.com ,c.com" → []string{"a.com", "b.com", "c.com"}
 ```
 
+
+
 ### Timestamps (RFC3339, matching clix)
 
 ```go
@@ -167,6 +187,8 @@ env := envx.New()
 started := envx.Bind(env, "STARTED_AT", time.Time{})
 // STARTED_AT="2025-01-02T15:04:05Z" → parsed time.Time
 ```
+
+
 
 ### Deterministic tests
 
@@ -179,6 +201,8 @@ env := envx.New(
 )
 port := envx.Bind(env, "PORT", 8080)
 ```
+
+
 
 ## API
 
@@ -202,13 +226,17 @@ port := envx.Bind(env, "PORT", 8080)
 | `MapLookup`      | `MapLookup(m map[string]string) func(string) (string, bool)`      | Static-map lookup for tests.                  |
 
 
+
+
 ## Configuration
 
 
-| Option       | Default          | Effect                                              |
-| ------------ | ---------------- | --------------------------------------------------- |
+| Option       | Default           | Effect                                                                  |
+| ------------ | ----------------- | ----------------------------------------------------------------------- |
 | `WithPrefix` | empty (no prefix) | Upper-cases and prepends `PREFIX_` to every name. Trailing `_` trimmed. |
-| `WithLookup` | `os.LookupEnv`   | Injectable lookup; nil is ignored.                  |
+| `WithLookup` | `os.LookupEnv`    | Injectable lookup; nil is ignored.                                      |
+
+
 
 
 ## Supported Types
@@ -237,36 +265,58 @@ Both are reported only by [`Env.Validate`], joined via [`errors.Join`]; use [`er
 > [!WARNING]
 > `BindTo`/`BindRequiredTo` panic on a nil target. A nil destination pointer is a programming error caught immediately, not a runtime condition to handle. Pass the address of a real field.
 
+
+
 ## Safety and Concurrency
 
 An `Env` is **not** safe for concurrent `Bind` calls — bindings mutate an internal slice. The intended pattern is to bind everything on one goroutine at startup, call `Validate` once, then read the resulting `Var` values (or the overlaid struct) concurrently, which is safe since binding has stopped. The lookup function may be called concurrently only if it is itself safe; the defaults ([os.LookupEnv], [`MapLookup`]) are. No `_Parallel` benchmarks apply: binding is a cold startup path, not a concurrent hot path.
 
 ## Benchmarks
 
-> CPU: Intel i7-10510U · OS: Windows 10 · Go 1.24 · `-benchmem -count=1`
+Three environments, two hardware classes, two operating systems. All values are **medians**. `B/op` and `allocs/op` are deterministic — they depend on code, not hardware.
 
+### Environments
 
-| Benchmark            | ns/op | B/op | allocs/op |
-| -------------------- | ----- | ---- | --------- |
-| Bind_Int             | 520   | 166  | 1         |
-| Bind_String          | 364   | 165  | 1         |
-| Bind_Duration        | 523   | 179  | 1         |
-| Bind_Time            | 1122  | 184  | 1         |
-| Bind_List            | 941   | 338  | 3         |
-| Bind_Absent          | 541   | 160  | 1         |
-| Validate             | 1429  | 184  | 6         |
-| Parse_Int (internal) | 13    | 0    | 0         |
-| Parse_Time (internal)| 71    | 0    | 0         |
+| | Laptop | CI Server (Linux) | CI Server (Windows) |
+|---|---|---|---|
+| CPU | Intel Core i7-10510U, 4C/8T | AMD EPYC 7763, 4 vCPU | AMD EPYC 9V74, 4 vCPU |
+| TDP | 15W (mobile, throttles) | 280W (server, stable) | server, stable |
+| OS | Windows 10 | Ubuntu | Windows Server 2022 |
+| Go | 1.26.2 | 1.26 | 1.26 |
+| GOMAXPROCS | 8 | 4 | 4 |
+| Runs | 3 (`-count=3`) | 3 (`-count=3`) | 3 (`-count=3`) |
 
+No `_Parallel` benchmarks — binding is a cold startup path on a single goroutine, not a concurrent hot path.
+
+### Bind / Validate
+
+| Benchmark | What it measures | Laptop | Linux | Windows | B/op | allocs/op |
+|---|---|---|---|---|---|---|
+| Bind_Int | Parse + store `Var[int]` | 134 ns | **129 ns** | 130 ns | 160 | 1 |
+| Bind_String | Parse + store `Var[string]` | **120 ns** | 142 ns | 128 ns | 178 | 1 |
+| Bind_Duration | `time.ParseDuration` path | 177 ns | **170 ns** | 161 ns | 174 | 1 |
+| Bind_List | Split + parse slice | 341 ns | **353 ns** | 344 ns | 348 | 3 |
+| Bind_Absent | Lookup miss, no parse | **112 ns** | 112 ns | 119 ns | 168 | 1 |
+| Bind_Time | RFC3339 parse | **157 ns** | 170 ns | 184 ns | 195 | 1 |
+| Validate | Cross-field check | 356 ns | **316 ns** | 400 ns | 184 | 6 |
+| Parse_Int | Internal int parse only | **9.4 ns** | 9.8 ns | 11.3 ns | 0 | 0 |
+| Parse_Time | Internal time parse only | **40 ns** | 38 ns | 47 ns | 0 | 0 |
 
 ### Analysis
 
-- **One allocation per Bind** for scalar types — the heap-allocated `Var[T]` that the Env retains for later validation. This is the architectural floor: deferred validation requires keeping each binding alive. The value parse itself is allocation-free (`Parse_Int`: 0 allocs, ~13 ns; `Parse_Time`: 0 allocs, ~71 ns).
-- **Bind_Time** parses RFC3339 (~1.1 µs) — dominated by `time.Parse`; still one Var allocation.
-- **Bind_List allocates 3** — the `Var`, the backing array for the result slice, and its header. Proportional to element count.
-- **Bind_Absent** skips parsing when the lookup misses; only the `Var` is allocated.
-- **Validate scales with binding count** and allocates the joined error slice; it runs once at startup, off any hot path.
-- **No parallel benchmarks** — `Env` is intentionally single-goroutine during bind; concurrent use applies only after startup to the resolved values.
+**Linux and Windows CI agree within ~15% on bind paths.** Scalar binds (`Bind_Int`, `Bind_String`, `Bind_Duration`) cluster at 130–170 ns on CI — one heap-allocated `Var[T]` per bind plus the parse. The laptop matches CI on serial binds; differences are noise, not OS effects.
+
+**One allocation per scalar Bind — architectural floor.** Deferred validation requires retaining each `Var[T]` until `Validate` runs. The parse itself is alloc-free: `Parse_Int` is ~10 ns / 0 allocs; `Parse_Time` is ~40 ns / 0 allocs on CI.
+
+**Bind_List — 3 allocs.** The `Var`, the backing array for the result slice, and its header — proportional to element count, not a surprise.
+
+**Bind_Absent skips parsing on lookup miss.** ~112 ns on Linux — only the `Var` is allocated; no string parsing work.
+
+**Validate scales with binding count — runs once at startup.** ~316 ns (Linux) / 400 ns (Windows) with six allocs for the joined error slice. Off any request hot path by design.
+
+**No parallel benchmarks by intent.** Concurrent use applies only after startup to the resolved values; the `Env` itself is single-goroutine during bind.
+
+
 
 ## Quality
 
@@ -280,6 +330,8 @@ An `Env` is **not** safe for concurrent `Bind` calls — bindings mutate an inte
 | Coverage       | 100.0%                  |
 | Race detector  | All pass                |
 | External deps  | 0 (testify in dev only) |
+
+
 
 
 ## File Structure
@@ -299,6 +351,8 @@ envx/
 ├── example_test.go    # runnable GoDoc examples (incl. the pipeline)
 └── README.md          # this file
 ```
+
+
 
 ## License
 

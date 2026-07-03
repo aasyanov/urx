@@ -266,22 +266,38 @@ A panicking function does not produce a sentinel — it returns a `*panix.PanicE
 
 ## Benchmarks
 
-> CPU: Intel i7-10510U · OS: Windows 10 · Go 1.24 · `-benchmem -count=1`
+Three environments, two hardware classes, two operating systems. All values are **medians**. `B/op` and `allocs/op` are deterministic — they depend on code, not hardware.
 
+### Environments
 
-| Benchmark             | ns/op | B/op | allocs/op |
-| --------------------- | ----- | ---- | --------- |
-| Execute_Fast          | 3377  | 672  | 10        |
-| Execute_WithTimer     | 4093  | 672  | 10        |
-| Execute_Fast_Parallel | 1253  | 672  | 10        |
+| | Laptop | CI Server (Linux) | CI Server (Windows) |
+|---|---|---|---|
+| CPU | Intel Core i7-10510U, 4C/8T | AMD EPYC 7763, 4 vCPU | AMD EPYC 9V74, 4 vCPU |
+| TDP | 15W (mobile, throttles) | 280W (server, stable) | server, stable |
+| OS | Windows 10 | Ubuntu | Windows Server 2022 |
+| Go | 1.26.2 | 1.26 | 1.26 |
+| GOMAXPROCS | 8 | 4 | 4 |
+| Runs | 3 (`-count=3`) | 3 (`-count=3`) | 3 (`-count=3`) |
 
+### Execute Path
+
+| Benchmark | What it measures | Laptop | Linux | Windows | B/op | allocs/op |
+|---|---|---|---|---|---|---|
+| Execute_Fast | Instant `fn` under deadline | 1.88 µs | **1.71 µs** | 3.80 µs | 672 | 10 |
+| Execute_WithTimer | Same + `WithTimer` preset copy | 1.86 µs | **1.74 µs** | 3.83 µs | 672 | 10 |
+| Execute_Fast_Parallel | Fast execute, parallel | **654 ns** | 693 ns | 777 ns | 672 | 10 |
 
 ### Analysis
 
-- **Execute_Fast**: 10 allocs / 672 B is the architectural floor for a timeout wrapper. The cost is dominated by `context.WithTimeout` (allocates the timer context, its internal `time.Timer`, and a cancel closure), the spawned goroutine and its stack, the buffered result channel, and the `panix.Safe` deferred-recover frame. None is reducible without dropping a guarantee: removing the goroutine would make the timeout unable to win against a blocking `fn`; removing the timer context would lose deadline propagation to the callee.
-- **Parallel scaling**: the parallel variant is ~2.7× *faster* per op (1253 ns vs 3377 ns) because the dominant cost is goroutine/timer setup that parallelizes cleanly across CPUs — there is no shared lock or counter on the hot path, so throughput scales with cores.
-- **WithTimer**: the extra ~700 ns over the bare call is the single `WithTimer` option copying the preset config; it adds no allocations.
-- **Allocation floor**: the 10 allocs are inherent to the "function-in-a-goroutine-under-a-deadline" model. A caller that already holds a deadline-scoped context and trusts `fn` not to block can call `fn` directly; `toutx` trades these allocations for race-correct timeout enforcement and panic safety.
+**10 allocs / 672 B is the architectural floor for timeout enforcement.** Every execute pays for `context.WithTimeout` (timer context + internal `time.Timer` + cancel closure), a worker goroutine, a buffered result channel, and the `panix.Safe` deferred-recover frame. None is removable without dropping a guarantee: no goroutine means the timeout cannot preempt a blocking `fn`; no timer context means no deadline propagation.
+
+**Windows sequential execute is ~2.2× slower than Linux.** `Execute_Fast` is 1.71 µs (Linux) vs 3.80 µs (Windows) — the benchmark's sub-microsecond `fn` completes instantly, so measured time is almost entirely goroutine spawn + timer setup + scheduler handoff. Windows timer and goroutine creation latency dominates when `fn` adds no work. Laptop (1.88 µs) tracks Linux, not Windows CI.
+
+**Parallel is faster per op — setup parallelizes.** `Execute_Fast_Parallel` is 693 ns (Linux) vs 1.71 µs serial — **2.5× faster** because goroutine/timer setup scales across cores. There is no shared lock on the hot path. Windows parallel (777 ns) still beats its own serial number (3.80 µs) by **4.9×**.
+
+**WithTimer adds no allocations.** The ~20 ns delta over bare `Execute_Fast` on Linux is copying the preset timer config into the execution struct — within noise.
+
+**Allocation floor is inherent to the model.** A caller that already holds a deadline-scoped context and trusts `fn` not to block can invoke `fn` directly. `toutx` trades 10 heap objects for race-correct timeout enforcement and panic safety.
 
 ## Quality
 

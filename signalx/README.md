@@ -321,26 +321,41 @@ Both are sentinel errors created with `errors.New`; compare with `errors.Is`. Wh
 
 ## Benchmarks
 
-> CPU: Intel i7-10510U · OS: Windows 10 · Go 1.24 · `-benchmem -count=3`
+Three environments, two hardware classes, two operating systems. All values are **medians** of `-count=3` runs. `B/op` and `allocs/op` are deterministic — they depend on code, not hardware.
 
+### Environments
 
-| Benchmark                  | ns/op | B/op | allocs/op |
-| -------------------------- | ----- | ---- | --------- |
-| `RunHook`                  | 25    | 0    | 0         |
-| `OnShutdown`               | 131   | 42   | 0         |
-| `Wait_NoHooks`             | 1,306 | 400  | 7         |
-| `Wait_SingleHook`          | 1,377 | 408  | 8         |
-| `Wait_TenHooks`            | 1,840 | 480  | 8         |
-| `Wait_SingleHook_Parallel` | 1,381 | 408  | 8         |
+| | Laptop | CI Server (Linux) | CI Server (Windows) |
+|---|---|---|---|
+| CPU | Intel Core i7-10510U, 4C/8T | AMD EPYC 7763, 4 vCPU | AMD EPYC 9V74, 4 vCPU |
+| TDP | 15W (mobile, throttles) | 280W (server, stable) | server, stable |
+| OS | Windows 10 | Ubuntu | Windows Server 2022 |
+| Go | 1.26 | 1.26 | 1.26 |
+| GOMAXPROCS | 8 | 4 | 4 |
+| Source | `quality.result` | `benchmark-ubuntu-latest.txt` | `benchmark-windows-latest.txt` |
 
+| Benchmark | What it measures | Laptop | Linux | Windows | B/op | allocs/op |
+|---|---|---|---|---|---|---|
+| `RunHook` | Single hook via `panix.SafeVoid` | **13.0 ns** | 14.3 ns | 14.0 ns | 0 | 0 |
+| `OnShutdown` | Global hook registration | **51.7 ns** | 69.5 ns | 55.9 ns | 48 | 0 |
+| `Wait_NoHooks` | Full drain, no hooks | 636.3 ns | **608.7 ns** | 693.8 ns | 376 | 7 |
+| `Wait_SingleHook` | Drain with one hook | 680.6 ns | **651.7 ns** | 786.1 ns | 384 | 8 |
+| `Wait_TenHooks` | Drain with ten hooks | 848.7 ns | **838.4 ns** | 990.0 ns | 456 | 8 |
+| `Wait_SingleHook_Parallel` | Drain, 8/4 goroutines | **417.9 ns** | 484.8 ns | 474.8 ns | 384 | 8 |
 
 ### Analysis
 
-- **RunHook**: 25 ns, 0 allocs.** The per-hook execution path — `panix.SafeVoid` wrapping the hook — adds only the cost of a deferred `recover()` over a direct call, with zero heap escape on the happy path. This is the true hot operation and it is allocation-free.
-- **OnShutdown**: 131 ns, 0 amortized allocs.** Registration is a mutex lock plus a slice append. The reported B/op (~42) is amortized slice-growth backing-array reallocation across the benchmark's append sequence; once the registry is sized, steady-state appends do not allocate. Registration happens at startup (cold path), so this cost is irrelevant to request latency.
-- **Wait_***: ~1,300–1,840 ns, 7–8 allocs.** These benchmarks intentionally include `context.WithCancel` + `cancel()` and the internal `context.WithTimeout` per iteration, because that is the realistic unit of work: one full drain. The allocation floor (7 allocs for the no-hook case) is dominated by the two context constructions (`WithCancel` for the driver, `WithTimeout` for `shutCtx`) and the channel/timer they create — not by `signalx` logic itself. Adding hooks barely moves the needle: `Wait_TenHooks` adds ~530 ns and the same 8 allocs as the single-hook case, because the hook slice is pre-sized with known capacity (`make([]…, 0, len(global)+len(hooks))`) and each hook runs allocation-free.
-- **Scaling.** `Wait_SingleHook_Parallel` matches the sequential number (~1,381 ns), confirming the mutex-guarded registry snapshot is not a contention point: the critical section is a single slice copy held for microseconds, and hook execution itself holds no lock.
-- **Allocation floor.** Shutdown is a once-per-process cold path; there is no value in driving `Wait` to 0 allocs. The architecturally meaningful number is `RunHook` at 0 allocs — the only operation that could conceivably run in a tight loop.
+**RunHook: 13–14 ns, 0 allocs — the architecturally meaningful hot path.** The per-hook execution path — `panix.SafeVoid` wrapping the hook — adds only the cost of a deferred `recover()` over a direct call, with zero heap escape on the happy path. This is allocation-free on all three platforms.
+
+**OnShutdown: cold-path registration.** 52–70 ns, 0 amortized allocs/op — a mutex lock plus a slice append. The reported B/op (41–48) is amortized slice-growth backing-array reallocation across the benchmark's append sequence; once the registry is sized, steady-state appends do not allocate. Registration happens at startup, so this cost is irrelevant to request latency.
+
+**Wait_*: context construction dominates, not hook execution.** 609–990 ns, 7–8 allocs — these benchmarks intentionally include `context.WithCancel` + `cancel()` and the internal `context.WithTimeout` per iteration, because that is the realistic unit of work: one full drain. The allocation floor (7 allocs for the no-hook case) is dominated by the two context constructions and the channel/timer they create — not by `signalx` logic itself. Adding ten hooks adds ~230 ns (651 → 838 ns on Linux) and the same 8 allocs as the single-hook case, because the hook slice is pre-sized with known capacity and each hook runs allocation-free.
+
+**Laptop vs CI — 2× improvement on Wait since last measurement.** Previous laptop figures (~1,300 ns) reflected older Go/runtime behavior or noisier runs. Current medians (636 ns laptop, 609 ns Linux) are stable across CI (< 15% spread). The shutdown drain is a once-per-process cold path; sub-microsecond differences are irrelevant in production.
+
+**Parallel Wait is faster than sequential on the laptop.** `Wait_SingleHook_Parallel` (418 ns) beats sequential (681 ns) because each goroutine constructs its own cancelled context independently — no mutex contention on the registry snapshot, and the critical section (slice copy under lock) completes in nanoseconds.
+
+**Allocation floor.** Shutdown is a once-per-process cold path; there is no value in driving `Wait` to 0 allocs. The architecturally meaningful number is `RunHook` at 0 allocs — the only operation that could conceivably run in a tight loop.
 
 ## Quality
 

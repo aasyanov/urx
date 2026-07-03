@@ -14,6 +14,9 @@ const shortGroupMinLen = 2
 // noNegationPrefix is the prefix used to negate a bool flag: "--no-verbose".
 const noNegationPrefix = "no-"
 
+// longHelpFlag is the POSIX long option that triggers [ErrHelp].
+const longHelpFlag = "--help"
+
 // parseArgs walks the argument list, dispatching to subcommands, resolving
 // flags (including inherited ones and --no-* negation), and collecting
 // positional arguments. It does NOT execute the matched action.
@@ -26,7 +29,7 @@ func parseArgs(cmd *Command, args []string, p *Parser) error {
 			break
 		}
 
-		if arg == "--help" || arg == "-h" {
+		if arg == longHelpFlag || arg == "-h" {
 			p.matched = cmd
 			return ErrHelp
 		}
