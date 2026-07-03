@@ -1,9 +1,9 @@
 # URX — Unified Runtime eXtensions
 
-[CI](https://github.com/aasyanov/urx/actions/workflows/ci.yml)
-[Go Reference](https://pkg.go.dev/github.com/aasyanov/urx)
-[License: MIT](LICENSE)
-[Changelog](CHANGELOG.md)
+[![CI](https://github.com/aasyanov/urx/actions/workflows/ci.yml/badge.svg)](https://github.com/aasyanov/urx/actions/workflows/ci.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/aasyanov/urx.svg)](https://pkg.go.dev/github.com/aasyanov/urx)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Changelog](https://img.shields.io/badge/Changelog-CHANGELOG-blue)](CHANGELOG.md)
 
 Twenty focused Go packages for production service runtime concerns — retry, circuit breaking, rate limiting, concurrency control, health probes, configuration loading, and related primitives. Each package does one thing, composes through `context.Context` and plain interfaces, and ships with tests, benchmarks, fuzz targets, and a standalone README. No framework runtime, no central dependency, no code generation.
 

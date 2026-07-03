@@ -19,12 +19,12 @@ func FuzzExecute(f *testing.F) {
 	f.Add(10, int64(time.Microsecond), int64(time.Microsecond), false)
 
 	f.Fuzz(func(t *testing.T, parallel int, delayNs, maxDelayNs int64, succeed bool) {
-		// Bound the schedule so a single fuzz case stays fast.
-		if parallel > 16 {
-			parallel = 16
-		}
-		delay := time.Duration(delayNs % int64(5*time.Millisecond))
-		maxDelay := time.Duration(maxDelayNs % int64(10*time.Millisecond))
+		// Normalize inputs into a small positive range so every case stays fast
+		// and avoids falling back to the package defaults (100 ms / 1 s), which
+		// can make fuzz iterations occasionally hit the watchdog on slow CI.
+		parallel = fuzzParallel(parallel, 16)
+		delay := fuzzDuration(delayNs, 5*time.Millisecond)
+		maxDelay := fuzzDuration(maxDelayNs, 10*time.Millisecond)
 
 		h := New(
 			WithMaxParallel(parallel),
@@ -40,7 +40,7 @@ func FuzzExecute(f *testing.F) {
 			t.Fatalf("maxDelay %v must be >= delay %v", h.MaxDelay(), h.Delay())
 		}
 
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 		defer cancel()
 
 		got, err := Execute(h, ctx, func(context.Context, HedgeController) (int, error) {
@@ -108,14 +108,9 @@ func FuzzExecuteMulti(f *testing.F) {
 	f.Add(0, int64(-1), int64(-1), true, byte(1))
 
 	f.Fuzz(func(t *testing.T, parallel int, delayNs, maxDelayNs int64, succeed bool, nilPattern byte) {
-		if parallel > 8 {
-			parallel = 8
-		}
-		if parallel < 1 {
-			parallel = 1
-		}
-		delay := time.Duration(delayNs % int64(5*time.Millisecond))
-		maxDelay := time.Duration(maxDelayNs % int64(10*time.Millisecond))
+		parallel = fuzzParallel(parallel, 8)
+		delay := fuzzDuration(delayNs, 5*time.Millisecond)
+		maxDelay := fuzzDuration(maxDelayNs, 10*time.Millisecond)
 
 		h := New(
 			WithMaxParallel(parallel),
@@ -136,7 +131,7 @@ func FuzzExecuteMulti(f *testing.F) {
 			}
 		}
 
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 		defer cancel()
 
 		got, err := ExecuteMulti(h, ctx, fns)
@@ -159,4 +154,24 @@ func FuzzExecuteMulti(f *testing.F) {
 			t.Fatalf("expected failure, got success with value %d", got)
 		}
 	})
+}
+
+func fuzzParallel(n, max int) int {
+	if max < 1 {
+		return 1
+	}
+	return int(uint(n)%uint(max)) + 1
+}
+
+func fuzzDuration(n int64, max time.Duration) time.Duration {
+	const min = time.Microsecond
+	if max <= min {
+		return min
+	}
+	span := int64(max - min)
+	d := n % span
+	if d < 0 {
+		d += span
+	}
+	return min + time.Duration(d)
 }
