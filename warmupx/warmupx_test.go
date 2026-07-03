@@ -497,9 +497,11 @@ func TestExecute_ContextVisibleToCallback(t *testing.T) {
 // --- TryExecute ---
 
 func TestTryExecute_RunsWhenAdmitted(t *testing.T) {
-	w := New(WithMinCapacity(1), WithMaxCapacity(1))
+	w := New(WithStrategy(Step), WithMinCapacity(1), WithMaxCapacity(1))
 	ok, got, err := TryExecute(w, context.Background(), func(_ context.Context, wc WarmupController) (string, error) {
 		assert.InDelta(t, 1.0, wc.Capacity(), 1e-9)
+		assert.InDelta(t, 0.0, wc.Progress(), 1e-9)
+		assert.Equal(t, Step, wc.Strategy())
 		return "ok", nil
 	})
 	require.NoError(t, err)
@@ -517,6 +519,7 @@ func TestTryExecute_SkipsWhenRejected(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.False(t, ok)
+	assert.False(t, errors.Is(err, ErrRejected), "probabilistic rejection must not surface ErrRejected")
 	assert.False(t, called.Load(), "callback must not run when rejected")
 	assert.Equal(t, int64(1), w.Stats().Rejected)
 }

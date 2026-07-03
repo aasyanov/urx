@@ -2,6 +2,7 @@ package warmupx
 
 import (
 	"context"
+	"errors"
 	"math"
 	"testing"
 	"time"
@@ -93,7 +94,7 @@ func FuzzTryExecute(f *testing.F) {
 			}
 			return 1, nil
 		})
-		if ok && err != nil && err != ErrRejected {
+		if ok && err != nil && !errors.Is(err, ErrRejected) {
 			t.Fatalf("unexpected error when ok=true: %v", err)
 		}
 		_ = time.Now()

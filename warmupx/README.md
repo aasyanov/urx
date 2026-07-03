@@ -124,7 +124,8 @@ For fractional progress `t ∈ [0, 1]` and `delta = maxCap − minCap`, capacity
 | Completion latch        | Once complete, `Capacity() == maxCap`, `Progress() == 1`, `IsComplete()` stays true until the next `Start` |
 | `Stop` retains capacity | `Stop` freezes the current capacity; it is not reset to min                                                |
 | `Execute` rejection     | A rejected `Execute` never invokes the callback                                                            |
-| `TryExecute` rejection  | A rejected `TryExecute` returns `(false, zero, nil)` and never invokes the callback                        |
+| `TryExecute` rejection  | Probabilistic rejection returns `(false, zero, nil)` and never invokes the callback                        |
+| Panic safety            | A panicking `Execute`/`TryExecute` callback becomes a `*panix.PanicError`; counters stay at pre-panic admission state |
 | Goroutine lifecycle     | Exactly one loop goroutine per active ramp; it exits on `Stop`, completion, or generation change           |
 | Concurrency             | All methods are safe for concurrent use; `-race` clean                                                     |
 
@@ -155,8 +156,10 @@ func main() {
 			batch := int(wc.Capacity() * 100)
 			return serve(ctx, batch)
 		})
+	if err != nil {
+		return
+	}
 	_ = out
-	_ = err
 }
 
 func serve(ctx context.Context, batch int) (int, error) { return batch, nil }
@@ -164,22 +167,20 @@ func serve(ctx context.Context, batch int) (int, error) { return batch, nil }
 
 ## Usage Scenarios
 
-### Try optional work without error handling overhead
+### Try without error handling during warmup
+
+When rejection is the common case and a boolean is clearer than `errors.Is`, use `TryExecute`:
 
 ```go
-w := warmupx.New(warmupx.WithDuration(20 * time.Second))
-w.Start()
-
 ok, batch, err := warmupx.TryExecute(w, ctx,
 	func(ctx context.Context, wc warmupx.WarmupController) (int, error) {
 		return prefetch(ctx, int(wc.Capacity()*100))
 	})
 if err != nil {
-	return err
+	return err // nil fn or callback/panic error
 }
 if !ok {
-	// Still warming — skip optional prefetch, try again later.
-	return nil
+	return nil // still warming — no ErrRejected to unwrap
 }
 _ = batch
 ```
@@ -266,10 +267,14 @@ if err := w.WaitForCompletion(ctx); err != nil {
 | `Warmer.WaitForCompletion` | `func (w *Warmer) WaitForCompletion(ctx context.Context) error`                                                         | Block until complete or ctx done             |
 | `Warmer.Stats`             | `func (w *Warmer) Stats() Stats`                                                                                        | Snapshot of state and counters               |
 | `Warmer.ResetStats`        | `func (w *Warmer) ResetStats()`                                                                                         | Zero allowed/rejected counters               |
-| `Execute`                  | `func Execute[T any](w *Warmer, ctx context.Context, fn func(context.Context, WarmupController) (T, error)) (T, error)` | Run fn only if admitted; rejection is an error |
-| `TryExecute`               | `func TryExecute[T any](w *Warmer, ctx context.Context, fn func(context.Context, WarmupController) (T, error)) (bool, T, error)` | Run fn only if admitted; rejection is `(false, zero, nil)` |
-| `WarmupController`         | `interface { Capacity() float64; Progress() float64; Strategy() Strategy; Reject() }`                                   | Per-call admission context + control         |
-| `Strategy`                 | `type Strategy uint8`                                                                                                   | Ramp curve selector                          |
+| `Execute`                   | `func Execute[T any](w *Warmer, ctx context.Context, fn WarmupFunc[T]) (T, error)` | Run fn only if admitted; rejection is an error |
+| `TryExecute`                | `func TryExecute[T any](w *Warmer, ctx context.Context, fn WarmupFunc[T]) (bool, T, error)` | Run fn only if admitted; rejection is `(false, zero, nil)` |
+| `WarmupController.Capacity` | `Capacity() float64` | Capacity in `[0, 1]` at admission time |
+| `WarmupController.Progress` | `Progress() float64` | Warmup progress in `[0, 1]` at admission time |
+| `WarmupController.Strategy` | `Strategy() Strategy` | Configured ramp strategy at admission time |
+| `WarmupController.Reject`   | `Reject()` | Late reject: discard result and return `ErrRejected` |
+| `WarmupFunc`                | `type WarmupFunc[T any] func(context.Context, WarmupController) (T, error)` | Unit of work for `Execute` and `TryExecute` |
+| `Strategy`                  | `type Strategy uint8` | Ramp curve selector (`Linear`, `Exponential`, `Logarithmic`, `Step`) |
 | `Strategy.String`          | `func (s Strategy) String() string`                                                                                     | Human-readable label                         |
 | `Stats`                    | `type Stats struct { ... }`                                                                                             | Observability snapshot                       |
 
@@ -295,7 +300,7 @@ if err := w.WaitForCompletion(ctx); err != nil {
 
 | Error         | Condition                                                                                                        |
 | ------------- | ---------------------------------------------------------------------------------------------------------------- |
-| `ErrRejected` | `AllowOrError` / `Execute` did not admit the request, or an admitted callback invoked `WarmupController.Reject` (wraps capacity + progress) |
+| `ErrRejected` | `AllowOrError` / `Execute` probabilistic rejection, or `WarmupController.Reject` on an admitted `Execute`/`TryExecute` (wraps capacity + progress) |
 | `ErrNilFunc`  | `Execute` / `TryExecute` was called with a nil function                                                         |
 
 `TryExecute` does not return `ErrRejected` for probabilistic rejection — when admission fails it returns `(false, zero, nil)`, leaving the decision to the caller. A panicking callback surfaces as a `*panix.PanicError` returned by `Execute`/`TryExecute` (reach it with `errors.As`); counters reflect the admission outcome.
@@ -304,16 +309,16 @@ if err := w.WaitForCompletion(ctx); err != nil {
 ## Pitfalls
 
 > [!WARNING]
-> **Allow** is independent per call.** It is a Bernoulli trial, not a counter. Across 100 calls at capacity `0.3` you will see roughly 30 admissions, but any individual window can deviate. Do not rely on it for exact quotas — use `ratex`/`bulkx`.
+> **Allow is independent per call.** It is a Bernoulli trial, not a counter. Across 100 calls at capacity `0.3` you will see roughly 30 admissions, but any individual window can deviate. Do not rely on it for exact quotas — use `ratex`/`bulkx`.
 
 > [!WARNING]
-> **Stop** does not reset capacity.** After `Stop`, the warmer keeps admitting at the frozen capacity. Call `Reset` (or `Start`) to ramp again from the minimum.
+> **Stop does not reset capacity.** After `Stop`, the warmer keeps admitting at the frozen capacity. Call `Reset` (or `Start`) to ramp again from the minimum.
 
 > [!WARNING]
 > **Callbacks run in their own goroutines and may arrive out of order.** `WithOnCapacityChange` fires asynchronously; do not assume strictly increasing `newCap` values across deliveries, and keep callbacks fast and panic-free.
 
 > [!NOTE]
-> **WithMaxCapacity** below `WithMinCapacity` is corrected at construction.** `maxCap` is raised to `minCap`, yielding a flat (already-warm) ramp rather than an error.
+> **WithMaxCapacity below WithMinCapacity is corrected at construction.** `maxCap` is raised to `minCap`, yielding a flat (already-warm) ramp rather than an error.
 
 ## Safety and Concurrency
 
@@ -326,14 +331,15 @@ The `Warmer` is safe for concurrent use. State (`capacity`, `start`, `warming`, 
 
 | Benchmark             | ns/op | B/op | allocs/op |
 | --------------------- | ----- | ---- | --------- |
-| Warmer_Allow          | 40    | 0    | 0         |
+| Warmer_Allow          | 29    | 0    | 0         |
 | Warmer_Allow_Parallel | 61    | 0    | 0         |
 | Warmer_Capacity       | 26    | 0    | 0         |
 | Warmer_MaxRequests    | 22    | 0    | 0         |
-| Execute               | 78    | 24   | 1         |
+| Execute               | 64    | 24   | 1         |
 | Execute_Parallel      | 84    | 24   | 1         |
-| TryExecute            | 78    | 24   | 1         |
+| TryExecute            | 60    | 24   | 1         |
 | TryExecute_Parallel   | 84    | 24   | 1         |
+| TryExecute_Reject     | 27    | 0    | 0         |
 | Warmer_Stats          | 45    | 0    | 0         |
 
 
@@ -341,6 +347,7 @@ The `Warmer` is safe for concurrent use. State (`capacity`, `start`, `warming`, 
 
 - **Allow / Capacity / MaxRequests**: 0 allocs — these take only the `RWMutex` read lock (or a single atomic) and return a stack value. `Allow` is dominated by the `rand.Float64()` call; the lock acquisition is uncontended and nearly free.
 - **Execute / TryExecute**: 1 alloc (24 B) is the architectural floor. The per-call `*execution` controller is passed through the `WarmupController` interface into the callback closure, which forces it to escape to the heap. This mirrors `circuitx.Execute`. The hot admission paths (`Allow`) stay alloc-free precisely because they do not allocate a controller.
+- **TryExecute_Reject**: 0 allocs — at zero capacity the admission check fails before a controller is allocated; only the rejected counter increments. This is the fast "skip optional work" path.
 - **TryExecute vs Execute**: identical cost on the admit path — the only semantic difference is that probabilistic rejection returns `(false, zero, nil)` instead of wrapping `ErrRejected`.
 - **Parallel scaling**: the read-lock paths scale near-linearly under contention because `math/rand/v2` keeps per-P state, eliminating the global RNG lock older generators suffered. `Execute_Parallel` stays close to its sequential cost; the single heap allocation is the only contended resource.
 - **Bottleneck**: random number generation and the controller allocation dominate; the capacity math and lock are negligible.
@@ -351,9 +358,9 @@ The `Warmer` is safe for concurrent use. State (`capacity`, `start`, `warming`, 
 | Metric         | Value                          |
 | -------------- | ------------------------------ |
 | Test functions | 60                             |
-| Benchmarks     | 9                              |
+| Benchmarks     | 10                             |
 | Fuzz targets   | 4                              |
-| Examples       | 5                              |
+| Examples       | 6                              |
 | Coverage       | 98.7%                          |
 | Race detector  | All pass                       |
 | External deps  | 0 (panix; testify in dev only) |

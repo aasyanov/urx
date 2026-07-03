@@ -19,6 +19,8 @@
 //	    return serve(ctx, wc.Capacity())
 //	})
 //
+// Because Go methods cannot have type parameters, [Execute] and [TryExecute] are
+// package-level generic functions taking the [Warmer] as their first argument.
 // [TryExecute] is the non-blocking variant: when probabilistic admission fails
 // it returns (false, zero, nil) instead of [ErrRejected].
 //
@@ -275,7 +277,7 @@ func (w *Warmer) WaitForCompletion(ctx context.Context) error {
 // panic becomes a [*panix.PanicError]. If fn calls [WarmupController.Reject],
 // Execute discards fn's result, returns [ErrRejected], and counts the call as
 // rejected rather than allowed.
-func Execute[T any](w *Warmer, ctx context.Context, fn func(ctx context.Context, wc WarmupController) (T, error)) (T, error) {
+func Execute[T any](w *Warmer, ctx context.Context, fn WarmupFunc[T]) (T, error) {
 	var zero T
 	if fn == nil {
 		return zero, ErrNilFunc
@@ -296,7 +298,7 @@ func Execute[T any](w *Warmer, ctx context.Context, fn func(ctx context.Context,
 // Returns (false, zero, [ErrNilFunc]) if fn is nil. When admitted, fn runs under
 // [panix.Safe] with the same outcome semantics as [Execute], including
 // [WarmupController.Reject] and panic recovery.
-func TryExecute[T any](w *Warmer, ctx context.Context, fn func(ctx context.Context, wc WarmupController) (T, error)) (bool, T, error) {
+func TryExecute[T any](w *Warmer, ctx context.Context, fn WarmupFunc[T]) (bool, T, error) {
 	var zero T
 	if fn == nil {
 		return false, zero, ErrNilFunc
@@ -328,7 +330,7 @@ func (w *Warmer) tryAdmit() (capacity, progress float64, strategy Strategy, ok b
 
 // executeRun runs fn after admission and settles counters. The caller must
 // have already passed guard checks and won admission via tryAdmit.
-func executeRun[T any](w *Warmer, ctx context.Context, op string, capacity, progress float64, strategy Strategy, fn func(ctx context.Context, wc WarmupController) (T, error)) (T, error) {
+func executeRun[T any](w *Warmer, ctx context.Context, op string, capacity, progress float64, strategy Strategy, fn WarmupFunc[T]) (T, error) {
 	var zero T
 	wc := &execution{capacity: capacity, progress: progress, strategy: strategy}
 	val, err := panix.Safe(op, func() (T, error) {

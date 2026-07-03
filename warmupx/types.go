@@ -72,9 +72,8 @@ type WarmupController interface {
 	// Reject signals that the admitted call must be treated as rejected
 	// regardless of its result: [Execute] and admitted [TryExecute] discard the
 	// callback's return value and return [ErrRejected]. Use it when the callback
-	// determines, after
-	// admission, that the instance is not yet ready for the work. Safe to call
-	// multiple times.
+	// determines, after admission, that the instance is not yet ready for the
+	// work. Safe to call multiple times.
 	Reject()
 }
 
