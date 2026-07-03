@@ -56,8 +56,8 @@ func (r EvictionReason) String() string {
 }
 
 // OnEvictFunc is invoked after an entry is removed from the cache. It runs
-// outside the cache lock, so it may safely call back into the cache. Panics
-// raised by the callback are recovered and discarded.
+// outside the cache lock under [github.com/aasyanov/urx/panix], so it may safely
+// call back into the cache. Panics are recovered as [*panix.PanicError].
 type OnEvictFunc[K comparable, V any] func(key K, value V, reason EvictionReason)
 
 // Entry is an immutable snapshot of a cached key-value pair with its

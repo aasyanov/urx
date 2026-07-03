@@ -262,6 +262,15 @@ if !s.Allow(shedx.PriorityLow) {
 }
 ```
 
+### Tune shed cutoffs
+
+```go
+s := shedx.New(
+    shedx.WithThreshold(0.7),
+    shedx.WithCutoffs(0.15, 0.50, 0.85), // shed Low sooner, keep High longer
+)
+```
+
 ### Compose with a per-request timeout (toutx)
 
 ```go
@@ -288,13 +297,21 @@ resp, err := shedx.Execute(s, ctx, shedx.PriorityNormal,
 | `Shedder.InFlight`   | `func (s *Shedder) InFlight() int64`                                                                                                      | Current in-flight count                  |
 | `Shedder.Capacity`   | `func (s *Shedder) Capacity() int`                                                                                                        | Configured capacity                      |
 | `Shedder.Threshold`  | `func (s *Shedder) Threshold() float64`                                                                                                   | Configured shed threshold                |
-| `Shedder.Stats`      | `func (s *Shedder) Stats() Stats`                                                                                                         | Counter snapshot                         |
+| `Shedder.Stats`      | `func (s *Shedder) Stats() Stats`                                                                                                         | Configuration + counter snapshot       |
 | `Shedder.ResetStats` | `func (s *Shedder) ResetStats()`                                                                                                          | Zero cumulative counters                 |
 | `Shedder.Close`      | `func (s *Shedder) Close() error`                                                                                                         | Idempotent shutdown                      |
 | `Shedder.IsClosed`   | `func (s *Shedder) IsClosed() bool`                                                                                                       | Report closed state                      |
 | `Token.Release`      | `func (t *Token) Release()`                                                                                                               | Free an acquired slot (idempotent)       |
 | `Priority`           | `type Priority uint8`                                                                                                                     | Low / Normal / High / Critical           |
+| `Priority.String`    | `func (p Priority) String() string`                                                                                                       | Human-readable priority label            |
 | `ShedFunc[T]`        | `func(ctx context.Context, sc ShedController) (T, error)`                                                                                 | Unit of work run by `Execute` and `TryExecute` |
+| `Stats`              | `type Stats struct{ Capacity, Threshold, CutoffLow, CutoffNormal, CutoffHigh, InFlight, Admitted, Shed, Degraded }`                       | Point-in-time snapshot (JSON-tagged)     |
+| `Option`             | `type Option func(*config)`                                                                                                               | Functional option for [New]              |
+| `DefaultCapacity`    | `const DefaultCapacity = 1000`                                                                                                            | Default max in-flight operations         |
+| `DefaultThreshold`   | `const DefaultThreshold = 0.8`                                                                                                            | Default load fraction for shedding       |
+| `DefaultCutoffLow`   | `const DefaultCutoffLow = 0.25`                                                                                                           | Default overload cutoff for `PriorityLow` |
+| `DefaultCutoffNormal`| `const DefaultCutoffNormal = 0.60`                                                                                                        | Default overload cutoff for `PriorityNormal` |
+| `DefaultCutoffHigh`  | `const DefaultCutoffHigh = 0.90`                                                                                                          | Default overload cutoff for `PriorityHigh` |
 
 
 ### ShedController
@@ -316,6 +333,7 @@ resp, err := shedx.Execute(s, ctx, shedx.PriorityNormal,
 | ------------------ | ------------------------ | --------------------------------------------------------------- |
 | `WithCapacity(n)`  | `DefaultCapacity` (1000) | Max in-flight operations; ≤ 0 ignored, final value floored to 1 |
 | `WithThreshold(t)` | `DefaultThreshold` (0.8) | Load fraction at which shedding begins; outside (0, 1] ignored  |
+| `WithCutoffs(l,n,h)` | `DefaultCutoffLow` (0.25), `DefaultCutoffNormal` (0.60), `DefaultCutoffHigh` (0.90) | Overload cutoffs per priority; invalid values or ordering reset all three to defaults |
 | `WithOp(s)`        | `[opExecute]` / `[opTryExecute]` | Operation name attached to panic reports (`TryExecute` defaults to `"shedx.TryExecute"`). |
 
 
@@ -324,12 +342,12 @@ resp, err := shedx.Execute(s, ctx, shedx.PriorityNormal,
 Above the threshold, the overload fraction `(load − threshold) / (1 − threshold)` drives admission per priority:
 
 
-| Priority           | Admitted while overload < | Effect                       |
-| ------------------ | ------------------------- | ---------------------------- |
-| `PriorityLow`      | 0.25                      | Shed first, at mild overload |
-| `PriorityNormal`   | 0.60                      | Shed at moderate overload    |
-| `PriorityHigh`     | 0.90                      | Shed only near saturation    |
-| `PriorityCritical` | —                         | Never shed                   |
+| Priority           | Admitted while overload < | Default constant        | Effect                       |
+| ------------------ | ------------------------- | ----------------------- | ---------------------------- |
+| `PriorityLow`      | configurable              | `DefaultCutoffLow` (0.25) | Shed first, at mild overload |
+| `PriorityNormal`   | configurable              | `DefaultCutoffNormal` (0.60) | Shed at moderate overload    |
+| `PriorityHigh`     | configurable              | `DefaultCutoffHigh` (0.90) | Shed only near saturation    |
+| `PriorityCritical` | —                         | —                       | Never shed                   |
 
 
 ## Errors
@@ -368,7 +386,7 @@ Above the threshold, the overload fraction `(load − threshold) / (1 − thresh
 
 ## Benchmarks
 
-> CPU: Intel i7-10510U · OS: Windows 10 · Go 1.24 · `-benchmem -count=3` (best of 3)
+> CPU: Intel i7-10510U · OS: Windows 10 · Go 1.26 · `-benchmem -count=3` (best of 3)
 
 
 | Benchmark              | ns/op | B/op | allocs/op |
@@ -403,11 +421,11 @@ Above the threshold, the overload fraction `(load − threshold) / (1 − thresh
 
 | Metric         | Value                          |
 | -------------- | ------------------------------ |
-| Test functions | 59                             |
+| Test functions | 66                             |
 | Benchmarks     | 10                             |
 | Fuzz targets   | 3                              |
 | Examples       | 6                              |
-| Coverage       | 98.4%                          |
+| Coverage       | 100%                           |
 | Race detector  | All pass                       |
 | External deps  | 0 (panix; testify in dev only) |
 
@@ -417,10 +435,11 @@ Above the threshold, the overload fraction `(load − threshold) / (1 − thresh
 ```text
 shedx/
 ├── shedx.go            # package doc + Shedder + Execute[T]/TryExecute[T] + Acquire/Token + admission
-├── options.go          # config, Option, defaults, WithXxx
+├── options.go          # config, Option, defaults, WithXxx (capacity, threshold, cutoffs, op)
 ├── types.go            # Priority enum + ShedController + private execution impl
 ├── errors.go           # ErrRejected, ErrClosed, ErrNilFunc, ErrCancelled
 ├── errors_test.go      # sentinel wrapping tests
+├── helpers_test.go     # shared test fixtures (fill, release)
 ├── shedx_test.go       # unit + table-driven tests
 ├── bench_test.go       # benchmarks (sequential + parallel)
 ├── fuzz_test.go        # FuzzExecute, FuzzTryExecute, FuzzAcquireRelease — admission invariants

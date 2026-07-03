@@ -4,18 +4,24 @@ import (
 	"context"
 	"time"
 
+	"github.com/aasyanov/urx/panix"
 	"golang.org/x/sync/singleflight"
 )
 
-// newSingleflightGroup constructs the lazily-initialized singleflight group.
-func newSingleflightGroup() *singleflight.Group {
-	return &singleflight.Group{}
-}
+const (
+	// opGetOrCompute labels panics recovered while running a [Cache.GetOrCompute]
+	// compute function.
+	opGetOrCompute = "lrux.GetOrCompute"
+
+	// opOnEvict labels panics recovered while running an [OnEvictFunc] callback.
+	opOnEvict = "lrux.onEvict"
+)
 
 // GetOrCompute returns the value cached under key, or runs compute to produce
 // one when the key is missing or expired. The computed value is stored before
-// being returned on success. Panics inside compute are recovered: the zero value
-// is returned with a nil error and is cached.
+// being returned on success. Panics inside compute are recovered via
+// [github.com/aasyanov/urx/panix] and returned as a [*panix.PanicError]; nothing
+// is cached on panic.
 //
 // Options:
 //   - [WithComputeTTL] sets a per-entry TTL for the computed value.
@@ -37,7 +43,8 @@ func (c *Cache[K, V]) GetOrCompute(ctx context.Context, key K, compute func(ctx 
 	if err := ctx.Err(); err != nil {
 		return zero, err
 	}
-	if v, ok := c.Get(key); ok {
+	if v, ok := c.peekPromote(key); ok {
+		c.hits.Add(1)
 		return v, nil
 	}
 
@@ -45,13 +52,15 @@ func (c *Cache[K, V]) GetOrCompute(ctx context.Context, key K, compute func(ctx 
 	if cfg.singleflight {
 		return c.computeSingle(ctx, key, compute, cfg.ttl)
 	}
+
+	c.misses.Add(1)
 	return c.computeDirect(ctx, key, compute, cfg.ttl)
 }
 
 // computeDirect runs compute under a double-checked lock without singleflight.
 //
-// The originating miss was already counted by the public GetOrCompute call, so
-// the double-check here adjusts statistics only when it converts that miss into
+// The originating miss was already counted by [Cache.GetOrCompute], so the
+// double-check here adjusts statistics only when it converts that miss into
 // a hit (another goroutine populated the key in the meantime).
 func (c *Cache[K, V]) computeDirect(ctx context.Context, key K, compute func(ctx context.Context) (V, error), ttl time.Duration) (V, error) {
 	var zero V
@@ -79,7 +88,9 @@ func (c *Cache[K, V]) computeDirect(ctx context.Context, key K, compute func(ctx
 	if err := ctx.Err(); err != nil {
 		return zero, err
 	}
-	value, err := safeComputeCtx(ctx, compute)
+	value, err := panix.Safe(opGetOrCompute, func() (V, error) {
+		return compute(ctx)
+	})
 	if err != nil {
 		return zero, err
 	}
@@ -110,8 +121,8 @@ func (c *Cache[K, V]) computeDirect(ctx context.Context, key K, compute func(ctx
 }
 
 // convertMissToHit rebalances the counters when a compute double-check finds
-// that the key was populated concurrently: the public Get already recorded a
-// miss for this call, so credit a hit and cancel that miss.
+// that the key was populated concurrently: [Cache.GetOrCompute] already
+// recorded a miss for this call, so credit a hit and cancel that miss.
 func (c *Cache[K, V]) convertMissToHit() {
 	c.hits.Add(1)
 	c.misses.Add(^uint64(0))
@@ -120,8 +131,8 @@ func (c *Cache[K, V]) convertMissToHit() {
 // computeSingle deduplicates concurrent computes for key via singleflight.
 //
 // The leader performs a lock-free recheck via peekPromote (no statistics side
-// effects: the originating miss was already counted by the public GetOrCompute
-// call) and, on a confirmed miss, runs compute and stores the result.
+// effects) and, on a confirmed miss, records exactly one miss, runs compute,
+// and stores the result.
 func (c *Cache[K, V]) computeSingle(ctx context.Context, key K, compute func(ctx context.Context) (V, error), ttl time.Duration) (V, error) {
 	var zero V
 	c.sfOnce.Do(c.initSingleflight)
@@ -129,10 +140,12 @@ func (c *Cache[K, V]) computeSingle(ctx context.Context, key K, compute func(ctx
 	detached := context.WithoutCancel(ctx)
 	ch := c.sf.DoChan(keyString(key), func() (any, error) {
 		if v, ok := c.peekPromote(key); ok {
-			c.convertMissToHit()
 			return v, nil
 		}
-		v, err := safeComputeCtx(detached, compute)
+		c.misses.Add(1)
+		v, err := panix.Safe(opGetOrCompute, func() (V, error) {
+			return compute(detached)
+		})
 		if err != nil {
 			return zero, err
 		}
@@ -179,12 +192,5 @@ func (c *Cache[K, V]) insertLocked(key K, value V, ttl time.Duration, events *[]
 }
 
 func (c *Cache[K, V]) initSingleflight() {
-	c.sf = newSingleflightGroup()
-}
-
-// safeComputeCtx runs compute, recovering from panics and returning the zero
-// value with a nil error when one occurs.
-func safeComputeCtx[V any](ctx context.Context, compute func(context.Context) (V, error)) (val V, err error) {
-	defer func() { _ = recover() }()
-	return compute(ctx)
+	c.sf = &singleflight.Group{}
 }

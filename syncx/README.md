@@ -114,8 +114,9 @@ Every task runs under `panix.SafeVoid`, which converts a panic into a `*panix.Pa
 ### Map: typed sync.Map with a maintained length
 
 ```text
-Store/Delete/Swap/LoadOrStore/LoadAndDelete:
+Store/Delete/Swap/LoadOrStore/LoadAndDelete/CompareAndSwap/CompareAndDelete:
   lock mu → sync.Map op → adjust len when a new key appears or one is removed
+  (CompareAndSwap updates existing entries only — no len change)
 Clear:
   lock mu → sync.Map.Clear → len = 0
 Load / Range / Len:
@@ -136,8 +137,9 @@ Load / Range / Len:
 | `Group.Wait`             | Blocks until every launched task completes, then cancels the derived context                  |
 | `Group` first error      | Returns the **first** non-nil error or `*panix.PanicError`; siblings are cancelled            |
 | `Group` panic safety     | A panicking task never crashes the process; it becomes a `*panix.PanicError`                  |
-| `Group.TryGo`            | Starts a task only if a concurrency slot is free; returns whether it started                  |
-| `Map.Len`                | Equals the number of live entries; O(1); consistent with mutating ops and `Clear` under concurrency |
+| `Group.TryGo`            | Starts a task only if a concurrency slot is free; returns (started, err)                      |
+| `Group.Go` / `Group.TryGo` nil fn | Return [ErrNilFunc] synchronously; no goroutine is launched              |
+| `Map.Len`                | O(1) snapshot; matches live entries once each mutation completes; may briefly lag [Map.Load] during concurrent writes |
 | `Map` typing             | No runtime type assertions are exposed to the caller                                          |
 
 
@@ -169,9 +171,11 @@ func main() {
 	// Group: fan out work, bounded to 4 concurrent tasks.
 	g, ctx := syncx.NewGroup(context.Background(), syncx.WithLimit(4))
 	for i := range 10 {
-		g.Go(func(ctx context.Context) error {
+		if err := g.Go(func(ctx context.Context) error {
 			return process(ctx, i)
-		})
+		}); err != nil {
+			panic(err)
+		}
 	}
 	if err := g.Wait(); err != nil {
 		fmt.Println("work failed:", err)
@@ -209,9 +213,11 @@ func Client() (*Client, error) {
 ```go
 g, ctx := syncx.NewGroup(parentCtx, syncx.WithLimit(8))
 for _, url := range urls {
-	g.Go(func(ctx context.Context) error {
+	if err := g.Go(func(ctx context.Context) error {
 		return fetch(ctx, url) // a panic here becomes a *panix.PanicError
-	})
+	}); err != nil {
+		return err
+	}
 }
 if err := g.Wait(); err != nil {
 	var pe *panix.PanicError
@@ -227,7 +233,11 @@ log.Printf("stats: %+v", g.Stats())
 ```go
 g, _ := syncx.NewGroup(ctx, syncx.WithLimit(maxWorkers))
 for _, job := range jobs {
-	if !g.TryGo(func(ctx context.Context) error { return run(ctx, job) }) {
+	ok, err := g.TryGo(func(ctx context.Context) error { return run(ctx, job) })
+	if err != nil {
+		return err
+	}
+	if !ok {
 		overflow = append(overflow, job) // queue is full; handle elsewhere
 	}
 }
@@ -268,9 +278,9 @@ _ = evicted
 
 | Symbol        | Signature                                                                           | Description                                                       |
 | ------------- | ----------------------------------------------------------------------------------- | ----------------------------------------------------------------- |
-| `NewGroup`    | `func NewGroup(ctx context.Context, opts ...GroupOption) (*Group, context.Context)` | Create a group and its derived context                            |
-| `Group.Go`    | `func (g *Group) Go(fn func(ctx context.Context) error)`                            | Launch a panic-safe task; blocks for a slot when limited          |
-| `Group.TryGo` | `func (g *Group) TryGo(fn func(ctx context.Context) error) bool`                    | Launch a task only if a slot is free; reports whether it started  |
+| `NewGroup`    | `func NewGroup(ctx context.Context, opts ...GroupOption) (*Group, context.Context)` | Create a group and its derived context; nil parent → `Background` |
+| `Group.Go`    | `func (g *Group) Go(fn func(ctx context.Context) error) error`                      | Launch a panic-safe task; returns `ErrNilFunc` when fn is nil     |
+| `Group.TryGo` | `func (g *Group) TryGo(fn func(ctx context.Context) error) (bool, error)`             | Launch when a slot is free; `(false, ErrNilFunc)` when fn is nil  |
 | `Group.Wait`  | `func (g *Group) Wait() error`                                                      | Wait for all tasks; return the first error and cancel the context |
 | `Group.Stats` | `func (g *Group) Stats() GroupStats`                                                | Snapshot of started/succeeded/failed/panicked counters            |
 | `WithLimit`   | `func WithLimit(n int) GroupOption`                                                 | Bound concurrency to n (≤0 means unlimited)                       |
@@ -290,6 +300,8 @@ _ = evicted
 | `Map.Delete`        | `func (m *Map[K, V]) Delete(key K)`                         | Remove a key                         |
 | `Map.LoadAndDelete` | `func (m *Map[K, V]) LoadAndDelete(key K) (V, bool)`        | Remove and return a value            |
 | `Map.LoadOrStore`   | `func (m *Map[K, V]) LoadOrStore(key K, value V) (V, bool)` | Get-or-set atomically                |
+| `Map.CompareAndSwap` | `func (m *Map[K, V]) CompareAndSwap(key K, old, new V) bool` | Swap when old matches; no insert    |
+| `Map.CompareAndDelete` | `func (m *Map[K, V]) CompareAndDelete(key K, old V) bool` | Delete when old matches              |
 | `Map.Range`         | `func (m *Map[K, V]) Range(fn func(key K, value V) bool)`   | Iterate; stop when fn returns false  |
 | `Map.Len`           | `func (m *Map[K, V]) Len() int`                             | O(1) entry count                     |
 | `Map.Clear`         | `func (m *Map[K, V]) Clear()`                               | Remove all entries                   |
@@ -310,9 +322,8 @@ _ = evicted
 | --------------- | --------------------------------------------------------------------------- |
 | `ErrInitFailed` | Returned (joined with the cause) by `Lazy.Get` when the init function fails |
 | `ErrNilInit`    | Returned by `NewLazy` when the init function is nil                         |
+| `ErrNilFunc`    | Returned by `Group.Go` and `Group.TryGo` when the task function is nil      |
 
-
-A nil task function passed to `Group.Go` or `Group.TryGo` is ignored (no error, no goroutine).
 
 A panicking `Lazy` init or `Group` task returns a `*panix.PanicError` (use `errors.As`). Neither is cached; `Lazy.Get` retries on the next call.
 
@@ -328,6 +339,9 @@ A panicking `Lazy` init or `Group` task returns a `*panix.PanicError` (use `erro
 > **Map.Range** is not a snapshot.** Like `sync.Map.Range`, it may observe concurrent insertions or deletions mid-iteration. `Len` taken before `Range` may differ from the number of entries visited.
 
 > [!NOTE]
+> **`Map.Len` is an atomic snapshot.** It matches live entries once each mutating operation completes. A concurrent `Load` may observe an entry before `Len` increments because reads do not take the length mutex.
+
+> [!NOTE]
 > **Map** mutating operations take a short mutex for length accounting.** Reads stay on the `sync.Map` fast path; writes and `Clear` serialize only for `Len` consistency, not for the underlying map storage.
 
 > [!NOTE]
@@ -339,44 +353,48 @@ All three types are safe for concurrent use. `Lazy` serializes through a `sync.M
 
 ## Benchmarks
 
-> CPU: Intel i7-10510U · OS: Windows 10 · Go 1.26 · `-benchmem -count=1`
+> CPU: Intel i7-10510U · OS: Windows 10 · Go 1.24 · `-benchmem -count=1`
 
 
 | Benchmark              | ns/op | B/op | allocs/op |
 | ---------------------- | ----- | ---- | --------- |
-| Lazy_Get               | 40.1  | 0    | 0         |
-| Lazy_Get_Parallel      | 138.9 | 0    | 0         |
-| Map_Load_Hit           | 45.3  | 0    | 0         |
-| Map_Load_Miss          | 25.9  | 0    | 0         |
-| Map_Store              | 311.2 | 48   | 1         |
-| Map_Store_Parallel     | 1392  | 73   | 3         |
-| Map_LoadOrStore        | 102.1 | 0    | 0         |
-| Map_Load_Parallel      | 20.5  | 0    | 0         |
-| Group_Go               | 5790  | 240  | 5         |
-| Group_Go_Parallel      | 1443  | 240  | 5         |
-| Group_Go_Limited       | 15519 | 424  | 9         |
+| Lazy_Get               | 49.3  | 0    | 0         |
+| Lazy_Get_Parallel      | 154.5 | 0    | 0         |
+| Map_Load_Hit           | 206.8 | 0    | 0         |
+| Map_Load_Miss          | 91.5  | 0    | 0         |
+| Map_Store              | 1756  | 48   | 1         |
+| Map_Store_Parallel     | 2151  | 73   | 3         |
+| Map_LoadOrStore        | 153.9 | 0    | 0         |
+| Map_Load_Parallel      | 24.3  | 0    | 0         |
+| Map_Delete             | 688.1 | 48   | 1         |
+| Map_Clear              | 13782 | 1728 | 22        |
+| Group_Go               | 6381  | 240  | 5         |
+| Group_Go_Parallel      | 2454  | 240  | 5         |
+| Group_Go_Limited       | 17683 | 425  | 9         |
+| Group_TryGo            | 5500  | 240  | 5         |
 
 
 ### Analysis
 
-- **Lazy_Get**: 0 allocs — the hot path is a `sync.Mutex` lock plus a `done` check; the value is returned by copy from a struct field, with no heap escape. The parallel variant (139 ns) is dominated by mutex contention since every `Get` takes the same lock.
-- **Map_Load**: 0 allocs and 21 ns under parallelism — reads hit `sync.Map`'s read-only path with no mutex, which is why the parallel benchmark is *faster* than serial (per-CPU cache locality, no shared counter touched on reads).
-- **Map_Store**: 1 alloc / 48 B is the architectural floor from `sync.Map` interface boxing. The length mutex adds ~4× serial latency versus an uncounted `sync.Map` but keeps `Len` correct under concurrent `Clear`. **Map_Store_Parallel** (1.4 µs, 3 allocs) reflects mutex contention when every goroutine writes distinct keys.
-- **Group_Go**: 5 allocs covers `context.WithCancel`, the goroutine, and the `panix.SafeVoid` deferred-recover frame. This is per-*group*, not per-request. **Group_Go_Parallel** reuses the same cost per iteration across goroutines. The limited variant adds semaphore channel bookkeeping (9 allocs for 4 tasks).
+- **Lazy_Get**: 0 allocs — the hot path is a `sync.Mutex` lock plus a `done` check; the value is returned by copy from a struct field, with no heap escape. The parallel variant (155 ns) is dominated by mutex contention since every `Get` takes the same lock.
+- **Map_Load**: 0 allocs; parallel reads (24 ns) hit `sync.Map`'s read-only path with no mutex. Serial `Map_Load_Hit` (207 ns) reflects Windows scheduler noise on a cold benchmark run — the parallel variant is the reliable read baseline.
+- **Map_Store**: 1 alloc / 48 B is the architectural floor from `sync.Map` interface boxing. The length mutex adds latency versus an uncounted `sync.Map` but keeps `Len` correct under concurrent `Clear`. **Map_Store_Parallel** (2.2 µs, 3 allocs) reflects mutex contention when every goroutine writes distinct keys.
+- **Map_Delete** and **Map_Clear**: inherit `sync.Map` mutation cost plus the length mutex. **Map_Clear** allocates from rebuilding entries in the benchmark loop (16 stores per iteration).
+- **Group_Go**: 5 allocs covers `context.WithCancel`, the goroutine, and the `panix.SafeVoid` deferred-recover frame. This is per-*group*, not per-request. **Group_TryGo** shares the same floor. The limited variant adds semaphore channel bookkeeping (9 allocs for 4 tasks).
 - **Allocation floor**: `Lazy` and `Map` reads are genuinely 0-alloc. `Map.Store` and `Group` allocations are dictated by `sync.Map` interface boxing and `context` machinery respectively — neither is reducible without changing semantics.
 
 ## Quality
 
 
-| Metric         | Value                          |
-| -------------- | ------------------------------ |
-| Test functions | 40                             |
-| Benchmarks     | 11                             |
-| Fuzz targets   | 1 (`FuzzMap`, includes Clear)  |
-| Examples       | 5                              |
-| Coverage       | 100.0%                         |
-| Race detector  | All pass                       |
-| External deps  | 0 (panix; testify in dev only) |
+| Metric         | Value                                            |
+| -------------- | ------------------------------------------------ |
+| Test functions | 44                                               |
+| Benchmarks     | 14                                               |
+| Fuzz targets   | 3 (`FuzzMap`, `FuzzLazy`, `FuzzGroup`)           |
+| Examples       | 6                                                |
+| Coverage       | 100.0%                                           |
+| Race detector  | All pass (CI matrix)                             |
+| External deps  | 0 (panix; testify in dev only)                   |
 
 
 ## File Structure
@@ -389,11 +407,11 @@ syncx/
 ├── map.go              # Map[K,V] — typed concurrent map
 ├── options.go          # GroupOption, WithLimit, defaults
 ├── types.go            # GroupStats, isPanic helper
-├── errors.go           # ErrInitFailed, ErrNilInit
+├── errors.go           # ErrInitFailed, ErrNilInit, ErrNilFunc
 ├── errors_test.go      # sentinel and wrapper tests
 ├── syncx_test.go       # unit + table-driven tests
 ├── bench_test.go       # benchmarks
-├── fuzz_test.go        # FuzzMap — operation-sequence invariant
+├── fuzz_test.go        # FuzzMap, FuzzLazy, FuzzGroup
 ├── example_test.go     # runnable GoDoc examples
 ├── footprint_test.go   # struct size guards
 └── README.md           # this file

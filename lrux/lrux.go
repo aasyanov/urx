@@ -5,6 +5,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/aasyanov/urx/panix"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -19,6 +20,9 @@ import (
 // Create with [New] and configure via [Option] functions. Call [Cache.Close]
 // when the cache is no longer needed to stop the background cleanup goroutine
 // (if one was configured) and release entries. Close is idempotent and returns nil.
+//
+// Compute and eviction callbacks run under [github.com/aasyanov/urx/panix]; a
+// panicking callback cannot corrupt cache state.
 //
 // For high concurrency across many keys, prefer [ShardedCache] via
 // [NewSharded] to reduce lock contention.
@@ -144,15 +148,24 @@ func (c *Cache[K, V]) Get(key K) (V, bool) {
 }
 
 // peekPromote returns the live value under key and promotes it to most
-// recently used, without updating hit/miss statistics. It is used by the
-// singleflight compute paths whose originating miss was already counted by the
-// public GetOrCompute call, avoiding double-counting under deduplication.
+// recently used, without updating hit/miss statistics. Expired entries are
+// removed eagerly, matching [Cache.Get] semantics. It is used by the compute
+// paths to avoid double-counting statistics under singleflight deduplication.
 func (c *Cache[K, V]) peekPromote(key K) (V, bool) {
 	var zero V
+	var evict *evictEvent[K, V]
+
 	c.mu.Lock()
 	n, ok := c.items[key]
-	if !ok || c.isExpired(n) {
+	if !ok {
 		c.mu.Unlock()
+		return zero, false
+	}
+	if c.isExpired(n) {
+		evict = c.removeNodeLocked(n, EvictionExpired)
+		c.evictions.Add(1)
+		c.mu.Unlock()
+		c.fireCallback(evict)
 		return zero, false
 	}
 	n.accessedAt = time.Now()
@@ -801,11 +814,13 @@ func (c *Cache[K, V]) fireCallbacks(events []evictEvent[K, V]) {
 	}
 }
 
-// safeOnEvict invokes the eviction callback, recovering from panics so user
-// code cannot corrupt the cache or crash the sweeper goroutine.
+// safeOnEvict invokes the eviction callback under [github.com/aasyanov/urx/panix]
+// so user panics cannot corrupt the cache or crash the sweeper goroutine.
 func (c *Cache[K, V]) safeOnEvict(key K, value V, reason EvictionReason) {
-	defer func() { _ = recover() }()
-	c.onEvict(key, value, reason)
+	_ = panix.SafeVoid(opOnEvict, func() error {
+		c.onEvict(key, value, reason)
+		return nil
+	})
 }
 
 // --- Background cleanup ---

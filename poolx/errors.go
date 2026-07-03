@@ -7,7 +7,8 @@ import (
 
 var (
 	// ErrClosed is returned when an operation is attempted on a closed
-	// [WorkerPool] or [Batch]. It is safe to compare with == or [errors.Is].
+	// [WorkerPool], [Batch], or when [Batch.Flush] is called after [Batch.Close].
+	// It is safe to compare with == or [errors.Is].
 	ErrClosed = errors.New("poolx: closed")
 
 	// ErrQueueFull is returned by [WorkerPool.TrySubmit] when the task queue

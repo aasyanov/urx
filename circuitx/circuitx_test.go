@@ -914,8 +914,9 @@ func TestExecute_SuccessNeverUnTripsUnderRace(t *testing.T) {
 	ctx := context.Background()
 
 	var sawOpen atomic.Bool
-	// 1 failure for every success keeps tripping likely while successes race.
-	sim := testx.Pattern("FS")
+	// Bursts of three failures trip the breaker; trailing successes race
+	// settlement while Closed to exercise the success-clobber guard.
+	sim := testx.Pattern("FFFSSS")
 
 	testx.HammerVoid(40, 500, func() {
 		_, _ = Execute(b, ctx, func(context.Context, CircuitController) (int, error) {

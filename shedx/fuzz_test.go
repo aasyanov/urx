@@ -2,22 +2,30 @@ package shedx
 
 import (
 	"context"
+	"errors"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 // FuzzExecute drives the shedder with arbitrary capacity, threshold, and
 // priority values. The invariants are: it never panics, in-flight returns to
-// zero after every call completes, and a critical request is always admitted.
+// zero after every call completes, and a critical request is always admitted
+// while the shedder is open.
 func FuzzExecute(f *testing.F) {
-	f.Add(1000, 0.8, uint8(1))
-	f.Add(0, 0.0, uint8(3))
-	f.Add(-5, 2.0, uint8(99))
-	f.Add(1, 0.01, uint8(0))
+	f.Add(1000, 0.8, uint8(1), false)
+	f.Add(0, 0.0, uint8(3), false)
+	f.Add(-5, 2.0, uint8(99), false)
+	f.Add(1, 0.01, uint8(0), true)
 
 	ctx := context.Background()
-	f.Fuzz(func(t *testing.T, capacity int, threshold float64, prio uint8) {
+	f.Fuzz(func(t *testing.T, capacity int, threshold float64, prio uint8, closeFirst bool) {
 		s := New(WithCapacity(capacity), WithThreshold(threshold))
 		defer func() { _ = s.Close() }()
+
+		if closeFirst {
+			require.NoError(t, s.Close())
+		}
 
 		priority := Priority(prio)
 		_, err := Execute(s, ctx, priority,
@@ -25,9 +33,15 @@ func FuzzExecute(f *testing.F) {
 				_ = sc.Load()
 				_ = sc.Priority()
 				_ = sc.Capacity()
+				_ = sc.InFlight()
+				sc.Shed()
 				return 1, nil
 			})
 
+		if closeFirst {
+			require.ErrorIs(t, err, ErrClosed)
+			return
+		}
 		if priority == PriorityCritical && err != nil {
 			t.Fatalf("critical request rejected: %v", err)
 		}
@@ -39,17 +53,21 @@ func FuzzExecute(f *testing.F) {
 
 // FuzzTryExecute drives the non-blocking admission path. The invariants match
 // [FuzzExecute]: no panic, in-flight returns to zero, and critical requests
-// always run.
+// always run while the shedder is open.
 func FuzzTryExecute(f *testing.F) {
-	f.Add(1000, 0.8, uint8(1))
-	f.Add(0, 0.0, uint8(3))
-	f.Add(-5, 2.0, uint8(99))
-	f.Add(1, 0.01, uint8(0))
+	f.Add(1000, 0.8, uint8(1), false)
+	f.Add(0, 0.0, uint8(3), false)
+	f.Add(-5, 2.0, uint8(99), false)
+	f.Add(1, 0.01, uint8(0), true)
 
 	ctx := context.Background()
-	f.Fuzz(func(t *testing.T, capacity int, threshold float64, prio uint8) {
+	f.Fuzz(func(t *testing.T, capacity int, threshold float64, prio uint8, closeFirst bool) {
 		s := New(WithCapacity(capacity), WithThreshold(threshold))
 		defer func() { _ = s.Close() }()
+
+		if closeFirst {
+			require.NoError(t, s.Close())
+		}
 
 		priority := Priority(prio)
 		ok, _, err := TryExecute(s, ctx, priority,
@@ -57,9 +75,15 @@ func FuzzTryExecute(f *testing.F) {
 				_ = sc.Load()
 				_ = sc.Priority()
 				_ = sc.Capacity()
+				sc.Shed()
 				return 1, nil
 			})
 
+		if closeFirst {
+			require.False(t, ok)
+			require.ErrorIs(t, err, ErrClosed)
+			return
+		}
 		if priority == PriorityCritical {
 			if !ok || err != nil {
 				t.Fatalf("critical request rejected: ok=%v err=%v", ok, err)
@@ -87,6 +111,8 @@ func FuzzAcquireRelease(f *testing.F) {
 			if op%2 == 0 {
 				if tok, err := s.Acquire(Priority(op % 4)); err == nil {
 					tokens = append(tokens, tok)
+				} else if !errors.Is(err, ErrRejected) && !errors.Is(err, ErrClosed) {
+					t.Fatalf("unexpected acquire error: %v", err)
 				}
 			} else if len(tokens) > 0 {
 				tokens[len(tokens)-1].Release()

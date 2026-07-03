@@ -16,6 +16,10 @@ var (
 	// ErrNilInit is returned by [NewLazy] when the init function is nil.
 	// It is safe to compare with == or [errors.Is].
 	ErrNilInit = errors.New("syncx: nil init function")
+
+	// ErrNilFunc is returned by [Group.Go] and [Group.TryGo] when the task
+	// function is nil. It is safe to compare with == or [errors.Is].
+	ErrNilFunc = errors.New("syncx: nil function")
 )
 
 // errInitFailed wraps [ErrInitFailed] with the underlying init cause.

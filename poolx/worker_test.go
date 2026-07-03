@@ -14,11 +14,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func closePool(t *testing.T, wp *WorkerPool) {
-	t.Helper()
-	require.NoError(t, wp.Close())
-}
-
 func TestNewWorkerPool_Defaults(t *testing.T) {
 	wp := NewWorkerPool()
 	defer closePool(t, wp)
@@ -152,6 +147,29 @@ func TestWorkerPool_SubmitCancelledContextWhenQueueHasSpace(t *testing.T) {
 	err := wp.Submit(testx.CancelledCtx(), func(context.Context) error { return nil })
 	require.ErrorIs(t, err, ErrCancelled)
 	require.ErrorIs(t, err, context.Canceled)
+}
+
+func TestWorkerPool_SubmitExpiredContext(t *testing.T) {
+	wp := NewWorkerPool(WithWorkers(2), WithQueueSize(8))
+	defer closePool(t, wp)
+
+	err := wp.Submit(testx.ExpiredCtx(), func(context.Context) error { return nil })
+	require.ErrorIs(t, err, ErrCancelled)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+}
+
+func TestWorkerPool_TrySubmitExpiredContext(t *testing.T) {
+	wp := NewWorkerPool(WithWorkers(2), WithQueueSize(8))
+	defer closePool(t, wp)
+
+	called := false
+	err := wp.TrySubmit(testx.ExpiredCtx(), func(context.Context) error {
+		called = true
+		return nil
+	})
+	require.ErrorIs(t, err, ErrCancelled)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	assert.False(t, called)
 }
 
 func TestWorkerPool_TrySubmitQueueFull(t *testing.T) {
@@ -460,6 +478,12 @@ func TestWorkerPool_drainOrphanedTasksRunsQueuedWork(t *testing.T) {
 	wp.tasks <- func() { ran.Store(true) }
 	wp.drainOrphanedTasks()
 	assert.True(t, ran.Load())
+}
+
+func TestWorkerPool_rejectIfClosedReturnsErrClosed(t *testing.T) {
+	wp := NewWorkerPool()
+	require.NoError(t, wp.Close())
+	require.ErrorIs(t, wp.rejectIfClosed(), ErrClosed)
 }
 
 func TestIsPanic(t *testing.T) {

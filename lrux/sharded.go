@@ -3,6 +3,7 @@ package lrux
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -23,6 +24,7 @@ type ShardedCache[K comparable, V any] struct {
 	shards    []*Cache[K, V]
 	shardMask uint64
 	hasher    func(K) uint64
+	closed    atomic.Bool
 }
 
 // NewSharded creates a [ShardedCache] with the given options applied over the
@@ -72,7 +74,8 @@ func (c *ShardedCache[K, V]) Peek(key K) (V, bool) { return c.shard(key).Peek(ke
 // Has reports whether key exists and has not expired.
 func (c *ShardedCache[K, V]) Has(key K) bool { return c.shard(key).Has(key) }
 
-// Touch refreshes key, resetting its TTL and promoting it to most recently used.
+// Touch refreshes key, sliding its expiration forward and promoting it to most
+// recently used.
 func (c *ShardedCache[K, V]) Touch(key K) bool { return c.shard(key).Touch(key) }
 
 // Delete removes key. It returns true if the key existed.
@@ -135,20 +138,18 @@ func (c *ShardedCache[K, V]) ExpireOld() int {
 
 // Close closes every shard. It is idempotent and always returns nil.
 func (c *ShardedCache[K, V]) Close() error {
+	if c.closed.Swap(true) {
+		return nil
+	}
 	for _, s := range c.shards {
-		if err := s.Close(); err != nil {
-			return err
-		}
+		_ = s.Close()
 	}
 	return nil
 }
 
-// IsClosed reports whether the shards have been closed.
+// IsClosed reports whether [ShardedCache.Close] has been called.
 func (c *ShardedCache[K, V]) IsClosed() bool {
-	if len(c.shards) == 0 {
-		return true
-	}
-	return c.shards[0].IsClosed()
+	return c.closed.Load()
 }
 
 // Stats returns aggregated counters across all shards.

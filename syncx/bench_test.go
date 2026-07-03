@@ -87,7 +87,7 @@ func BenchmarkGroup_Go(b *testing.B) {
 	b.ResetTimer()
 	for b.Loop() {
 		g, _ := NewGroup(ctx)
-		g.Go(func(context.Context) error { return nil })
+		_ = g.Go(func(context.Context) error { return nil })
 		_ = g.Wait()
 	}
 }
@@ -98,7 +98,7 @@ func BenchmarkGroup_Go_Parallel(b *testing.B) {
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
 			g, _ := NewGroup(ctx)
-			g.Go(func(context.Context) error { return nil })
+			_ = g.Go(func(context.Context) error { return nil })
 			_ = g.Wait()
 		}
 	})
@@ -110,8 +110,42 @@ func BenchmarkGroup_Go_Limited(b *testing.B) {
 	for b.Loop() {
 		g, _ := NewGroup(ctx, WithLimit(4))
 		for range 4 {
-			g.Go(func(context.Context) error { return nil })
+			_ = g.Go(func(context.Context) error { return nil })
 		}
 		_ = g.Wait()
+	}
+}
+
+func BenchmarkGroup_TryGo(b *testing.B) {
+	ctx := context.Background()
+	b.ResetTimer()
+	for b.Loop() {
+		g, _ := NewGroup(ctx)
+		_, _ = g.TryGo(func(context.Context) error { return nil })
+		_ = g.Wait()
+	}
+}
+
+func BenchmarkMap_Delete(b *testing.B) {
+	m := NewMap[int, int]()
+	m.Store(1, 1)
+	b.ResetTimer()
+	for b.Loop() {
+		m.Delete(1)
+		m.Store(1, 1)
+	}
+}
+
+func BenchmarkMap_Clear(b *testing.B) {
+	m := NewMap[int, int]()
+	for i := range 16 {
+		m.Store(i, i)
+	}
+	b.ResetTimer()
+	for b.Loop() {
+		m.Clear()
+		for i := range 16 {
+			m.Store(i, i)
+		}
 	}
 }

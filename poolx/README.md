@@ -101,7 +101,7 @@ A thin, type-safe generic wrapper over `sync.Pool`. `Get` returns a pooled `T` (
 
 ### Batch
 
-`Add` appends under a mutex and triggers a `Flush` when the buffer reaches `WithBatchSize`. A background ticker flushes every `WithFlushInterval` regardless of fill level. `Flush(ctx)` swaps out the buffer under the lock (so the user flush runs lock-free), then calls the user function through `panix.SafeVoid`. The flush function is **context-aware** — `func(ctx context.Context, items []T) error` — so a slow database write observes shutdown. Errors from the timer-driven flush, otherwise invisible, are delivered to an optional `WithErrorHandler`. `Close` stops the ticker, performs a final flush with a background context (so shutdown is not aborted by the cancelled lifecycle context), and cancels the lifecycle context.
+`Add` appends under a mutex (checking `closed` under the same lock) and triggers a `Flush` when the buffer reaches `WithBatchSize`. A background ticker flushes every `WithFlushInterval` regardless of fill level. `Flush(ctx)` swaps out the buffer under the lock (so the user flush runs lock-free), then calls the user function through `panix.SafeVoid`. The flush function is **context-aware** — `func(ctx context.Context, items []T) error` — so a slow database write observes shutdown. Errors from the timer-driven flush, otherwise invisible, are delivered to an optional `WithErrorHandler`. `Close` sets `closed` under the buffer mutex, drains the remaining slice, stops the ticker, and performs a final flush with a background context (so shutdown is not aborted by the cancelled lifecycle context).
 
 ## Normative Contracts
 
@@ -119,6 +119,8 @@ A thin, type-safe generic wrapper over `sync.Pool`. `Get` returns a pooled `T` (
 | `Put` reset runs before pooling   | With `WithReset`, the object is cleaned before reuse                                         |
 | Batch flush is context-aware      | The flush function receives a context cancelled on `Close`                                   |
 | Batch final flush always runs     | `Close` flushes remaining items with a background context                                    |
+| Batch shutdown is lossless        | `Add` checks `closed` under the buffer mutex; `Close` sets `closed` under the same lock before the final drain |
+| `Batch.Flush` rejected after close | Manual `Flush` after `Close` returns [ErrClosed]; only the internal final flush runs during shutdown |
 
 
 ## Quick Start
@@ -261,7 +263,7 @@ for row := range stream {
 | **Batch**               |                                                                                         |                                                          |
 | `NewBatch[T]`           | `func NewBatch[T any](flush func(ctx, items []T) error, opts ...BatchOption) (*Batch[T], error)` | Create and start a batch; [ErrNilFlush] when flush is nil |
 | `Batch.Add`             | `func (b *Batch[T]) Add(item T) error`                                                  | Buffer an item; size-flush when full                     |
-| `Batch.Flush`           | `func (b *Batch[T]) Flush(ctx context.Context) error`                                   | Flush the current buffer now                             |
+| `Batch.Flush`           | `func (b *Batch[T]) Flush(ctx context.Context) error`                                   | Flush the current buffer now; [ErrClosed] after [Batch.Close] |
 | `Batch.Stats`           | `func (b *Batch[T]) Stats() BatchStats`                                                 | Snapshot counters                                        |
 | `Batch.ResetStats`      | `func (b *Batch[T]) ResetStats()`                                                       | Zero the counters                                        |
 | `Batch.Close`           | `func (b *Batch[T]) Close() error`                                                      | Stop ticker, final flush (idempotent)                    |
@@ -292,7 +294,7 @@ for row := range stream {
 
 | Error            | Condition                                                                                  |
 | ---------------- | ------------------------------------------------------------------------------------------ |
-| `ErrClosed`      | Submit/Add on a closed pool or batch                                                       |
+| `ErrClosed`      | Submit/Add/Flush on a closed pool or batch                                                 |
 | `ErrQueueFull`   | `TrySubmit` when the queue is at capacity                                                  |
 | `ErrCancelled`   | `Submit`/`TrySubmit`/`SubmitWait` when ctx is cancelled or times out during wait           |
 | `ErrNilFunc`     | `Submit`/`TrySubmit`/`SubmitWait` when the task function is nil                          |
@@ -315,7 +317,10 @@ All are sentinel errors created with `errors.New`; compare with `errors.Is`. A p
 > **Failed batch flushes restore buffered items.** `ErrFlushFailed` means the flush callback failed but items remain in the buffer for a later retry. Only successful flushes increment `Items`/`Flushed`.
 
 > [!WARNING]
-> **Sequence shutdown after you stop submitting.** Call `Close` only after producers stop. `Close` drains every queued task before returning.
+> **Sequence shutdown after you stop submitting.** Call `Close` only after producers stop. `WorkerPool.Close` drains every queued task before returning. `Batch.Close` rejects further `Add` calls and performs one final flush.
+
+> [!WARNING]
+> **`Batch.Flush` after `Close` returns [ErrClosed].** The final flush runs only inside `Close`. If the final flush fails, items remain in the buffer for a manual retry only before you discard the instance — do not call `Flush` after `Close`.
 
 > [!WARNING]
 > **ObjectPool** makes no retention guarantee.** `sync.Pool` may evict pooled objects on any GC cycle. Never store state in the pool that must survive; it is a reuse cache, not a registry.
@@ -328,7 +333,7 @@ All are sentinel errors created with `errors.New`; compare with `errors.Is`. A p
 
 ## Safety and Concurrency
 
-**Thread safety.** All three types are safe for concurrent use. `WorkerPool` uses an atomic `closed` flag, a `sync.Once`-guarded `Close`, and atomic counters; the task channel is never closed, so concurrent submit/close is panic-free. `ObjectPool` delegates synchronization to `sync.Pool` and uses atomic counters. `Batch` guards its buffer with a `sync.Mutex` and runs the user flush outside the lock.
+**Thread safety.** All three types are safe for concurrent use. `WorkerPool` uses an atomic `closed` flag, a `sync.Once`-guarded `Close`, and atomic counters; the task channel is never closed, so concurrent submit/close is panic-free. `ObjectPool` delegates synchronization to `sync.Pool` and uses atomic counters. `Batch` guards its buffer with a `sync.Mutex` — including the `closed` check in `Add` and the final drain in `Close` — and runs the user flush outside the lock.
 
 **Goroutine model.** `WorkerPool` runs exactly `workers` goroutines for its lifetime; `Close` joins them via a `WaitGroup`. `Batch` runs one background ticker goroutine, stopped on `Close`. `ObjectPool` spawns no goroutines.
 
@@ -339,37 +344,41 @@ All are sentinel errors created with `errors.New`; compare with `errors.Is`. A p
 > CPU: Intel i7-10510U · OS: Windows 10 · Go 1.24 · `-benchmem -count=3`
 
 
-| Benchmark                     | ns/op | B/op | allocs/op |
-| ----------------------------- | ----- | ---- | --------- |
-| `ObjectPool_GetPut`           | 38    | 0    | 0         |
-| `ObjectPool_GetPut_WithReset` | 36    | 0    | 0         |
-| `ObjectPool_GetPut_Parallel`  | 93    | 0    | 0         |
-| `Batch_Add`                   | 27    | 0    | 0         |
-| `Batch_Add_Parallel`          | 80    | 0    | 0         |
-| `WorkerPool_SubmitWait`       | 2,600 | 176  | 3         |
-| `WorkerPool_Submit_Parallel`  | 2,800 | 176  | 3         |
+| Benchmark                              | ns/op | B/op | allocs/op |
+| -------------------------------------- | ----- | ---- | --------- |
+| `ObjectPool_GetPut`                    | 55    | 0    | 0         |
+| `ObjectPool_GetPut_WithReset`          | 67    | 0    | 0         |
+| `ObjectPool_GetPut_Parallel`           | 88    | 0    | 0         |
+| `ObjectPool_GetPut_WithReset_Parallel` | 89    | 0    | 0         |
+| `Batch_Add`                            | 45    | 7    | 0         |
+| `Batch_Add_Parallel`                   | 93    | 9    | 0         |
+| `WorkerPool_Submit`                    | 1,500 | 48   | 1         |
+| `WorkerPool_SubmitWait`                | 3,600 | 176  | 3         |
+| `WorkerPool_Submit_Parallel`           | 3,300 | 176  | 3         |
 
 
 ### Analysis
 
-- **ObjectPool_GetPut**: 38 ns, 0 allocs.** The happy path is a `sync.Pool.Get`/`Put` round trip plus two atomic increments. Zero allocations because the buffer is reused; the reset hook (`WithReset`) costs nothing measurable (`bytes.Buffer.Reset` is a length zeroing). This is the entire point of the type — turning per-call allocations into amortized reuse.
-- **ObjectPool_GetPut_Parallel**: 93 ns, 0 allocs.** ~2.4× the sequential cost under 8-way parallelism. `sync.Pool` shards per-P, so contention is on the atomic counters, not the pool itself. Still allocation-free.
-- **Batch_Add**: 27 ns, 0 allocs.** A mutex lock, a slice append, and a length check. The reported ~7 B/op is amortized backing-array growth during the benchmark's append sequence; in steady state with a pre-sized buffer there are no allocations. This is the hottest operation and it stays allocation-free per call.
-- **WorkerPool_SubmitWait**: 2,600 ns, 3 allocs (176 B).** Dominated by cross-goroutine handoff: enqueue, worker wakeup, and the result channel round trip. The 3 allocations are the task closure, the result channel, and the `panix.SafeVoid` deferred frame. This is the cost of *bounded concurrency with a result* — appropriate for I/O-bound work (network, disk) where a few microseconds of coordination is dwarfed by the task itself, but not for nanosecond-scale CPU work that should run inline.
-- **Parallel worker scaling: 2,800 ns.** Nearly flat versus sequential — the single shared queue channel is the coordination point, and 8 workers keep it saturated without the per-submit cost degrading. Throughput scales with worker count until the queue channel's mutex becomes the bottleneck.
-- **Allocation floor.** `ObjectPool` and `Batch` hot paths are 0 allocs by design. `WorkerPool`'s 3 allocs/op is the architectural minimum for a per-task closure + result channel + recovery frame; eliminating them would require giving up either the result (`SubmitWait`) or the panic safety net.
+- **ObjectPool_GetPut**: ~55 ns, 0 allocs.** The happy path is a `sync.Pool.Get`/`Put` round trip plus two atomic increments. Zero allocations because the buffer is reused.
+- **ObjectPool_GetPut_WithReset**: ~67 ns, 0 allocs.** `bytes.Buffer.Reset` adds negligible cost versus the plain round trip.
+- **ObjectPool_GetPut_Parallel / WithReset_Parallel**: ~88–89 ns, 0 allocs.** ~1.6× sequential cost under 8-way parallelism. `sync.Pool` shards per-P; contention is on the atomic counters, not the pool itself.
+- **Batch_Add**: ~45 ns, 0 allocs/op (7 B/op amortized).** A mutex lock, a slice append, and a length check. The 7 B/op is backing-array growth during the benchmark's append sequence; in steady state with a pre-sized buffer there are no heap allocations per call.
+- **WorkerPool_Submit**: ~1,500 ns, 1 alloc (48 B).** Fire-and-forget enqueue: one closure allocation, no result channel. Appropriate for I/O-bound fan-out where the caller does not need the task result.
+- **WorkerPool_SubmitWait**: ~3,600 ns, 3 allocs (176 B).** Dominated by cross-goroutine handoff: enqueue, worker wakeup, and the result channel round trip. The 3 allocations are the task closure, the result channel, and the `panix.SafeVoid` deferred frame.
+- **Parallel worker scaling: ~3,300 ns.** Nearly flat versus sequential `SubmitWait` — the shared queue channel is the coordination point; 8 workers keep it saturated without per-submit cost degrading.
+- **Allocation floor.** `ObjectPool` and `Batch` hot paths are 0 allocs/op by design. `WorkerPool.Submit` costs 1 alloc/op (closure only); `SubmitWait` costs 3 (closure + result channel + recovery frame).
 
 ## Quality
 
 
 | Metric                | Value                                           |
 | --------------------- | ----------------------------------------------- |
-| Test functions        | 59                                              |
-| Table-driven subtests | 2                                               |
-| Benchmarks            | 7                                               |
-| Fuzz targets          | 4                                               |
+| Test functions        | 70                                              |
+| Table-driven subtests | 3                                               |
+| Benchmarks            | 9                                               |
+| Fuzz targets          | 5                                               |
 | Examples              | 4                                               |
-| Coverage              | 95.6%                                           |
+| Coverage              | 97.7%                                           |
 | Race detector         | All pass                                        |
 | External deps         | 0 (urx/panix internally; testify in tests only) |
 
@@ -380,17 +389,19 @@ All are sentinel errors created with `errors.New`; compare with `errors.Is`. A p
 poolx/
 ├── poolx.go            # Package doc
 ├── options.go          # WorkerOption, BatchOption, ObjectOption, defaults, WithXxx
-├── worker.go           # WorkerPool, Submit/TrySubmit/SubmitWait, isPanic
+├── worker.go           # WorkerPool, Submit/TrySubmit/SubmitWait
 ├── object.go           # ObjectPool[T]
 ├── batch.go            # Batch[T], context-aware flush, ticker
 ├── lifecycle.go        # closeSignal context for batch shutdown (no stored ctx)
-├── types.go            # WorkerStats, ObjectStats, BatchStats
+├── types.go            # WorkerStats, ObjectStats, BatchStats, isPanic
 ├── errors.go           # Sentinel errors + internal wrappers
+├── helpers_test.go     # Shared test fixtures (closePool, newTestBatch, collectingFlush)
 ├── worker_test.go      # WorkerPool tests — submit, panic, close-race, concurrency
-├── object_test.go      # ObjectPool tests — reuse, reset, concurrency
-├── batch_test.go       # Batch tests — size/interval flush, requeue, ctx, error handler
-├── bench_test.go       # 7 benchmarks: sequential + parallel
-├── fuzz_test.go        # FuzzWorkerPool*, FuzzBatchAdd, FuzzObjectPoolGetPut
+├── object_test.go      # ObjectPool tests — reuse, reset, options, concurrency
+├── batch_test.go       # Batch tests — size/interval flush, requeue, ctx, shutdown race
+├── lifecycle_test.go   # closeSignal context interface compliance
+├── bench_test.go       # 9 benchmarks: sequential + parallel
+├── fuzz_test.go        # FuzzWorkerPool*, FuzzBatchAdd*, FuzzObjectPoolGetPut
 ├── example_test.go     # 4 runnable GoDoc examples
 ├── footprint_test.go   # Primary type + stats/config struct size guards
 └── README.md           # This file

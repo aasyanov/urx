@@ -16,6 +16,7 @@ func TestFootprint(t *testing.T) {
 		{Name: "BatchStats", Size: testx.Sizeof[BatchStats](), Max: 64},
 		{Name: "workerConfig", Size: testx.Sizeof[workerConfig](), Max: 32},
 		{Name: "batchConfig", Size: testx.Sizeof[batchConfig](), Max: 48},
+		{Name: "objectConfig[int]", Size: testx.Sizeof[objectConfig[int]](), Max: 16},
 		{Name: "closeSignal", Size: testx.Sizeof[closeSignal](), Max: 16},
 	})
 }

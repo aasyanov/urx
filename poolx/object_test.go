@@ -79,6 +79,34 @@ func TestObjectPool_ResetStats(t *testing.T) {
 	assert.Equal(t, uint64(0), st.Creates)
 }
 
+func TestObjectPool_Options(t *testing.T) {
+	tests := []struct {
+		name      string
+		opts      []ObjectOption[*bytes.Buffer]
+		wantReset bool
+	}{
+		{name: "defaults", opts: nil, wantReset: false},
+		{name: "with reset", opts: []ObjectOption[*bytes.Buffer]{
+			WithReset(func(b *bytes.Buffer) { b.Reset() }),
+		}, wantReset: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			op, err := NewObjectPool(func() *bytes.Buffer { return new(bytes.Buffer) }, tt.opts...)
+			require.NoError(t, err)
+
+			buf := op.Get()
+			buf.WriteString("x")
+			op.Put(buf)
+			if tt.wantReset {
+				assert.Equal(t, 0, buf.Len())
+			} else {
+				assert.Positive(t, buf.Len())
+			}
+		})
+	}
+}
+
 func TestObjectPool_ConcurrentGetPut(t *testing.T) {
 	op, err := NewObjectPool(
 		func() *bytes.Buffer { return new(bytes.Buffer) },

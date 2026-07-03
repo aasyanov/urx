@@ -7,13 +7,18 @@
 
 # Test artifacts
 *.test
+*.out
+*.prof
 cover.out
 coverage.txt
 coverprofile
 cover
 coverage
-benchmark.txt
-results.txt
+coverage_*
+*cover
+*.cover
+profile
+quality.res
 
 # Cursor
 .cursor/

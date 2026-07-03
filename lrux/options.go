@@ -19,6 +19,10 @@ const (
 	// defaultShardCount is the shard count used by [NewSharded] when none is
 	// configured. It is rounded up to the nearest power of two.
 	defaultShardCount = 16
+
+	// maxShardCount caps [WithShardCount] to prevent accidental OOM from
+	// constructing billions of empty shard caches.
+	maxShardCount = 4096
 )
 
 // Option configures a [Cache] created with [New].
@@ -112,10 +116,13 @@ func newShardedConfig[K comparable, V any](opts []ShardedOption[K, V]) shardedCo
 
 // WithShardCount sets the number of independent shards. The value is rounded
 // up to the nearest power of two for fast shard selection.
-// Default: 16. Non-positive values are ignored.
+// Default: 16. Non-positive values are ignored. Values above 4096 are clamped.
 func WithShardCount[K comparable, V any](n int) ShardedOption[K, V] {
 	return func(c *shardedConfig[K, V]) {
 		if n > 0 {
+			if n > maxShardCount {
+				n = maxShardCount
+			}
 			c.shardCount = n
 		}
 	}

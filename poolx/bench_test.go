@@ -51,6 +51,36 @@ func BenchmarkObjectPool_GetPut_Parallel(b *testing.B) {
 	})
 }
 
+func BenchmarkWorkerPool_Submit(b *testing.B) {
+	wp := NewWorkerPool(WithWorkers(8), WithQueueSize(4096))
+	defer func() { _ = wp.Close() }()
+	ctx := context.Background()
+	noop := func(context.Context) error { return nil }
+
+	b.ResetTimer()
+	for b.Loop() {
+		_ = wp.Submit(ctx, noop)
+	}
+}
+
+func BenchmarkObjectPool_GetPut_WithReset_Parallel(b *testing.B) {
+	op, err := NewObjectPool(
+		func() *bytes.Buffer { return new(bytes.Buffer) },
+		WithReset(func(buf *bytes.Buffer) { buf.Reset() }),
+	)
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			buf := op.Get()
+			op.Put(buf)
+		}
+	})
+}
+
 func BenchmarkWorkerPool_SubmitWait(b *testing.B) {
 	wp := NewWorkerPool(WithWorkers(4), WithQueueSize(1024))
 	defer func() { _ = wp.Close() }()

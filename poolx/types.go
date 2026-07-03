@@ -1,5 +1,17 @@
 package poolx
 
+import (
+	"errors"
+
+	"github.com/aasyanov/urx/panix"
+)
+
+// isPanic reports whether err originates from a recovered panic.
+func isPanic(err error) bool {
+	var pe *panix.PanicError
+	return errors.As(err, &pe)
+}
+
 // WorkerStats is a point-in-time snapshot of [WorkerPool] counters returned
 // by [WorkerPool.Stats].
 type WorkerStats struct {

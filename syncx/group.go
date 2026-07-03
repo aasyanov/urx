@@ -43,11 +43,15 @@ type Group struct {
 // NewGroup creates a [Group] and a derived context. When any task launched
 // via [Group.Go] returns a non-nil error or panics, the derived context is
 // cancelled. The context is also cancelled once [Group.Wait] returns.
+// A nil parent is treated as [context.Background].
 //
 // Default configuration: unlimited concurrency. Use [WithLimit] to bound it.
 func NewGroup(ctx context.Context, opts ...GroupOption) (*Group, context.Context) {
 	cfg := newGroupConfig(opts)
 
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	ctx, cancel := context.WithCancel(ctx)
 	g := &Group{ctx: ctx, cancel: cancel}
 	if cfg.limit > 0 {
@@ -57,7 +61,9 @@ func NewGroup(ctx context.Context, opts ...GroupOption) (*Group, context.Context
 }
 
 // Go runs fn in a new goroutine under panic recovery. If a concurrency limit
-// is configured, Go blocks until a slot is available. A nil fn is ignored.
+// is configured, Go blocks until a slot is available.
+//
+// Returns [ErrNilFunc] when fn is nil.
 //
 // The ctx passed to fn is the group's derived context: it is cancelled as
 // soon as any sibling task fails, allowing well-behaved tasks to abort early.
@@ -65,33 +71,34 @@ func NewGroup(ctx context.Context, opts ...GroupOption) (*Group, context.Context
 // Do not call Go from within a task when the group is at its concurrency
 // limit: the call blocks waiting for a free slot that only the running task
 // can release, causing a deadlock.
-func (g *Group) Go(fn func(ctx context.Context) error) {
+func (g *Group) Go(fn func(ctx context.Context) error) error {
 	if fn == nil {
-		return
+		return ErrNilFunc
 	}
 	if g.sem != nil {
 		g.sem <- struct{}{}
 	}
 	g.launch(fn)
+	return nil
 }
 
 // TryGo runs fn in a new goroutine only if a concurrency slot is immediately
-// available, returning true if the task was started. With no configured limit
-// it always starts the task and returns true. A nil fn is ignored and reports
-// false.
-func (g *Group) TryGo(fn func(ctx context.Context) error) bool {
+// available. With no configured limit it always starts the task. Returns
+// (true, nil) when the task was started, (false, nil) when a configured limit
+// blocks immediate admission, and (false, [ErrNilFunc]) when fn is nil.
+func (g *Group) TryGo(fn func(ctx context.Context) error) (bool, error) {
 	if fn == nil {
-		return false
+		return false, ErrNilFunc
 	}
 	if g.sem != nil {
 		select {
 		case g.sem <- struct{}{}:
 		default:
-			return false
+			return false, nil
 		}
 	}
 	g.launch(fn)
-	return true
+	return true, nil
 }
 
 // launch starts fn in a goroutine, assuming any semaphore slot has already

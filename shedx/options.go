@@ -10,6 +10,18 @@ const (
 	// admitted; above it, requests are shed progressively by priority.
 	DefaultThreshold = 0.8
 
+	// DefaultCutoffLow is the overload fraction below which [PriorityLow]
+	// requests remain admitted once load is above [DefaultThreshold].
+	DefaultCutoffLow = 0.25
+
+	// DefaultCutoffNormal is the overload fraction below which [PriorityNormal]
+	// requests remain admitted once load is above [DefaultThreshold].
+	DefaultCutoffNormal = 0.60
+
+	// DefaultCutoffHigh is the overload fraction below which [PriorityHigh]
+	// requests remain admitted once load is above [DefaultThreshold].
+	DefaultCutoffHigh = 0.90
+
 	// minCapacity is the floor [New] enforces: a non-positive capacity degrades
 	// to a single in-flight slot rather than dividing by zero in [Shedder.Load].
 	minCapacity = 1
@@ -25,18 +37,24 @@ type Option func(*config)
 
 // config holds resolved shedder parameters.
 type config struct {
-	capacity  int
-	threshold float64
-	op        string
+	capacity     int
+	threshold    float64
+	cutoffLow    float64
+	cutoffNormal float64
+	cutoffHigh   float64
+	op           string
 }
 
 // newConfig resolves the effective configuration: defaults first, then options
-// in order, with the capacity floor and threshold bounds applied last so an
-// invalid option can never produce an unusable shedder.
+// in order, with the capacity floor, threshold bounds, and cutoff ordering
+// applied last so an invalid option can never produce an unusable shedder.
 func newConfig(opts []Option) config {
 	cfg := config{
-		capacity:  DefaultCapacity,
-		threshold: DefaultThreshold,
+		capacity:     DefaultCapacity,
+		threshold:    DefaultThreshold,
+		cutoffLow:    DefaultCutoffLow,
+		cutoffNormal: DefaultCutoffNormal,
+		cutoffHigh:   DefaultCutoffHigh,
 	}
 	for _, opt := range opts {
 		opt(&cfg)
@@ -47,7 +65,28 @@ func newConfig(opts []Option) config {
 	if cfg.threshold <= thresholdFloor || cfg.threshold > thresholdCeil {
 		cfg.threshold = DefaultThreshold
 	}
+	cfg.normalizeCutoffs()
 	return cfg
+}
+
+// normalizeCutoffs resets cutoffs to the package defaults when any value is
+// outside (0, 1] or the low ≤ normal ≤ high ordering is violated.
+func (c *config) normalizeCutoffs() {
+	if !validCutoff(c.cutoffLow) || !validCutoff(c.cutoffNormal) || !validCutoff(c.cutoffHigh) {
+		c.cutoffLow = DefaultCutoffLow
+		c.cutoffNormal = DefaultCutoffNormal
+		c.cutoffHigh = DefaultCutoffHigh
+		return
+	}
+	if c.cutoffLow > c.cutoffNormal || c.cutoffNormal > c.cutoffHigh {
+		c.cutoffLow = DefaultCutoffLow
+		c.cutoffNormal = DefaultCutoffNormal
+		c.cutoffHigh = DefaultCutoffHigh
+	}
+}
+
+func validCutoff(v float64) bool {
+	return v > 0 && v <= 1
 }
 
 // opOrDefault returns the configured operation name, or [opExecute] when none
@@ -88,6 +127,20 @@ func WithThreshold(t float64) Option {
 		if t > thresholdFloor && t <= thresholdCeil {
 			c.threshold = t
 		}
+	}
+}
+
+// WithCutoffs sets the overload fractions at which each non-critical priority
+// is shed once load is above the threshold. A priority is admitted while
+// overload = (load − threshold) / (1 − threshold) stays strictly below its
+// cutoff. Defaults: [DefaultCutoffLow], [DefaultCutoffNormal],
+// [DefaultCutoffHigh]. Values outside (0, 1] or an ordering where
+// low > normal > high is not satisfied reset all three cutoffs to the defaults.
+func WithCutoffs(low, normal, high float64) Option {
+	return func(c *config) {
+		c.cutoffLow = low
+		c.cutoffNormal = normal
+		c.cutoffHigh = high
 	}
 }
 

@@ -14,7 +14,9 @@
 //	db, err := lazy.Get()
 //
 //	g, ctx := syncx.NewGroup(parentCtx, syncx.WithLimit(10))
-//	g.Go(func(ctx context.Context) error { return doWork(ctx) })
+//	if err := g.Go(func(ctx context.Context) error { return doWork(ctx) }); err != nil {
+//	    return err
+//	}
 //	err = g.Wait()
 //
 //	m := syncx.NewMap[string, int]()

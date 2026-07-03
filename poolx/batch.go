@@ -87,11 +87,11 @@ func (b *Batch[T]) ticker() {
 // the flush error (joined with [ErrFlushFailed]) when a size-triggered flush
 // fails. Failed flushes restore items to the buffer for retry.
 func (b *Batch[T]) Add(item T) error {
+	b.mu.Lock()
 	if b.closed.Load() {
+		b.mu.Unlock()
 		return errClosed(componentBatch)
 	}
-
-	b.mu.Lock()
 	b.buf = append(b.buf, item)
 	shouldFlush := len(b.buf) >= b.cfg.batchSize
 	b.mu.Unlock()
@@ -103,18 +103,31 @@ func (b *Batch[T]) Add(item T) error {
 }
 
 // Flush flushes the current buffer using ctx. It is a no-op when the buffer is
-// empty. On failure, buffered items are restored for a later retry. Safe for
-// concurrent use.
+// empty. Returns [ErrClosed] after [Batch.Close] has started. On failure,
+// buffered items are restored for a later retry. Safe for concurrent use.
 func (b *Batch[T]) Flush(ctx context.Context) error {
-	b.mu.Lock()
-	if len(b.buf) == 0 {
-		b.mu.Unlock()
+	if b.closed.Load() {
+		return errClosed(componentBatch)
+	}
+	batch, ok := b.takeBuffer()
+	if !ok {
 		return nil
+	}
+	return b.flushBatch(ctx, batch)
+}
+
+func (b *Batch[T]) takeBuffer() ([]T, bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if len(b.buf) == 0 {
+		return nil, false
 	}
 	batch := b.buf
 	b.buf = make([]T, 0, b.cfg.batchSize)
-	b.mu.Unlock()
+	return batch, true
+}
 
+func (b *Batch[T]) flushBatch(ctx context.Context, batch []T) error {
 	err := panix.SafeVoid(b.cfg.opOrDefault(), func() error {
 		return b.flush(ctx, batch)
 	})
@@ -164,9 +177,15 @@ func (b *Batch[T]) ResetStats() {
 func (b *Batch[T]) Close() error {
 	var err error
 	b.closeOnce.Do(func() {
+		b.mu.Lock()
 		b.closed.Store(true)
+		batch := b.buf
+		b.buf = make([]T, 0, b.cfg.batchSize)
+		b.mu.Unlock()
 		close(b.done)
-		err = b.Flush(context.Background())
+		if len(batch) > 0 {
+			err = b.flushBatch(context.Background(), batch)
+		}
 	})
 	return err
 }

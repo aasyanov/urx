@@ -33,18 +33,19 @@ func ExampleCache_GetOrCompute() {
 	// Output: 2 <nil>
 }
 
-// ExampleCache_GetOrCompute_error demonstrates error propagation: a failing
-// compute leaves nothing cached.
-func ExampleCache_GetOrCompute_error() {
+// ExampleCache_GetOrCompute_errNotFound demonstrates that a compute function
+// may return [lrux.ErrNotFound] to signal a missing backing record; nothing is
+// cached and the error propagates to the caller.
+func ExampleCache_GetOrCompute_errNotFound() {
 	c := lrux.New[string, string]()
 	defer c.Close()
 
 	ctx := context.Background()
-	v, err := c.GetOrCompute(ctx, "user:1", func(ctx context.Context) (string, error) {
-		return "Ada", nil
+	_, err := c.GetOrCompute(ctx, "user:missing", func(ctx context.Context) (string, error) {
+		return "", lrux.ErrNotFound
 	})
-	fmt.Println(v, err)
-	// Output: Ada <nil>
+	fmt.Println(err)
+	// Output: lrux: key not found
 }
 
 // ExampleCache_onEvict demonstrates reacting to evictions, for example to

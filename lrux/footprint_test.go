@@ -17,5 +17,7 @@ func TestFootprint(t *testing.T) {
 		{Name: "config[string,int]", Size: testx.Sizeof[config[string, int]](), Max: 48},
 		{Name: "computeConfig", Size: testx.Sizeof[computeConfig](), Max: 16},
 		{Name: "EvictionReason", Size: testx.Sizeof[EvictionReason](), Max: 1},
+		{Name: "cleanupTicker", Size: testx.Sizeof[cleanupTicker](), Max: 32},
+		{Name: "shardedConfig[string,int]", Size: testx.Sizeof[shardedConfig[string, int]](), Max: 48},
 	})
 }

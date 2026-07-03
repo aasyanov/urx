@@ -10,9 +10,10 @@ import (
 // It is safe for concurrent use from multiple goroutines.
 //
 // Mutating operations serialize length accounting through an internal mutex
-// so [Map.Len] stays consistent with live entries even when [Map.Clear] runs
-// concurrently with [Map.Store] or [Map.Delete]. Reads ([Map.Load], [Map.Range],
-// [Map.Len]) do not take the mutex.
+// so [Map.Len] matches live entries once each mutation completes, including
+// when [Map.Clear] runs concurrently with [Map.Store] or [Map.Delete]. Reads
+// ([Map.Load], [Map.Range], [Map.Len]) do not take the mutex; a concurrent
+// [Map.Load] may therefore observe an entry before [Map.Len] increments.
 //
 // Like [sync.Map], Map is optimized for two cases: keys that are written once
 // but read many times, and disjoint key sets across goroutines. For workloads
@@ -113,9 +114,32 @@ func (m *Map[K, V]) Range(fn func(key K, value V) bool) {
 	})
 }
 
-// Len returns the number of entries currently in the map.
+// Len returns an O(1) snapshot of the entry count maintained by mutating
+// operations. It may briefly lag [Map.Load] during concurrent writes.
 func (m *Map[K, V]) Len() int {
 	return int(m.len.Load())
+}
+
+// CompareAndSwap swaps value for key only if the map holds old. It reports
+// whether the swap happened. Like [sync.Map.CompareAndSwap], it updates
+// existing entries only and does not insert absent keys or change [Map.Len].
+func (m *Map[K, V]) CompareAndSwap(key K, old, new V) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.m.CompareAndSwap(key, old, new)
+}
+
+// CompareAndDelete deletes the entry for key only if the map holds old. It
+// reports whether the entry was removed. A successful delete decrements
+// [Map.Len].
+func (m *Map[K, V]) CompareAndDelete(key K, old V) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	deleted := m.m.CompareAndDelete(key, old)
+	if deleted {
+		m.len.Add(-1)
+	}
+	return deleted
 }
 
 // Clear removes all entries from the map and resets [Map.Len] to zero.

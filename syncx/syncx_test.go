@@ -172,6 +172,10 @@ func TestLazy_ConcurrentGetAndReset(t *testing.T) {
 	testx.HammerVoid(20, 200, func() { _, _ = l.Get() })
 	stop.Store(true)
 	<-done
+
+	v, err := l.Get()
+	require.NoError(t, err)
+	assert.Equal(t, 1, v)
 }
 
 // --- Map ---
@@ -294,24 +298,43 @@ func TestMap_Clear(t *testing.T) {
 	assert.Equal(t, 0, m.Len())
 }
 
-func TestMap_Clear_Concurrent(t *testing.T) {
-	m := NewMap[int, int]()
-	for i := range 100 {
-		m.Store(i, i)
-	}
+func TestMap_ZeroValueReady(t *testing.T) {
+	var m Map[string, int]
+	m.Store("a", 1)
+	v, ok := m.Load("a")
+	assert.True(t, ok)
+	assert.Equal(t, 1, v)
+	assert.Equal(t, 1, m.Len())
+}
 
-	testx.HammerVoid(20, 200, func() {
-		m.Clear()
-		m.Store(999, 999)
-		m.Delete(999)
-	})
+func TestMap_CompareAndSwap(t *testing.T) {
+	m := NewMap[string, int]()
 
-	seen := 0
-	m.Range(func(int, int) bool {
-		seen++
-		return true
-	})
-	assert.Equal(t, m.Len(), seen)
+	assert.False(t, m.CompareAndSwap("k", 0, 1))
+	assert.Equal(t, 0, m.Len())
+
+	m.Store("k", 1)
+	assert.False(t, m.CompareAndSwap("k", 0, 2))
+	assert.True(t, m.CompareAndSwap("k", 1, 2))
+	assert.Equal(t, 1, m.Len())
+	v, ok := m.Load("k")
+	assert.True(t, ok)
+	assert.Equal(t, 2, v)
+}
+
+func TestMap_CompareAndDelete(t *testing.T) {
+	m := NewMap[string, int]()
+	m.Store("k", 5)
+
+	assert.False(t, m.CompareAndDelete("k", 0))
+	assert.Equal(t, 1, m.Len())
+
+	assert.True(t, m.CompareAndDelete("k", 5))
+	assert.Equal(t, 0, m.Len())
+	_, ok := m.Load("k")
+	assert.False(t, ok)
+
+	assert.False(t, m.CompareAndDelete("k", 5))
 }
 
 func TestMap_ClearLenMatchesRangeUnderConcurrency(t *testing.T) {
@@ -359,9 +382,17 @@ func TestMap_ConcurrentLenConsistency(t *testing.T) {
 
 // --- Group ---
 
+func TestNewGroup_NilContext(t *testing.T) {
+	//nolint:staticcheck // SA1012: verify nil parent is normalized to Background
+	g, ctx := NewGroup(nil)
+	require.NotNil(t, ctx)
+	require.NoError(t, g.Go(func(context.Context) error { return nil }))
+	require.NoError(t, g.Wait())
+}
+
 func TestNewGroup_DerivedContextCancelledOnWait(t *testing.T) {
 	g, ctx := NewGroup(context.Background())
-	g.Go(func(context.Context) error { return nil })
+	require.NoError(t, g.Go(func(context.Context) error { return nil }))
 	require.NoError(t, g.Wait())
 
 	select {
@@ -375,11 +406,11 @@ func TestGroup_CollectsFirstError(t *testing.T) {
 	g, _ := NewGroup(context.Background())
 	sentinel := errors.New("first")
 
-	g.Go(func(context.Context) error { return sentinel })
-	g.Go(func(context.Context) error {
+	require.NoError(t, g.Go(func(context.Context) error { return sentinel }))
+	require.NoError(t, g.Go(func(context.Context) error {
 		time.Sleep(10 * time.Millisecond)
 		return nil
-	})
+	}))
 
 	err := g.Wait()
 	require.ErrorIs(t, err, sentinel)
@@ -391,11 +422,11 @@ func TestGroup_ParentContextCancelled(t *testing.T) {
 	cancel()
 
 	observed := make(chan struct{})
-	g.Go(func(c context.Context) error {
+	require.NoError(t, g.Go(func(c context.Context) error {
 		<-c.Done()
 		close(observed)
 		return c.Err()
-	})
+	}))
 
 	_ = g.Wait()
 	select {
@@ -408,7 +439,7 @@ func TestGroup_ParentContextCancelled(t *testing.T) {
 
 func TestGroup_ReuseAfterWait(t *testing.T) {
 	g, ctx := NewGroup(context.Background())
-	g.Go(func(context.Context) error { return nil })
+	require.NoError(t, g.Go(func(context.Context) error { return nil }))
 	require.NoError(t, g.Wait())
 
 	select {
@@ -418,10 +449,10 @@ func TestGroup_ReuseAfterWait(t *testing.T) {
 	}
 
 	errCh := make(chan error, 1)
-	g.Go(func(c context.Context) error {
+	require.NoError(t, g.Go(func(c context.Context) error {
 		errCh <- c.Err()
 		return c.Err()
-	})
+	}))
 	err := g.Wait()
 	require.ErrorIs(t, err, context.Canceled)
 	require.ErrorIs(t, <-errCh, context.Canceled)
@@ -431,10 +462,10 @@ func TestGroup_AllSucceed(t *testing.T) {
 	g, _ := NewGroup(context.Background())
 	var done atomic.Int64
 	for range 20 {
-		g.Go(func(context.Context) error {
+		require.NoError(t, g.Go(func(context.Context) error {
 			done.Add(1)
 			return nil
-		})
+		}))
 	}
 	require.NoError(t, g.Wait())
 	assert.Equal(t, int64(20), done.Load())
@@ -445,16 +476,35 @@ func TestGroup_AllSucceed(t *testing.T) {
 	assert.Zero(t, st.Failed)
 }
 
+func TestGroup_StatsMixedOutcomes(t *testing.T) {
+	g, _ := NewGroup(context.Background())
+
+	require.NoError(t, g.Go(func(context.Context) error { return nil }))
+	require.NoError(t, g.Go(func(context.Context) error { return nil }))
+	require.NoError(t, g.Go(func(context.Context) error { return errors.New("fail") }))
+	require.NoError(t, g.Go(func(context.Context) error {
+		panic("boom")
+	}))
+
+	require.Error(t, g.Wait())
+
+	st := g.Stats()
+	assert.Equal(t, int64(4), st.Started)
+	assert.Equal(t, int64(2), st.Succeeded)
+	assert.Equal(t, int64(2), st.Failed)
+	assert.Equal(t, int64(1), st.Panicked)
+}
+
 func TestGroup_CancelsSiblingsOnError(t *testing.T) {
 	g, _ := NewGroup(context.Background())
-	g.Go(func(context.Context) error { return errors.New("fail") })
+	require.NoError(t, g.Go(func(context.Context) error { return errors.New("fail") }))
 
 	cancelled := make(chan struct{})
-	g.Go(func(ctx context.Context) error {
+	require.NoError(t, g.Go(func(ctx context.Context) error {
 		<-ctx.Done()
 		close(cancelled)
 		return nil
-	})
+	}))
 
 	require.Error(t, g.Wait())
 	select {
@@ -466,9 +516,9 @@ func TestGroup_CancelsSiblingsOnError(t *testing.T) {
 
 func TestGroup_RecoversPanic(t *testing.T) {
 	g, _ := NewGroup(context.Background())
-	g.Go(func(context.Context) error {
+	require.NoError(t, g.Go(func(context.Context) error {
 		panic("task crashed")
-	})
+	}))
 
 	err := g.Wait()
 	pe := testx.RequirePanicError(t, err, opGroup)
@@ -479,10 +529,13 @@ func TestGroup_RecoversPanic(t *testing.T) {
 	assert.Equal(t, int64(1), st.Failed)
 }
 
-func TestGroup_NilFuncIgnored(t *testing.T) {
+func TestGroup_ReturnsErrNilFunc(t *testing.T) {
 	g, _ := NewGroup(context.Background())
-	g.Go(nil)
-	assert.False(t, g.TryGo(nil))
+
+	require.ErrorIs(t, g.Go(nil), ErrNilFunc)
+	ok, err := g.TryGo(nil)
+	require.ErrorIs(t, err, ErrNilFunc)
+	assert.False(t, ok)
 	require.NoError(t, g.Wait())
 	assert.Zero(t, g.Stats().Started)
 }
@@ -493,7 +546,7 @@ func TestGroup_WithLimitBoundsConcurrency(t *testing.T) {
 
 	var current, peak atomic.Int64
 	for range 30 {
-		g.Go(func(context.Context) error {
+		require.NoError(t, g.Go(func(context.Context) error {
 			c := current.Add(1)
 			for {
 				p := peak.Load()
@@ -504,7 +557,7 @@ func TestGroup_WithLimitBoundsConcurrency(t *testing.T) {
 			time.Sleep(time.Millisecond)
 			current.Add(-1)
 			return nil
-		})
+		}))
 	}
 	require.NoError(t, g.Wait())
 	assert.LessOrEqual(t, peak.Load(), int64(limit))
@@ -515,15 +568,18 @@ func TestGroup_TryGoRespectsLimit(t *testing.T) {
 
 	release := make(chan struct{})
 	started := make(chan struct{})
-	require.True(t, g.TryGo(func(context.Context) error {
+	ok, err := g.TryGo(func(context.Context) error {
 		close(started)
 		<-release
 		return nil
-	}))
+	})
+	require.NoError(t, err)
+	require.True(t, ok)
 	<-started
 
-	// The single slot is occupied, so the next TryGo must fail fast.
-	assert.False(t, g.TryGo(func(context.Context) error { return nil }))
+	ok, err = g.TryGo(func(context.Context) error { return nil })
+	require.NoError(t, err)
+	assert.False(t, ok)
 
 	close(release)
 	require.NoError(t, g.Wait())
@@ -532,19 +588,22 @@ func TestGroup_TryGoRespectsLimit(t *testing.T) {
 func TestGroup_TryGoFromLimitedTaskAvoidsDeadlock(t *testing.T) {
 	g, _ := NewGroup(context.Background(), WithLimit(1))
 	ready := make(chan struct{})
-	g.Go(func(context.Context) error {
+	require.NoError(t, g.Go(func(context.Context) error {
 		close(ready)
-		assert.False(t, g.TryGo(func(context.Context) error { return nil }),
-			"TryGo must fail while the single concurrency slot is held")
+		ok, err := g.TryGo(func(context.Context) error { return nil })
+		require.NoError(t, err)
+		assert.False(t, ok, "TryGo must fail while the single concurrency slot is held")
 		return nil
-	})
+	}))
 	<-ready
 	require.NoError(t, g.Wait())
 }
 
 func TestGroup_TryGoUnlimitedAlwaysStarts(t *testing.T) {
 	g, _ := NewGroup(context.Background())
-	assert.True(t, g.TryGo(func(context.Context) error { return nil }))
+	ok, err := g.TryGo(func(context.Context) error { return nil })
+	require.NoError(t, err)
+	assert.True(t, ok)
 	require.NoError(t, g.Wait())
 }
 
@@ -553,7 +612,7 @@ func TestGroup_ConcurrentGo(t *testing.T) {
 	var ran atomic.Int64
 
 	testx.HammerVoid(10, 50, func() {
-		g.Go(func(context.Context) error {
+		_ = g.Go(func(context.Context) error {
 			ran.Add(1)
 			return nil
 		})

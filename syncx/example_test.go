@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 
+	"github.com/aasyanov/urx/panix"
 	"github.com/aasyanov/urx/syncx"
 )
 
@@ -56,7 +57,7 @@ func ExampleLazy_panic() {
 	})
 
 	_, err := lazy.Get()
-	var pe interface{ Error() string }
+	var pe *panix.PanicError
 	_ = errors.As(err, &pe)
 	fmt.Println("first call panicked:", err != nil)
 
@@ -74,10 +75,12 @@ func ExampleGroup() {
 
 	results := make([]int, 3)
 	for i := range results {
-		g.Go(func(context.Context) error {
+		if err := g.Go(func(context.Context) error {
 			results[i] = i * i
 			return nil
-		})
+		}); err != nil {
+			panic(err)
+		}
 	}
 
 	if err := g.Wait(); err != nil {
@@ -87,6 +90,23 @@ func ExampleGroup() {
 	fmt.Println("results:", results)
 	// Output:
 	// results: [0 1 4]
+}
+
+// ExampleGroup_stats shows task counters after a mixed fan-out.
+func ExampleGroup_stats() {
+	g, _ := syncx.NewGroup(context.Background())
+	_ = g.Go(func(context.Context) error { return nil })
+	_ = g.Go(func(context.Context) error { return errors.New("fail") })
+
+	_ = g.Wait()
+	st := g.Stats()
+	fmt.Println("started:", st.Started)
+	fmt.Println("succeeded:", st.Succeeded)
+	fmt.Println("failed:", st.Failed)
+	// Output:
+	// started: 2
+	// succeeded: 1
+	// failed: 1
 }
 
 // ExampleMap demonstrates type-safe concurrent storage with an O(1) length.

@@ -5,7 +5,8 @@
 // The cache stores entries in an intrusive doubly-linked list keyed by a map,
 // giving O(1) lookup, insertion, promotion, and eviction with a single heap
 // allocation per entry. Statistics use atomic counters for lock-free reads,
-// and eviction callbacks run outside the lock with panic recovery.
+// and eviction callbacks run outside the lock with panic recovery via
+// [github.com/aasyanov/urx/panix].
 //
 // # Quick Start
 //
@@ -33,8 +34,9 @@
 //	)
 //	defer sc.Close()
 //
-// # Zero Dependencies
+// # Dependencies
 //
-// lrux depends only on the Go standard library and golang.org/x/sync for
+// lrux depends on the Go standard library, [github.com/aasyanov/urx/panix] for
+// panic-safe compute and eviction callbacks, and golang.org/x/sync for
 // singleflight deduplication.
 package lrux

@@ -150,9 +150,10 @@ func TestSetMulti_UpdateExistingWithCallback(t *testing.T) {
 	assert.Equal(t, 11, v)
 }
 
-func TestShardedCache_IsClosed_EmptyShards(t *testing.T) {
-	c := &ShardedCache[string, int]{}
-	assert.True(t, c.IsClosed())
+func TestShardedCache_IsClosed_BeforeClose(t *testing.T) {
+	c := NewSharded[string, int]()
+	defer c.Close()
+	assert.False(t, c.IsClosed())
 }
 
 // TestTouch_ExpiredRemovesWithCallback covers the expired branch in Touch
@@ -195,4 +196,49 @@ func TestDeleteMulti_MissingKeys(t *testing.T) {
 	c.Set("a", 1)
 
 	assert.Equal(t, 1, c.DeleteMulti([]string{"a", "missing1", "missing2"}))
+}
+
+func TestDeleteMulti_ClosedCache(t *testing.T) {
+	c := New[string, int]()
+	c.Set("a", 1)
+	c.Close()
+	assert.Equal(t, 0, c.DeleteMulti([]string{"a"}))
+}
+
+func TestResize_ClosedCache(t *testing.T) {
+	c := New[string, int]()
+	c.Set("a", 1)
+	c.Close()
+	assert.NotPanics(t, func() { c.Resize(1) })
+	assert.Equal(t, 0, c.Len())
+}
+
+func TestSlideExpiration_GlobalTTL(t *testing.T) {
+	c := New[string, int](WithTTL[string, int](time.Hour))
+	defer c.Close()
+
+	now := time.Now()
+	c.mu.Lock()
+	n := &node[string, int]{key: "session", value: 1, createdAt: now, accessedAt: now}
+	c.items["session"] = n
+	c.listPushFront(n)
+	assert.True(t, n.expiresAt.IsZero())
+	c.slideExpiration(n, now)
+	c.mu.Unlock()
+	assert.False(t, n.expiresAt.IsZero())
+	assert.Greater(t, n.expiresAt, now)
+}
+
+func TestSlideExpiration_RemainingNonPositive(t *testing.T) {
+	c := New[string, int]()
+	defer c.Close()
+	c.SetWithTTL("session", 1, time.Hour)
+
+	c.mu.Lock()
+	n := c.items["session"]
+	n.accessedAt = n.expiresAt
+	c.slideExpiration(n, time.Now())
+	exp := n.expiresAt
+	c.mu.Unlock()
+	assert.Equal(t, exp, n.expiresAt)
 }

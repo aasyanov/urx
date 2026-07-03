@@ -12,32 +12,16 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// fill admits n requests at the given priority and returns their tokens so the
-// caller can hold the shedder at a chosen load. It fails the test if any
-// admission is rejected.
-func fill(t *testing.T, s *Shedder, priority Priority, n int) []*Token {
-	t.Helper()
-	tokens := make([]*Token, 0, n)
-	for range n {
-		tok, err := s.Acquire(priority)
-		require.NoError(t, err)
-		tokens = append(tokens, tok)
-	}
-	return tokens
-}
-
-func release(tokens []*Token) {
-	for _, tok := range tokens {
-		tok.Release()
-	}
-}
-
 // --- Construction & defaults ---
 
 func TestNew_AppliesDefaults(t *testing.T) {
 	s := New()
 	assert.Equal(t, DefaultCapacity, s.Capacity())
 	assert.InEpsilon(t, DefaultThreshold, s.Threshold(), 1e-9)
+	st := s.Stats()
+	assert.InEpsilon(t, DefaultCutoffLow, st.CutoffLow, 1e-9)
+	assert.InEpsilon(t, DefaultCutoffNormal, st.CutoffNormal, 1e-9)
+	assert.InEpsilon(t, DefaultCutoffHigh, st.CutoffHigh, 1e-9)
 }
 
 func TestNew_OptionValidation(t *testing.T) {
@@ -98,6 +82,44 @@ func TestWithOp_OverridesDefault(t *testing.T) {
 	assert.Equal(t, "api.search", newConfig([]Option{WithOp("api.search")}).opOrDefaultTry())
 	assert.Equal(t, opExecute, newConfig([]Option{WithOp("")}).opOrDefault())
 	assert.Equal(t, opTryExecute, newConfig([]Option{WithOp("")}).opOrDefaultTry())
+}
+
+func TestWithCutoffs_AppliesCustomValues(t *testing.T) {
+	s := New(WithCutoffs(0.1, 0.5, 0.95))
+	st := s.Stats()
+	assert.InEpsilon(t, 0.1, st.CutoffLow, 1e-9)
+	assert.InEpsilon(t, 0.5, st.CutoffNormal, 1e-9)
+	assert.InEpsilon(t, 0.95, st.CutoffHigh, 1e-9)
+}
+
+func TestWithCutoffs_RejectsInvalidValues(t *testing.T) {
+	tests := []struct {
+		name string
+		opt  Option
+	}{
+		{"zero low", WithCutoffs(0, 0.5, 0.9)},
+		{"above one", WithCutoffs(0.1, 0.5, 1.5)},
+		{"unordered", WithCutoffs(0.9, 0.5, 0.1)},
+		{"normal above high", WithCutoffs(0.1, 0.95, 0.5)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			st := New(tt.opt).Stats()
+			assert.InEpsilon(t, DefaultCutoffLow, st.CutoffLow, 1e-9)
+			assert.InEpsilon(t, DefaultCutoffNormal, st.CutoffNormal, 1e-9)
+			assert.InEpsilon(t, DefaultCutoffHigh, st.CutoffHigh, 1e-9)
+		})
+	}
+}
+
+func TestAdmits_RespectsCustomCutoffs(t *testing.T) {
+	s := New(WithCapacity(100), WithThreshold(0.8), WithCutoffs(0.1, 0.6, 0.9))
+	defer func() { require.NoError(t, s.Close()) }()
+
+	const inflight int64 = 90 // load 0.9, overload 0.5
+	assert.False(t, s.admits(PriorityLow, inflight), "low cutoff 0.1")
+	assert.True(t, s.admits(PriorityNormal, inflight), "normal cutoff 0.6")
+	assert.True(t, s.admits(PriorityHigh, inflight), "high cutoff 0.9")
 }
 
 // --- Priority ---
@@ -254,6 +276,17 @@ func TestExecute_RecoversPanic(t *testing.T) {
 	assert.Equal(t, int64(0), s.InFlight(), "slot released even on panic")
 }
 
+func TestExecute_RecoversPanic_WithCustomOp(t *testing.T) {
+	s := New(WithOp("api.search"))
+	defer func() { require.NoError(t, s.Close()) }()
+
+	_, err := Execute(s, context.Background(), PriorityNormal,
+		func(context.Context, ShedController) (int, error) {
+			panic("kaboom")
+		})
+	testx.RequirePanicError(t, err, "api.search")
+}
+
 // --- TryExecute ---
 
 func TestTryExecute_RunsWhenAdmitted(t *testing.T) {
@@ -392,7 +425,7 @@ func TestTryExecute_RecoversPanic_WithCustomOp(t *testing.T) {
 	testx.RequirePanicError(t, err, "api.search")
 }
 
-func TestTryExecute_ShedRecordsDegradation(t *testing.T) {
+func TestTryExecute_RecordsDegradation(t *testing.T) {
 	s := New()
 	defer func() { require.NoError(t, s.Close()) }()
 
@@ -583,6 +616,27 @@ func TestAcquire_TracksInFlight(t *testing.T) {
 	assert.Equal(t, int64(0), s.InFlight())
 }
 
+func TestAcquire_IncrementsAdmitted(t *testing.T) {
+	s := New()
+	defer func() { require.NoError(t, s.Close()) }()
+
+	tok, err := s.Acquire(PriorityNormal)
+	require.NoError(t, err)
+	defer tok.Release()
+	assert.Equal(t, int64(1), s.Stats().Admitted)
+}
+
+func TestCritical_ExceedsCapacity(t *testing.T) {
+	s := New(WithCapacity(2), WithThreshold(0.5))
+	defer func() { require.NoError(t, s.Close()) }()
+
+	tokens := fill(t, s, PriorityCritical, 5)
+	defer release(tokens)
+
+	assert.Equal(t, int64(5), s.InFlight())
+	assert.InEpsilon(t, 2.5, s.Load(), 1e-9)
+}
+
 func TestToken_ReleaseIsIdempotent(t *testing.T) {
 	s := New(WithCapacity(10))
 	defer func() { require.NoError(t, s.Close()) }()
@@ -660,6 +714,9 @@ func TestStats_Snapshot(t *testing.T) {
 	st := s.Stats()
 	assert.Equal(t, 100, st.Capacity)
 	assert.InEpsilon(t, 0.7, st.Threshold, 1e-9)
+	assert.InEpsilon(t, DefaultCutoffLow, st.CutoffLow, 1e-9)
+	assert.InEpsilon(t, DefaultCutoffNormal, st.CutoffNormal, 1e-9)
+	assert.InEpsilon(t, DefaultCutoffHigh, st.CutoffHigh, 1e-9)
 	assert.Equal(t, int64(3), st.InFlight)
 	assert.Equal(t, int64(3), st.Admitted)
 }
@@ -739,6 +796,59 @@ func TestAcquire_ReturnsErrClosedWhenClosedDuringReserve(t *testing.T) {
 		require.ErrorIs(t, err, ErrClosed)
 	}
 	assert.Equal(t, int64(0), s.Stats().Shed)
+}
+
+// TestExecute_ReturnsErrClosedAfterCommitRace hammers concurrent admission
+// against Close so at least one call observes ErrClosed from commitReservation
+// rollback rather than the pre-loop closed check alone.
+func TestExecute_ReturnsErrClosedAfterCommitRace(t *testing.T) {
+	var hits atomic.Int64
+	for range 500 {
+		s := New(WithCapacity(1000))
+		gate := make(chan struct{})
+		var wg sync.WaitGroup
+		for range 16 {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-gate
+				_, err := Execute(s, context.Background(), PriorityCritical,
+					func(context.Context, ShedController) (int, error) { return 1, nil })
+				if errors.Is(err, ErrClosed) {
+					hits.Add(1)
+				}
+			}()
+		}
+		close(gate)
+		require.NoError(t, s.Close())
+		wg.Wait()
+	}
+	assert.Greater(t, hits.Load(), int64(0), "commitReservation rollback must be reachable")
+}
+
+func TestTryExecute_ReturnsErrClosedAfterCommitRace(t *testing.T) {
+	var hits atomic.Int64
+	for range 500 {
+		s := New(WithCapacity(1000))
+		gate := make(chan struct{})
+		var wg sync.WaitGroup
+		for range 16 {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-gate
+				ok, _, err := TryExecute(s, context.Background(), PriorityCritical,
+					func(context.Context, ShedController) (int, error) { return 1, nil })
+				if !ok && errors.Is(err, ErrClosed) {
+					hits.Add(1)
+				}
+			}()
+		}
+		close(gate)
+		require.NoError(t, s.Close())
+		wg.Wait()
+	}
+	assert.Greater(t, hits.Load(), int64(0), "commitReservation rollback must be reachable")
 }
 
 // --- Concurrency ---

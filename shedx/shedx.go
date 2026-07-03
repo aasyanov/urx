@@ -53,13 +53,6 @@ const (
 
 	// opTryExecute labels panics recovered while running a [TryExecute] callback.
 	opTryExecute = "shedx.TryExecute"
-
-	// Progressive shedding cutoffs. overload is the fraction of the band above
-	// the threshold, in [0, 1]: a priority is admitted while overload is below
-	// its cutoff. Critical requests bypass these entirely.
-	cutoffLow    = 0.25
-	cutoffNormal = 0.60
-	cutoffHigh   = 0.90
 )
 
 // Shedder is a thread-safe, priority-based load shedder. Create one with [New],
@@ -289,13 +282,13 @@ func (s *Shedder) admits(priority Priority, inflight int64) bool {
 	overload := (load - s.cfg.threshold) / band
 	switch priority {
 	case PriorityLow:
-		return overload < cutoffLow
+		return overload < s.cfg.cutoffLow
 	case PriorityNormal:
-		return overload < cutoffNormal
+		return overload < s.cfg.cutoffNormal
 	default:
 		// Values outside the named constants (including corrupt casts) are
 		// treated like PriorityHigh — shed under severe overload only.
-		return overload < cutoffHigh
+		return overload < s.cfg.cutoffHigh
 	}
 }
 
@@ -319,25 +312,40 @@ func (s *Shedder) Threshold() float64 {
 	return s.cfg.threshold
 }
 
-// Stats holds a point-in-time snapshot of shedder counters.
+// Stats holds a point-in-time snapshot of shedder configuration and counters.
 type Stats struct {
-	Capacity  int     `json:"capacity"`
+	// Capacity is the configured maximum number of in-flight operations.
+	Capacity int `json:"capacity"`
+	// Threshold is the load fraction at which shedding begins.
 	Threshold float64 `json:"threshold"`
-	InFlight  int64   `json:"in_flight"`
-	Admitted  int64   `json:"admitted"`
-	Shed      int64   `json:"shed"`
-	Degraded  int64   `json:"degraded"`
+	// CutoffLow is the overload fraction below which [PriorityLow] is admitted.
+	CutoffLow float64 `json:"cutoff_low"`
+	// CutoffNormal is the overload fraction below which [PriorityNormal] is admitted.
+	CutoffNormal float64 `json:"cutoff_normal"`
+	// CutoffHigh is the overload fraction below which [PriorityHigh] is admitted.
+	CutoffHigh float64 `json:"cutoff_high"`
+	// InFlight is the number of operations currently executing.
+	InFlight int64 `json:"in_flight"`
+	// Admitted is the cumulative count of admitted operations since creation or [Shedder.ResetStats].
+	Admitted int64 `json:"admitted"`
+	// Shed is the cumulative count of rejected admissions since creation or [Shedder.ResetStats].
+	Shed int64 `json:"shed"`
+	// Degraded is the cumulative count of graceful degradations recorded via [ShedController.Shed].
+	Degraded int64 `json:"degraded"`
 }
 
 // Stats returns a snapshot of shedder statistics.
 func (s *Shedder) Stats() Stats {
 	return Stats{
-		Capacity:  s.cfg.capacity,
-		Threshold: s.cfg.threshold,
-		InFlight:  s.inflight.Load(),
-		Admitted:  s.admitted.Load(),
-		Shed:      s.shed.Load(),
-		Degraded:  s.degraded.Load(),
+		Capacity:     s.cfg.capacity,
+		Threshold:    s.cfg.threshold,
+		CutoffLow:    s.cfg.cutoffLow,
+		CutoffNormal: s.cfg.cutoffNormal,
+		CutoffHigh:   s.cfg.cutoffHigh,
+		InFlight:     s.inflight.Load(),
+		Admitted:     s.admitted.Load(),
+		Shed:         s.shed.Load(),
+		Degraded:     s.degraded.Load(),
 	}
 }
 

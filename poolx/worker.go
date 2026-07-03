@@ -2,7 +2,6 @@ package poolx
 
 import (
 	"context"
-	"errors"
 	"sync"
 	"sync/atomic"
 
@@ -76,12 +75,7 @@ func (wp *WorkerPool) rejectIfClosed() error {
 	if wp.closed.Load() {
 		return errClosed(componentWorkerPool)
 	}
-	select {
-	case <-wp.done:
-		return errClosed(componentWorkerPool)
-	default:
-		return nil
-	}
+	return nil
 }
 
 func (wp *WorkerPool) validateSubmit(ctx context.Context, fn func(context.Context) error) error {
@@ -238,9 +232,4 @@ func (wp *WorkerPool) Close() error {
 // IsClosed reports whether the pool has been closed.
 func (wp *WorkerPool) IsClosed() bool {
 	return wp.closed.Load()
-}
-
-func isPanic(err error) bool {
-	var pe *panix.PanicError
-	return errors.As(err, &pe)
 }

@@ -17,3 +17,7 @@ func TestErrInitFailed_WrapsSentinelAndCause(t *testing.T) {
 func TestErrNilInit_IsComparable(t *testing.T) {
 	require.ErrorIs(t, ErrNilInit, ErrNilInit)
 }
+
+func TestErrNilFunc_IsComparable(t *testing.T) {
+	require.ErrorIs(t, ErrNilFunc, ErrNilFunc)
+}

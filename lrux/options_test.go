@@ -93,6 +93,7 @@ func TestWithShardCount(t *testing.T) {
 		{name: "custom", opt: WithShardCount[string, int](32), want: 32},
 		{name: "zero ignored", opt: WithShardCount[string, int](0), want: defaultShardCount},
 		{name: "negative ignored", opt: WithShardCount[string, int](-1), want: defaultShardCount},
+		{name: "clamped to max", opt: WithShardCount[string, int](1 << 20), want: maxShardCount},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

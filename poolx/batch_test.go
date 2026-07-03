@@ -13,25 +13,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func collectingFlush[T any](dst *[][]T, mu *sync.Mutex) func(context.Context, []T) error {
-	return func(_ context.Context, items []T) error {
-		mu.Lock()
-		cp := make([]T, len(items))
-		copy(cp, items)
-		*dst = append(*dst, cp)
-		mu.Unlock()
-		return nil
-	}
-}
-
-func newTestBatch[T any](t *testing.T, flush func(context.Context, []T) error, opts ...BatchOption) *Batch[T] {
-	t.Helper()
-	b, err := NewBatch(flush, opts...)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = b.Close() })
-	return b
-}
-
 func TestNewBatch_NilFlushReturnsErrNilFlush(t *testing.T) {
 	_, err := NewBatch[int](nil)
 	require.ErrorIs(t, err, ErrNilFlush)
@@ -162,6 +143,68 @@ func TestBatch_FlushPanicRecovered(t *testing.T) {
 	require.ErrorIs(t, err, ErrFlushFailed)
 	assert.Equal(t, uint64(1), b.Stats().Errors)
 	assert.Equal(t, 1, b.Stats().Buffered)
+}
+
+func TestBatch_FlushPanicUsesCustomOp(t *testing.T) {
+	b, err := NewBatch(
+		func(context.Context, []int) error { panic("flush boom") },
+		WithBatchSize(1),
+		WithFlushInterval(time.Hour),
+		WithBatchOp("db.batch_insert"),
+	)
+	require.NoError(t, err)
+	defer func() { _ = b.Close() }()
+
+	err = b.Add(1)
+	require.ErrorIs(t, err, ErrFlushFailed)
+	pe := testx.RequirePanicError(t, err, "db.batch_insert")
+	assert.Equal(t, "flush boom", pe.Value)
+}
+
+func TestBatch_FlushAfterCloseReturnsErrClosed(t *testing.T) {
+	b, err := NewBatch(func(context.Context, []int) error { return nil })
+	require.NoError(t, err)
+	require.NoError(t, b.Close())
+
+	err = b.Flush(context.Background())
+	require.ErrorIs(t, err, ErrClosed)
+}
+
+func TestBatch_AddConcurrentWithCloseNoLostItems(t *testing.T) {
+	var (
+		mu        sync.Mutex
+		flushed   []int
+		accepted  atomic.Int64
+	)
+	b, err := NewBatch(func(_ context.Context, items []int) error {
+		mu.Lock()
+		flushed = append(flushed, items...)
+		mu.Unlock()
+		return nil
+	}, WithBatchSize(1000), WithFlushInterval(time.Hour))
+	require.NoError(t, err)
+
+	const n = 200
+	var wg sync.WaitGroup
+	wg.Add(n + 1)
+	for range n {
+		go func() {
+			defer wg.Done()
+			if err := b.Add(1); err == nil {
+				accepted.Add(1)
+			}
+		}()
+	}
+	go func() {
+		defer wg.Done()
+		_ = b.Close()
+	}()
+	wg.Wait()
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Equal(t, int(accepted.Load()), len(flushed))
+	assert.Equal(t, 0, b.Stats().Buffered)
 }
 
 func TestBatch_WithErrorHandlerReceivesTickerErrors(t *testing.T) {

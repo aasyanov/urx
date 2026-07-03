@@ -4,7 +4,7 @@
 [Go Reference](https://pkg.go.dev/github.com/aasyanov/urx/lrux)
 [License: MIT](../LICENSE)
 
-A generic, thread-safe least-recently-used cache for Go 1.24+ with TTL expiration, eviction callbacks, singleflight compute, and an optional sharded variant for high-concurrency workloads. Zero external dependencies beyond `golang.org/x/sync` for singleflight deduplication.
+A generic, thread-safe least-recently-used cache for Go 1.24+ with TTL expiration, eviction callbacks, singleflight compute, and an optional sharded variant for high-concurrency workloads. Depends on [github.com/aasyanov/urx/panix] for panic-safe callbacks and `golang.org/x/sync` for singleflight deduplication.
 
 ```bash
 go get github.com/aasyanov/urx
@@ -52,8 +52,9 @@ Without a purpose-built cache, each call site re-implements an LRU list, a TTL s
 └──────────────┬───────────────────────┬───────────────────┘
                │                        │
 ┌──────────────▼─────────┐   ┌──────────▼───────────────────┐
-│  golang.org/x/sync     │   │  sync · hash/maphash         │
-│  (singleflight.Group)  │   │  (sharded locks, LRU list)   │
+│  panix.Safe            │   │  sync · hash/maphash         │
+│  golang.org/x/sync     │   │  (sharded locks, LRU list)   │
+│  (singleflight.Group)  │   │                              │
 └────────────────────────┘   └──────────────────────────────┘
 ```
 
@@ -137,9 +138,9 @@ With [WithSingleflight], the shared compute runs under a **detached context** so
 | LRU order                | `Get`/`Set`/`Touch` move the entry to MRU; the tail is always the next eviction victim         |
 | Touch TTL                | `Touch` slides per-entry expiry by preserving remaining lifetime since last access             |
 | Eviction callback timing | `OnEvict` runs **after** the lock is released; it may call back into the cache                 |
-| Callback panic isolation | A panic in the eviction callback or compute function is recovered and cannot corrupt the cache |
+| Callback panic isolation | Compute and `OnEvict` run under `panix.Safe`; panics become `*panix.PanicError` and are never cached |
 | Close idempotency        | `Close` is safe to call any number of times, always returns nil; post-close mutations are no-ops except `GetOrCompute` → `ErrClosed` |
-| Singleflight             | `WithSingleflight` guarantees `compute` runs at most once per in-flight key                    |
+| Singleflight             | `WithSingleflight` guarantees `compute` runs at most once per in-flight key; exactly one miss is recorded per deduplicated key |
 | TTL semantics            | `TTL(key)` returns `-1` for no-expiry, `0` for missing/expired, positive remaining otherwise   |
 
 
@@ -303,7 +304,7 @@ func keepAlive(id string) bool {
 | `WithTTL(d)`                  | 0 (no expiry)  | Default per-entry TTL; negatives clamp to 0       |
 | `WithOnEvict(fn)`             | nil            | Eviction callback (runs outside lock, panic-safe) |
 | `WithCleanupInterval(d)`      | 0 (lazy)       | Background expired-entry sweep interval           |
-| `WithShardCount(n)`           | 16             | Shard count, rounded up to a power of two         |
+| `WithShardCount(n)`           | 16             | Shard count, rounded up to a power of two; clamped to 4096        |
 | `WithShardCapacity(n)`        | 0 (unbounded)  | Per-shard capacity (total = shards × n)           |
 | `WithShardTTL(d)`             | 0              | Default TTL for all shards                        |
 | `WithShardOnEvict(fn)`        | nil            | Shared eviction callback for all shards           |
@@ -341,9 +342,15 @@ func keepAlive(id string) bool {
 > [!WARNING]
 > **Context cancellation after compute.** On the direct (non-singleflight) path, a context cancelled during compute prevents storing the result; the context error is returned instead.
 
+> [!WARNING]
+> **Compute panics surface as `*panix.PanicError`.** A panicking compute function is not cached. Reach the structured error with `errors.As(err, &pe)` where `pe` is `*panix.PanicError`.
+
+> [!WARNING]
+> **`GetMulti` promotes every key.** Each lookup calls `Get`, acquiring a write lock and updating LRU order. For read-heavy bulk access without promotion, call `GetFast` or `Peek` per key.
+
 ## Safety and Concurrency
 
-All methods on `Cache` and `ShardedCache` are safe for concurrent use. Mutations and promotions take a write lock; `GetFast`, `Peek`, `Has`, `GetEntry`, `TTL`, and `Len` take a read lock. Statistics are maintained with `sync/atomic` and read without locking. Eviction callbacks and compute functions are invoked outside the lock and wrapped with `recover`, so user-code panics cannot corrupt cache state or crash the sweeper. `Close` is idempotent and gated by an atomic flag; every operation short-circuits once the cache is closed. The full suite passes under `-race`.
+All methods on `Cache` and `ShardedCache` are safe for concurrent use. Mutations and promotions take a write lock; `GetFast`, `Peek`, `Has`, `GetEntry`, `TTL`, and `Len` take a read lock. Statistics are maintained with `sync/atomic` and read without locking. Eviction callbacks and compute functions are invoked outside the lock under `panix.Safe`, so user-code panics cannot corrupt cache state or crash the sweeper. `Close` is idempotent and gated by an atomic flag; every operation short-circuits once the cache is closed. `ShardedCache` tracks its own closed state independently of individual shards. The full suite passes under `-race` on Linux CI.
 
 ## Benchmarks
 
@@ -380,13 +387,13 @@ All methods on `Cache` and `ShardedCache` are safe for concurrent use. Mutations
 
 | Metric         | Value                                                 |
 | -------------- | ----------------------------------------------------- |
-| Test functions | 103                                               |
-| Benchmarks     | 12                                                |
-| Fuzz targets   | 3                                                 |
-| Examples       | 5                                                 |
-| Coverage       | 97.4%                                             |
-| Race detector  | All pass                                              |
-| External deps  | golang.org/x/sync (singleflight); testify (test only) |
+| Test functions | 113 |
+| Benchmarks     | 12 |
+| Fuzz targets   | 3 |
+| Examples       | 5 |
+| Coverage       | 98.4% |
+| Race detector  | All pass (Linux CI) |
+| External deps  | panix, golang.org/x/sync (testify in dev only) |
 
 
 ## File Structure
@@ -400,6 +407,7 @@ lrux/
 ├── hash.go             # maphash.Comparable shard hasher, keyString, nextPow2
 ├── options.go          # Option / ShardedOption / ComputeOption + defaults
 ├── errors.go           # ErrClosed, ErrNotFound sentinels
+├── errors_test.go      # sentinel error contracts
 ├── types.go            # EvictionReason, Entry, Stats, node
 ├── lrux_test.go        # Cache unit + table-driven + concurrent tests
 ├── sharded_test.go     # ShardedCache tests
@@ -409,7 +417,7 @@ lrux/
 ├── hash_test.go        # hasher + keyString type coverage
 ├── bench_test.go       # sequential + parallel benchmarks
 ├── fuzz_test.go        # set/get round-trip + key-string fuzz targets
-├── footprint_test.go   # struct size regression guards
+├── footprint_test.go   # struct size regression guards (incl. cleanupTicker)
 ├── example_test.go     # runnable GoDoc examples
 └── README.md           # this file
 ```

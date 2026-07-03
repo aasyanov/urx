@@ -264,3 +264,22 @@ func TestShardedCache_RaceSafe(t *testing.T) {
 		return nil
 	})
 }
+
+func TestShardedCache_ClosedOperations_AreNoOps(t *testing.T) {
+	c := NewSharded[string, int]()
+	c.Set("a", 1)
+	c.Close()
+
+	c.Set("b", 2)
+	assert.False(t, c.Has("a"))
+	assert.False(t, c.Has("b"))
+	_, ok := c.Get("a")
+	assert.False(t, ok)
+	assert.False(t, c.Delete("a"))
+	assert.Equal(t, 0, c.Len())
+	assert.Nil(t, c.Keys())
+	_, err := c.GetOrCompute(context.Background(), "a", func(context.Context) (int, error) {
+		return 1, nil
+	})
+	assert.ErrorIs(t, err, ErrClosed)
+}

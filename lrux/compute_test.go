@@ -61,8 +61,7 @@ func TestGetOrCompute_Singleflight_StatsNoDoubleCount(t *testing.T) {
 	wg.Wait()
 
 	s := c.Stats()
-	assert.LessOrEqual(t, s.Misses, uint64(waiters))
-	assert.GreaterOrEqual(t, s.Misses, uint64(1))
+	assert.Equal(t, uint64(1), s.Misses)
 }
 
 // TestGetOrCompute_ConcurrentPopulateConvertsMissToHit drives the
@@ -134,6 +133,7 @@ func TestPeekPromote(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 		_, ok := c.peekPromote("a")
 		assert.False(t, ok)
+		assert.Equal(t, 0, c.Len())
 	})
 }
 
@@ -296,10 +296,43 @@ func TestGetOrCompute_ErrNotFound(t *testing.T) {
 	assert.False(t, c.Has("k"))
 }
 
+func TestComputeDirect_ExpiredRemovedBeforeCompute(t *testing.T) {
+	c := New[string, int]()
+	defer c.Close()
+
+	c.SetWithTTL("k", 1, time.Millisecond)
+	time.Sleep(10 * time.Millisecond)
+
+	c.misses.Add(1)
+	got, err := c.computeDirect(context.Background(), "k", func(context.Context) (int, error) {
+		return 2, nil
+	}, 0)
+	require.NoError(t, err)
+	assert.Equal(t, 2, got)
+	assert.True(t, c.Has("k"))
+}
+
+func TestComputeSingle_PeekPromoteHit(t *testing.T) {
+	c := New[string, int]()
+	defer c.Close()
+
+	c.Set("k", 42)
+	c.misses.Store(0)
+
+	v, err := c.computeSingle(context.Background(), "k", func(context.Context) (int, error) {
+		t.Fatal("compute must not run")
+		return 0, nil
+	}, 0)
+	require.NoError(t, err)
+	assert.Equal(t, 42, v)
+	assert.Equal(t, uint64(0), c.Stats().Misses)
+}
+
 func TestComputeDirect_FirstCheckHit(t *testing.T) {
 	c := New[string, int]()
 	defer c.Close()
 	c.Set("k", 42)
+	c.misses.Add(1)
 
 	got, err := c.computeDirect(context.Background(), "k", func(context.Context) (int, error) {
 		t.Fatal("compute must not run")
@@ -307,6 +340,9 @@ func TestComputeDirect_FirstCheckHit(t *testing.T) {
 	}, 0)
 	require.NoError(t, err)
 	assert.Equal(t, 42, got)
+	s := c.Stats()
+	assert.Equal(t, uint64(1), s.Hits)
+	assert.Equal(t, uint64(0), s.Misses)
 }
 
 func TestComputeDirect_PostComputeCancel(t *testing.T) {
@@ -376,15 +412,14 @@ func TestGetOrCompute_Singleflight_CloseDuringComputeReturnsErrClosed(t *testing
 	assert.Equal(t, 0, c.Stats().Size)
 }
 
-func TestGetOrCompute_PanicRecovered(t *testing.T) {
+func TestGetOrCompute_PanicReturnsPanicError(t *testing.T) {
 	c := New[string, int]()
 	defer c.Close()
 
-	v, err := c.GetOrCompute(context.Background(), "k", func(context.Context) (int, error) {
+	_, err := c.GetOrCompute(context.Background(), "k", func(context.Context) (int, error) {
 		panic("compute boom")
 	})
-	require.NoError(t, err)
-	assert.Equal(t, 0, v)
-	_, ok := c.Get("k")
-	assert.True(t, ok)
+	require.Error(t, err)
+	testx.RequirePanicError(t, err, opGetOrCompute)
+	assert.False(t, c.Has("k"))
 }
