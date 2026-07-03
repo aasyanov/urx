@@ -14,7 +14,7 @@ go get github.com/aasyanov/urx
 Requires **Go 1.24+** (generics). Import paths: `github.com/aasyanov/urx/<pkg>`.
 
 > [!IMPORTANT]
-> URX is a **greenfield** module (2.0). It optimizes for correctness and consistent conventions, not backward compatibility. There are no deprecated shims and no migration guides from 1.x. See [CHANGELOG.md](CHANGELOG.md) for the 2.0 breaking changes.
+> URX is a **greenfield** rewrite (1.4.0). It optimizes for correctness and consistent conventions, not backward compatibility with ≤1.3.0. There are no deprecated shims and no migration guides. See [CHANGELOG.md](CHANGELOG.md) for the breaking changes.
 
 ---
 
@@ -49,7 +49,7 @@ URX extracts these patterns into **single-purpose packages** with **shared conve
 | A logging or metrics SDK | `log/slog`, OpenTelemetry, Prometheus client |
 | A unified error taxonomy across packages | Per-package sentinels; wrap at your service boundary if you need one model |
 | A mega-wrapper that configures everything | Explicit nesting of the packages you need |
-| Backward-compatible with URX 1.x | Treat 2.0 as a new module; see [CHANGELOG.md](CHANGELOG.md) |
+| Backward-compatible with URX ≤1.3.0 | Treat 1.4.0 as a new library surface; see [CHANGELOG.md](CHANGELOG.md) |
 
 ---
 
@@ -411,7 +411,7 @@ Each package README documents its allocation floor and bottleneck in a **Benchma
 - **Sentinel errors** per package in `errors.go` — prefixed with the package name (`retryx: …`), documented with when they are returned, comparable via `errors.Is`; wrapping with `%w` stays in unexported helpers.
 - **Wrapping** with `%w` happens in unexported helpers; public API returns sentinels testable via `errors.Is`.
 - **Panics in callbacks** become `*panix.PanicError` (`errors.As`); they do not crash the process on resilience paths.
-- **No shared `errx` type** in 2.0 — map to your service error model at the boundary if needed.
+- **No shared `errx` type** since 1.4.0 — map to your service error model at the boundary if needed.
 
 ---
 
@@ -428,7 +428,7 @@ URX uses a **gate pipeline** — sequential quality gates, each including checks
 | 4 | + GoDoc + README complete |
 | 5 | + fuzz, coverage ≥95%, CI green |
 
-**Repository quality bar (2.0 release):**
+**Repository quality bar (1.4.0 release):**
 
 | Metric | Value |
 | ------ | ----- |
@@ -460,8 +460,8 @@ Contributing workflow: bring one package to Gate 5 per focused change — audit,
 
 ## Versioning
 
-- **2.0.0** — greenfield rewrite: flat imports, sentinel errors, expanded controllers, removed 1.x packages (`errx`, `dicx`, `logx`, …). Details in [CHANGELOG.md](CHANGELOG.md).
-- SemVer applies from 2.0 onward; pre-1.0 compatibility promises do not extend into 2.x unless explicitly documented.
+- **1.4.0** — greenfield rewrite: flat imports, sentinel errors, expanded controllers, removed packages from ≤1.3.0 (`errx`, `dicx`, `logx`, …). Details in [CHANGELOG.md](CHANGELOG.md).
+- Pin a version in `go.mod`. Releases through 1.3.0 are a different library surface; upgrading to 1.4.0+ requires code changes.
 
 ---
 

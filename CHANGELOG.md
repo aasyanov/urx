@@ -7,9 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [2.0.0] — 2026-07-03
+## [1.4.0] — 2026-07-03
 
-Complete greenfield rewrite. **There is no migration path from 1.x** — no deprecated shims, no compatibility layer, no migration guide. Treat 2.0 as a new library that reuses familiar package names.
+Complete greenfield rewrite. **There is no migration path from ≤1.3.0** — no deprecated shims, no compatibility layer, no migration guide. Treat 1.4.0 as a new library that reuses familiar package names and the same module path (`github.com/aasyanov/urx`).
 
 ### Identity
 
@@ -31,7 +31,7 @@ Complete greenfield rewrite. **There is no migration path from 1.x** — no depr
 
 ### Breaking — API conventions
 
-- **All execution callbacks receive `context.Context` as the first argument** — e.g. `func(ctx context.Context, rc RetryController) (T, error)`. In 1.x several packages omitted `ctx` from the callback signature.
+- **All execution callbacks receive `context.Context` as the first argument** — e.g. `func(ctx context.Context, rc RetryController) (T, error)`. In ≤1.3.0 several packages omitted `ctx` from the callback signature.
 - **Standardized entry points** across resilience packages: `Execute` / `TryExecute`, functional `WithXxx` options on private `config` structs, lifecycle (`Close`, `IsClosed`, `Stats`, `ResetStats`) where applicable.
 - **Execution controllers expanded to eleven packages** — callbacks receive a controller interface to read state and influence wrapper behavior (`SkipFailure`, `Abort`, `SkipToken`, `SkipSample`, `Shed`, `Cancel`, `Reject`, …). See the controller table in [README.md](README.md).
 - **`TryExecute` semantics unified:** when work is rejected without running the callback, returns `(false, zero, nil)` unless a sentinel error applies (`ErrOpen`, `ErrClosed`, `ErrCancelled`, …).
@@ -39,7 +39,7 @@ Complete greenfield rewrite. **There is no migration path from 1.x** — no depr
 
 ### Removed packages
 
-These packages from 1.x are **gone**, not relocated:
+These packages from ≤1.3.0 are **gone**, not relocated:
 
 | Package | Was |
 | ------- | --- |
@@ -97,7 +97,7 @@ Notable behavioural themes:
 
 Requires **Go 1.24+** (CI runs on Go 1.26).
 
-### Quality (2.0.0 release bar)
+### Quality (1.4.0 release bar)
 
 | Metric | Value |
 | ------ | ----- |
@@ -112,13 +112,13 @@ Requires **Go 1.24+** (CI runs on Go 1.26).
 
 - Root [README.md](README.md) rewritten: problem statement, design principles, controller pattern, package index, “when to use / when not”.
 - Every package ships a standalone README with API tables, benchmark analysis, and quality metrics.
-- Explicit policy: **greenfield project — APIs may change freely; no backward-compatibility promise within 2.x unless stated otherwise.**
+- Explicit policy: **greenfield project — APIs may change freely; no backward-compatibility promise unless stated otherwise.**
 
 ---
 
 ## [1.3.0] — 2026-03-13
 
-> **Historical note:** 1.x used `pkg/` import paths, the `errx` error model, and the *Unified Resilience eXtensions* scope (31 packages). Superseded entirely by **2.0.0**.
+> **Historical note:** releases through 1.3.0 used `pkg/` import paths, the `errx` error model, and the *Unified Resilience eXtensions* scope (31 packages). Superseded entirely by **1.4.0**.
 
 ### Changed (errx)
 
@@ -177,7 +177,7 @@ Requires **Go 1.24+** (CI runs on Go 1.26).
 
 ## [1.2.0] — 2026-03-13
 
-> **Historical note:** superseded by **2.0.0**.
+> **Historical note:** superseded by **1.4.0**.
 
 ### Changed (envx)
 
@@ -226,7 +226,7 @@ Requires **Go 1.24+** (CI runs on Go 1.26).
 
 ## [1.1.0] — 2026-03-13
 
-> **Historical note:** superseded by **2.0.0**.
+> **Historical note:** superseded by **1.4.0**.
 
 ### Changed (clix)
 
@@ -255,7 +255,7 @@ Requires **Go 1.24+** (CI runs on Go 1.26).
 
 ## [1.0.0] — 2026-02-24
 
-> **Historical note:** superseded by **2.0.0**. Initial release under the name *Unified Resilience eXtensions*.
+> **Historical note:** superseded by **1.4.0**. Initial release under the name *Unified Resilience eXtensions*.
 
 Initial public release.
 
@@ -281,7 +281,7 @@ Initial public release.
 - `gopkg.in/yaml.v3`
 - `github.com/BurntSushi/toml`
 
-[2.0.0]: https://github.com/aasyanov/urx/compare/v1.3.0...v2.0.0
+[1.4.0]: https://github.com/aasyanov/urx/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/aasyanov/urx/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/aasyanov/urx/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/aasyanov/urx/compare/v1.0.0...v1.1.0
