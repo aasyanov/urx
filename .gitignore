@@ -6,6 +6,7 @@
 *.dylib
 
 # Test artifacts
+testdata/
 *.test
 *.out
 *.prof

@@ -7,7 +7,118 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.0] — 2026-07-03
+
+Complete greenfield rewrite. **There is no migration path from 1.x** — no deprecated shims, no compatibility layer, no migration guide. Treat 2.0 as a new library that reuses familiar package names.
+
+### Identity
+
+- **Renamed:** *Unified Resilience eXtensions* → **Unified Runtime eXtensions**.
+- **Re-scoped:** from a broad “31-package toolkit” (resilience + DI + logging + i18n + crypto + …) to **20 focused runtime primitives** that compose through `context.Context`, plain interfaces, and package-level generics — no framework runtime, no central dependency, no code generation.
+
+### Breaking — module layout
+
+- **Import paths changed:** `github.com/aasyanov/urx/pkg/<name>` → `github.com/aasyanov/urx/<name>`.
+- **Flat module tree:** packages live at the repository root (`retryx/`, `circuitx/`, …), not under `pkg/`.
+- **Public surface reduced:** `testx` is no longer importable; test helpers moved to `internal/testx`.
+
+### Breaking — error model
+
+- **Removed `errx` entirely.** There is no shared structured error type, no Domain/Code/Severity/RetryClass, no `errx.NewMulti()`.
+- **Per-package sentinel errors** via `errors.New`, comparable with `==` and `errors.Is`. Context causes are joined with `fmt.Errorf("%w: %w", …)` where useful.
+- **Panic recovery** produces `*panix.PanicError` (inspect with `errors.As`), not `*errx.Error`.
+- **`retryx` retry policy:** retryability is driven by `WithRetryIf` when supplied; otherwise every error is retryable until the attempt budget is exhausted (no automatic `errx.Error.Retryable` lookup).
+
+### Breaking — API conventions
+
+- **All execution callbacks receive `context.Context` as the first argument** — e.g. `func(ctx context.Context, rc RetryController) (T, error)`. In 1.x several packages omitted `ctx` from the callback signature.
+- **Standardized entry points** across resilience packages: `Execute` / `TryExecute`, functional `WithXxx` options on private `config` structs, lifecycle (`Close`, `IsClosed`, `Stats`, `ResetStats`) where applicable.
+- **Execution controllers expanded to eleven packages** — callbacks receive a controller interface to read state and influence wrapper behavior (`SkipFailure`, `Abort`, `SkipToken`, `SkipSample`, `Shed`, `Cancel`, `Reject`, …). See the controller table in [README.md](README.md).
+- **`TryExecute` semantics unified:** when work is rejected without running the callback, returns `(false, zero, nil)` unless a sentinel error applies (`ErrOpen`, `ErrClosed`, `ErrCancelled`, …).
+- **Non-blocking probes:** `Allow()` (and related read-only checks) added or standardized on limiters and shedders — 0-allocation hot paths for edge admission decisions.
+
+### Removed packages
+
+These packages from 1.x are **gone**, not relocated:
+
+| Package | Was |
+| ------- | --- |
+| `errx` | Structured application error model |
+| `dicx` | Reflection-free DI container |
+| `busx` | In-process event bus |
+| `logx` | Structured logging wrapper |
+| `cronx` | Cron scheduler |
+| `ctxx` | Context helper utilities |
+| `env2x` | Alternate env binding API |
+| `hashx` | Password hashing (Argon2/bcrypt) |
+| `i18n` | Dictionary-based localization |
+| `validx` | Struct validation helpers |
+| `testx` | Public test helpers (now `internal/testx`) |
+
+Also removed: `examples/` (six runnable demos), `llm.md`, `CONTRIBUTING.md`.
+
+### Added
+
+- **`quality.ps1` / `quality.sh`** — single local quality run: `go vet`, `golangci-lint`, race+coverage tests, benchmarks, fuzz smoke.
+- **Root [README.md](README.md)** — module overview: composition model, configuration boot/runtime modes, usage scenarios, quality bar.
+- **Fuzz targets** across resilience and config packages (52 `Fuzz*` functions).
+- **`footprint_test.go`** in every package — struct size guards via `internal/testx.AssertFootprint`.
+- **`Allow()` fast paths** on adaptive/bulkhead/warmup limiters for allocation-free admission hints.
+- **`WithOp`** on resilience packages — custom operation names in panic reports.
+
+### Changed — kept packages (rewritten)
+
+All twenty public packages were reimplemented on the conventions above. Highlights:
+
+| Area | Packages |
+| ---- | -------- |
+| **Resilience** | `retryx`, `circuitx`, `bulkx`, `shedx`, `adaptx`, `hedgex`, `toutx`, `fallx`, `ratex`, `quotax`, `warmupx` |
+| **Infrastructure** | `panix`, `signalx`, `healthx`, `syncx`, `poolx` |
+| **Configuration** | `cfgx`, `envx`, `clix` |
+| **Data** | `lrux` |
+
+Notable behavioural themes:
+
+- **Allocation-conscious hot paths** — `Allow`, open-circuit rejects, cache hits, and object-pool get/put benchmark at 0 allocs/op; `Execute` admit paths typically 1 alloc (controller escape).
+- **`adaptx`** — AIMD, Vegas, and Gradient adaptive limiters with `SkipSample`, permit reconciliation, and `CloseWithTimeout` drain.
+- **`lrux`** — generic LRU with TTL, sharded variant, `GetOrCompute` + singleflight, intrusive list (one node alloc per entry).
+- **`fallx`** — static, func, and sharded cached fallback strategies with `FallController`.
+- **`quotax`** — per-key token buckets with shard partitioning and key eviction.
+- **`warmupx`** — slow-start capacity ramp (linear / exponential / step) with probabilistic admission during warmup.
+- **`cfgx` / `envx` / `clix`** — file/env/CLI config without reflection in env binding; cfgx supports YAML, JSON, TOML with injectable readers/writers.
+- **`syncx`** — generic `Lazy[T]`, bounded `Group`, typed `Map` with O(1) `Len`.
+- **`poolx`** — worker pool, object pool, batch collector with lifecycle-aware flush.
+
+### Dependencies
+
+- **Removed:** `golang.org/x/crypto` (was required by `hashx`).
+- **Runtime:** stdlib + `golang.org/x/sync` (singleflight in `lrux`) + `gopkg.in/yaml.v3` + `github.com/BurntSushi/toml`.
+- **Test/dev:** `github.com/stretchr/testify`.
+
+Requires **Go 1.24+** (CI runs on Go 1.26).
+
+### Quality (2.0.0 release bar)
+
+| Metric | Value |
+| ------ | ----- |
+| Public packages | 20 |
+| Test functions | ~1110 |
+| Benchmarks | ~160 |
+| Fuzz targets | 52 |
+| Statement coverage | **98.6%** (race detector on all tests) |
+| `golangci-lint` | 0 issues |
+
+### Documentation
+
+- Root [README.md](README.md) rewritten: problem statement, design principles, controller pattern, package index, “when to use / when not”.
+- Every package ships a standalone README with API tables, benchmark analysis, and quality metrics.
+- Explicit policy: **greenfield project — APIs may change freely; no backward-compatibility promise within 2.x unless stated otherwise.**
+
+---
+
 ## [1.3.0] — 2026-03-13
+
+> **Historical note:** 1.x used `pkg/` import paths, the `errx` error model, and the *Unified Resilience eXtensions* scope (31 packages). Superseded entirely by **2.0.0**.
 
 ### Changed (errx)
 
@@ -66,6 +177,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.2.0] — 2026-03-13
 
+> **Historical note:** superseded by **2.0.0**.
+
 ### Changed (envx)
 
 - **Breaking:** `WithLookup` signature changed from `func(string) string` to `func(string) (string, bool)`. Default is now `os.LookupEnv` instead of `os.Getenv`. This correctly distinguishes "variable not set" from "variable set to empty string".
@@ -113,6 +226,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.1.0] — 2026-03-13
 
+> **Historical note:** superseded by **2.0.0**.
+
 ### Changed (clix)
 
 - **Parse / Run separation** — `New` no longer executes the matched action. Call `p.Run()` explicitly. This allows callers to inspect parse results, add middleware, or skip execution in tests. **Breaking change.**
@@ -140,6 +255,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.0.0] — 2026-02-24
 
+> **Historical note:** superseded by **2.0.0**. Initial release under the name *Unified Resilience eXtensions*.
+
 Initial public release.
 
 ### Added
@@ -163,3 +280,9 @@ Initial public release.
 - `golang.org/x/crypto`
 - `gopkg.in/yaml.v3`
 - `github.com/BurntSushi/toml`
+
+[2.0.0]: https://github.com/aasyanov/urx/compare/v1.3.0...v2.0.0
+[1.3.0]: https://github.com/aasyanov/urx/compare/v1.2.0...v1.3.0
+[1.2.0]: https://github.com/aasyanov/urx/compare/v1.1.0...v1.2.0
+[1.1.0]: https://github.com/aasyanov/urx/compare/v1.0.0...v1.1.0
+[1.0.0]: https://github.com/aasyanov/urx/releases/tag/v1.0.0

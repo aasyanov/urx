@@ -105,10 +105,14 @@ func FuzzExecuteMulti(f *testing.F) {
 	f.Add(3, int64(time.Millisecond), int64(time.Second), true, byte(0))
 	f.Add(2, int64(0), int64(0), false, byte(1))
 	f.Add(4, int64(time.Microsecond), int64(time.Millisecond), true, byte(2))
+	f.Add(0, int64(-1), int64(-1), true, byte(1))
 
 	f.Fuzz(func(t *testing.T, parallel int, delayNs, maxDelayNs int64, succeed bool, nilPattern byte) {
 		if parallel > 8 {
 			parallel = 8
+		}
+		if parallel < 1 {
+			parallel = 1
 		}
 		delay := time.Duration(delayNs % int64(5*time.Millisecond))
 		maxDelay := time.Duration(maxDelayNs % int64(10*time.Millisecond))
