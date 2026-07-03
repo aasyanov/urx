@@ -50,9 +50,9 @@ The fix is *slow start*: accept a small fraction of traffic immediately, then in
 │  service code: post-deploy rollout, cold-start instances │
 └────────────────────────┬─────────────────────────────────┘
                          │
-┌────────────────────────▼─────────────────────────────────────────────────┐
-│  warmupx  Warmer · Allow · Execute[T]/TryExecute[T] · WarmupController   │
-└──────────────┬────────────────────────┬──────────────────────────────────┘
+┌────────────────────────▼───────────────────────────────────────────────┐
+│  warmupx  Warmer · Allow · Execute[T]/TryExecute[T] · WarmupController │
+└──────────────┬────────────────────────┬────────────────────────────────┘
                │                        │
 ┌──────────────▼─────────┐   ┌──────────▼───────────────────┐
 │  panix.Safe            │   │  sync/atomic · time.Ticker   │
@@ -369,34 +369,46 @@ Three environments, two hardware classes, two operating systems. All values are 
 
 ### Environments
 
-| | Laptop | CI Server (Linux) | CI Server (Windows) |
-|---|---|---|---|
-| CPU | Intel Core i7-10510U, 4C/8T | AMD EPYC 7763, 4 vCPU | AMD EPYC 9V74, 4 vCPU |
-| TDP | 15W (mobile, throttles) | 280W (server, stable) | server, stable |
-| OS | Windows 10 | Ubuntu | Windows Server 2022 |
-| Go | 1.26.2 | 1.26 | 1.26 |
-| GOMAXPROCS | 8 | 4 | 4 |
-| Runs | 3 (`-count=3`) | 3 (`-count=3`) | 3 (`-count=3`) |
+
+|            | Laptop                      | CI Server (Linux)     | CI Server (Windows)   |
+| ---------- | --------------------------- | --------------------- | --------------------- |
+| CPU        | Intel Core i7-10510U, 4C/8T | AMD EPYC 7763, 4 vCPU | AMD EPYC 9V74, 4 vCPU |
+| TDP        | 15W (mobile, throttles)     | 280W (server, stable) | server, stable        |
+| OS         | Windows 10                  | Ubuntu                | Windows Server 2022   |
+| Go         | 1.26.2                      | 1.26                  | 1.26                  |
+| GOMAXPROCS | 8                           | 4                     | 4                     |
+| Runs       | 3 (`-count=3`)              | 3 (`-count=3`)        | 3 (`-count=3`)        |
+
+
+
 
 ### Admission / Query
 
-| Benchmark | What it measures | Laptop | Linux | Windows | B/op | allocs/op |
-|---|---|---|---|---|---|---|
-| Warmer_Allow | Probabilistic admit check | 24.7 ns | **17.6 ns** | 18.8 ns | 0 | 0 |
-| Warmer_Allow_Parallel | Allow, 8/4 goroutines | 47.9 ns | 43.7 ns | **36.7 ns** | 0 | 0 |
-| Warmer_Capacity | Current capacity snapshot | 14.3 ns | **5.5 ns** | 5.7 ns | 0 | 0 |
-| Warmer_MaxRequests | Ramp budget query | 17.1 ns | **7.3 ns** | 7.9 ns | 0 | 0 |
-| Warmer_Stats | Full stats snapshot | 35.8 ns | 89.7 ns | **34.1 ns** | 0 | 0 |
+
+| Benchmark             | What it measures          | Laptop  | Linux       | Windows     | B/op | allocs/op |
+| --------------------- | ------------------------- | ------- | ----------- | ----------- | ---- | --------- |
+| Warmer_Allow          | Probabilistic admit check | 24.7 ns | **17.6 ns** | 18.8 ns     | 0    | 0         |
+| Warmer_Allow_Parallel | Allow, 8/4 goroutines     | 47.9 ns | 43.7 ns     | **36.7 ns** | 0    | 0         |
+| Warmer_Capacity       | Current capacity snapshot | 14.3 ns | **5.5 ns**  | 5.7 ns      | 0    | 0         |
+| Warmer_MaxRequests    | Ramp budget query         | 17.1 ns | **7.3 ns**  | 7.9 ns      | 0    | 0         |
+| Warmer_Stats          | Full stats snapshot       | 35.8 ns | 89.7 ns     | **34.1 ns** | 0    | 0         |
+
+
+
 
 ### Execute Path
 
-| Benchmark | What it measures | Laptop | Linux | Windows | B/op | allocs/op |
-|---|---|---|---|---|---|---|
-| Execute | Admit + callback | 60.2 ns | **49.5 ns** | 54.2 ns | 24 | 1 |
-| Execute_Parallel | Execute, parallel | 63.5 ns | **49.1 ns** | 55.2 ns | 24 | 1 |
-| TryExecute | Non-blocking execute | 61.5 ns | **50.0 ns** | 58.4 ns | 24 | 1 |
-| TryExecute_Parallel | TryExecute, parallel | 64.9 ns | **48.6 ns** | 53.9 ns | 24 | 1 |
-| TryExecute_Reject | Zero capacity reject | 28.3 ns | **15.9 ns** | 16.7 ns | 0 | 0 |
+
+| Benchmark           | What it measures     | Laptop  | Linux       | Windows | B/op | allocs/op |
+| ------------------- | -------------------- | ------- | ----------- | ------- | ---- | --------- |
+| Execute             | Admit + callback     | 60.2 ns | **49.5 ns** | 54.2 ns | 24   | 1         |
+| Execute_Parallel    | Execute, parallel    | 63.5 ns | **49.1 ns** | 55.2 ns | 24   | 1         |
+| TryExecute          | Non-blocking execute | 61.5 ns | **50.0 ns** | 58.4 ns | 24   | 1         |
+| TryExecute_Parallel | TryExecute, parallel | 64.9 ns | **48.6 ns** | 53.9 ns | 24   | 1         |
+| TryExecute_Reject   | Zero capacity reject | 28.3 ns | **15.9 ns** | 16.7 ns | 0    | 0         |
+
+
+
 
 ### Analysis
 
@@ -411,8 +423,6 @@ Three environments, two hardware classes, two operating systems. All values are 
 **Warmer_Stats spread on Linux CI (90 ns vs ~34 ns elsewhere).** Linux takes the full stats snapshot under read lock with more field copies on the EPYC 7763 runner; Windows and laptop cluster at ~35 ns. All platforms remain 0 alloc — safe for periodic scraping.
 
 **Linux slightly wins serial execute.** ~49–50 ns (Linux) vs ~54–58 ns (Windows) — atomic admit + callback dispatch with no timer or channel; difference is CPU micro-architecture, not OS I/O.
-
-
 
 ## Quality
 

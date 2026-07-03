@@ -13,6 +13,8 @@ go get github.com/aasyanov/urx
 > [!IMPORTANT]
 > **signalx** is a shutdown sequencer, not a process supervisor.** It trades the signal into a cancelled `context.Context` and then runs your teardown hooks once, in order, under a deadline. It does **not** restart your process, daemonize it, manage child processes, or re-deliver signals. Trap the signal with [`Trap`], run resources off the returned context, and drain them with [`Wait`].
 
+
+
 ## The Problem
 
 A production HTTP service holds open connections, in-flight requests, a database pool, a message-broker consumer, and background workers. When the orchestrator sends `SIGTERM` (Kubernetes pod eviction, `systemctl stop`, Ctrl-C in development), the process has a short grace window — typically 10–30 seconds — to stop accepting work, drain what is in flight, flush buffers, and close connections cleanly before it is `SIGKILL`ed.
@@ -27,6 +29,8 @@ Done by hand, every service re-implements the same fragile boilerplate: a `signa
 4. **Panic isolation** — a panicking hook is recovered and reported; remaining hooks still run.
 5. **No leaks** — the watcher goroutine exits and `signal.Stop` is called when the context is cancelled.
 
+
+
 ## Architectural Position
 
 ```text
@@ -40,6 +44,8 @@ Done by hand, every service re-implements the same fragile boilerplate: a `signa
 ❌ NOT a signal multiplexer (one cancellation, not per-signal dispatch)
 ```
 
+
+
 ### Position in the urx Stack
 
 ```text
@@ -49,7 +55,7 @@ Done by hand, every service re-implements the same fragile boilerplate: a `signa
                          │ Trap → cancelled ctx
 ┌────────────────────────▼─────────────────────────────────┐
 │  signalx  Trap · Wait · OnShutdown                       │
-└──────────────┬───────────────────────┬───────────────────┘
+└──────────────┬────────────────────────┬──────────────────┘
                │                        │
 ┌──────────────▼─────────┐   ┌──────────▼───────────────────┐
 │  panix.SafeVoid        │   │  os/signal · context         │
@@ -87,7 +93,11 @@ Done by hand, every service re-implements the same fragile boilerplate: a `signa
         errors.Join(...)  → nil | ErrShutdownTimeout | ErrHookPanic
 ```
 
+
+
 ## How It Works
+
+
 
 ### Trap: signal → cancellation
 
@@ -145,6 +155,8 @@ The deadline is checked **before each hook** and **once more after the loop**, s
 | `OnShutdown`/`ResetHooks` are concurrency-safe | The global registry is mutex-protected                                                 |
 
 
+
+
 ## Quick Start
 
 ```go
@@ -180,7 +192,11 @@ func main() {
 }
 ```
 
+
+
 ## Usage Scenarios
+
+
 
 ### Multi-resource drain with a custom budget
 
@@ -203,6 +219,8 @@ if err != nil {
 }
 ```
 
+
+
 ### Decentralized hook registration
 
 Subsystems register their own teardown at construction time; `main` never needs to know about them:
@@ -220,6 +238,8 @@ defer cancel()
 signalx.Wait(ctx) // global hooks run automatically, in registration order
 ```
 
+
+
 ### Custom signal set
 
 React only to `SIGHUP` (e.g. for a reload-as-restart strategy) alongside the defaults:
@@ -229,6 +249,8 @@ ctx, cancel := signalx.Trap(context.Background(), syscall.SIGINT, syscall.SIGTER
 defer cancel()
 signalx.Wait(ctx, drainFn)
 ```
+
+
 
 ### Composing with other cancellation
 
@@ -248,20 +270,24 @@ go func() {
 signalx.Wait(ctx, drainFn)
 ```
 
+
+
 ## API
 
 
-| Symbol               | Signature                                                                                       | Description                                                                          |
-| -------------------- | ----------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
+| Symbol               | Signature                                                                                       | Description                                                                                                                |
+| -------------------- | ----------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
 | `Trap`               | `func Trap(parent context.Context, signals ...os.Signal) (context.Context, context.CancelFunc)` | Derive a context cancelled when one of `signals` arrives (default `SIGINT, SIGTERM`; panics if any explicit signal is nil) |
-| `Wait`               | `func Wait(ctx context.Context, hooks ...func(ctx context.Context)) error`                      | Block on `ctx`, then run global + per-call hooks under the default 15s timeout       |
-| `WaitWith`           | `func WaitWith(ctx context.Context, opts []Option, hooks ...func(ctx context.Context)) error`   | Configurable form of `Wait`                                                          |
-| `OnShutdown`         | `func OnShutdown(fn func(ctx context.Context))`                                                 | Register a process-global hook (runs before per-call hooks; panics if fn is nil)     |
-| `ResetHooks`         | `func ResetHooks()`                                                                             | Clear the global hook registry (intended for tests)                                  |
-| `Option`             | `type Option func(*config)`                                                                     | Functional option for `WaitWith`                                                     |
-| `WithTimeout`        | `func WithTimeout(d time.Duration) Option`                                                      | Set the total hook-drain timeout; `≤ 0` disables it                                  |
-| `ErrShutdownTimeout` | `var ErrShutdownTimeout error`                                                                  | Hooks did not finish within the timeout                                              |
-| `ErrHookPanic`       | `var ErrHookPanic error`                                                                        | One or more hooks panicked (joined with `*panix.PanicError`)                         |
+| `Wait`               | `func Wait(ctx context.Context, hooks ...func(ctx context.Context)) error`                      | Block on `ctx`, then run global + per-call hooks under the default 15s timeout                                             |
+| `WaitWith`           | `func WaitWith(ctx context.Context, opts []Option, hooks ...func(ctx context.Context)) error`   | Configurable form of `Wait`                                                                                                |
+| `OnShutdown`         | `func OnShutdown(fn func(ctx context.Context))`                                                 | Register a process-global hook (runs before per-call hooks; panics if fn is nil)                                           |
+| `ResetHooks`         | `func ResetHooks()`                                                                             | Clear the global hook registry (intended for tests)                                                                        |
+| `Option`             | `type Option func(*config)`                                                                     | Functional option for `WaitWith`                                                                                           |
+| `WithTimeout`        | `func WithTimeout(d time.Duration) Option`                                                      | Set the total hook-drain timeout; `≤ 0` disables it                                                                        |
+| `ErrShutdownTimeout` | `var ErrShutdownTimeout error`                                                                  | Hooks did not finish within the timeout                                                                                    |
+| `ErrHookPanic`       | `var ErrHookPanic error`                                                                        | One or more hooks panicked (joined with `*panix.PanicError`)                                                               |
+
+
 
 
 ## Configuration
@@ -272,6 +298,8 @@ signalx.Wait(ctx, drainFn)
 | `WithTimeout(d)` | `15s`   | Total time budget for all hooks. `0` or negative disables the deadline. |
 
 
+
+
 ## Errors
 
 
@@ -280,15 +308,15 @@ signalx.Wait(ctx, drainFn)
 | `ErrShutdownTimeout` | The configured timeout elapsed before every hook completed                          |
 | `ErrHookPanic`       | A shutdown hook panicked; the joined error carries the `*panix.PanicError` cause(s) |
 
-Both may appear in the same returned error when a hook panics and the drain budget is exhausted before later hooks finish. Use `errors.Is` for each sentinel independently.
 
+Both may appear in the same returned error when a hook panics and the drain budget is exhausted before later hooks finish. Use `errors.Is` for each sentinel independently.
 
 Both are sentinel errors created with `errors.New`; compare with `errors.Is`. When a hook panics, `errors.As(err, &pe)` extracts the underlying `*panix.PanicError` with `Op == "signalx.Wait"`.
 
 ## Pitfalls
 
 > [!WARNING]
-> **Hooks do not return errors to `Wait`.** Shutdown hooks are `func(context.Context)` with no return value. Log or record failures inside the hook (`if err := srv.Shutdown(ctx); err != nil { log.Printf(...) }`). Only timeout overruns and recovered panics surface through `Wait`'s return value.
+> **Hooks do not return errors to** `Wait`**.** Shutdown hooks are `func(context.Context)` with no return value. Log or record failures inside the hook (`if err := srv.Shutdown(ctx); err != nil { log.Printf(...) }`). Only timeout overruns and recovered panics surface through `Wait`'s return value.
 
 > [!WARNING]
 > **Nil hooks panic at registration or call time.** `OnShutdown(nil)`, `Wait(ctx, nil)`, and `Trap(ctx, nil signal)` are programmer errors and panic immediately — the same contract as `healthx.Register` with a nil check function.
@@ -311,6 +339,8 @@ Both are sentinel errors created with `errors.New`; compare with `errors.Is`. Wh
 > [!WARNING]
 > **Trap**'s `CancelFunc` must be called.** Even though the watcher goroutine also exits on signal, leaking the cancel func leaks the derived context. Always `defer cancel()`.
 
+
+
 ## Safety and Concurrency
 
 **Thread safety.** `OnShutdown` and `ResetHooks` serialize access to the global registry with a `sync.Mutex`. `Wait`/`WaitWith` snapshot the registry under that lock before running hooks, so concurrent registration during a drain is race-free (a hook registered after the snapshot simply runs on the next `Wait`). All functions pass the `-race` detector.
@@ -325,23 +355,29 @@ Three environments, two hardware classes, two operating systems. All values are 
 
 ### Environments
 
-| | Laptop | CI Server (Linux) | CI Server (Windows) |
-|---|---|---|---|
-| CPU | Intel Core i7-10510U, 4C/8T | AMD EPYC 7763, 4 vCPU | AMD EPYC 9V74, 4 vCPU |
-| TDP | 15W (mobile, throttles) | 280W (server, stable) | server, stable |
-| OS | Windows 10 | Ubuntu | Windows Server 2022 |
-| Go | 1.26 | 1.26 | 1.26 |
-| GOMAXPROCS | 8 | 4 | 4 |
-| Source | `quality.result` | `benchmark-ubuntu-latest.txt` | `benchmark-windows-latest.txt` |
 
-| Benchmark | What it measures | Laptop | Linux | Windows | B/op | allocs/op |
-|---|---|---|---|---|---|---|
-| `RunHook` | Single hook via `panix.SafeVoid` | **13.0 ns** | 14.3 ns | 14.0 ns | 0 | 0 |
-| `OnShutdown` | Global hook registration | **51.7 ns** | 69.5 ns | 55.9 ns | 48 | 0 |
-| `Wait_NoHooks` | Full drain, no hooks | 636.3 ns | **608.7 ns** | 693.8 ns | 376 | 7 |
-| `Wait_SingleHook` | Drain with one hook | 680.6 ns | **651.7 ns** | 786.1 ns | 384 | 8 |
-| `Wait_TenHooks` | Drain with ten hooks | 848.7 ns | **838.4 ns** | 990.0 ns | 456 | 8 |
-| `Wait_SingleHook_Parallel` | Drain, 8/4 goroutines | **417.9 ns** | 484.8 ns | 474.8 ns | 384 | 8 |
+|            | Laptop                      | CI Server (Linux)             | CI Server (Windows)            |
+| ---------- | --------------------------- | ----------------------------- | ------------------------------ |
+| CPU        | Intel Core i7-10510U, 4C/8T | AMD EPYC 7763, 4 vCPU         | AMD EPYC 9V74, 4 vCPU          |
+| TDP        | 15W (mobile, throttles)     | 280W (server, stable)         | server, stable                 |
+| OS         | Windows 10                  | Ubuntu                        | Windows Server 2022            |
+| Go         | 1.26                        | 1.26                          | 1.26                           |
+| GOMAXPROCS | 8                           | 4                             | 4                              |
+| Source     | `quality.result`            | `benchmark-ubuntu-latest.txt` | `benchmark-windows-latest.txt` |
+
+
+
+| Benchmark                  | What it measures                 | Laptop       | Linux        | Windows  | B/op | allocs/op |
+| -------------------------- | -------------------------------- | ------------ | ------------ | -------- | ---- | --------- |
+| `RunHook`                  | Single hook via `panix.SafeVoid` | **13.0 ns**  | 14.3 ns      | 14.0 ns  | 0    | 0         |
+| `OnShutdown`               | Global hook registration         | **51.7 ns**  | 69.5 ns      | 55.9 ns  | 48   | 0         |
+| `Wait_NoHooks`             | Full drain, no hooks             | 636.3 ns     | **608.7 ns** | 693.8 ns | 376  | 7         |
+| `Wait_SingleHook`          | Drain with one hook              | 680.6 ns     | **651.7 ns** | 786.1 ns | 384  | 8         |
+| `Wait_TenHooks`            | Drain with ten hooks             | 848.7 ns     | **838.4 ns** | 990.0 ns | 456  | 8         |
+| `Wait_SingleHook_Parallel` | Drain, 8/4 goroutines            | **417.9 ns** | 484.8 ns     | 474.8 ns | 384  | 8         |
+
+
+
 
 ### Analysis
 
@@ -372,6 +408,8 @@ Three environments, two hardware classes, two operating systems. All values are 
 | External deps         | 0 (urx/panix internally; testify in tests only)                               |
 
 
+
+
 ## File Structure
 
 ```text
@@ -388,6 +426,8 @@ signalx/
 ├── footprint_test.go     # config struct size guard
 └── README.md             # This file
 ```
+
+
 
 ## License
 

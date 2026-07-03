@@ -50,12 +50,12 @@ Hand-rolled health endpoints repeatedly get this wrong: blocking liveness probes
                          │
 ┌────────────────────────▼─────────────────────────────────┐
 │  healthx  Checker · Liveness/Readiness · HTTP handlers   │
-└──────────────┬───────────────────────┬───────────────────┘
+└──────────────┬────────────────────────┬──────────────────┘
                │                        │
-┌──────────────▼─────────┐   ┌──────────▼───────────────────┐
-│  panix.SafeVoid        │   │  context · sync · net/http   │
-│  (panic → down status) │   │  (per-check timeout)         │
-└────────────────────────┘   └──────────────────────────────┘
+┌──────────────▼─────────┐   ┌──────────▼──────────────────┐
+│  panix.SafeVoid        │   │  context · sync · net/http  │
+│  (panic → down status) │   │  (per-check timeout)        │
+└────────────────────────┘   └─────────────────────────────┘
 ```
 
 Each check runs through `[panix](../panix)` so a panicking check is converted to a `StatusDown` component instead of crashing the process serving the probe.
@@ -327,22 +327,28 @@ Three environments, two hardware classes, two operating systems. All values are 
 
 ### Environments
 
-| | Laptop | CI Server (Linux) | CI Server (Windows) |
-|---|---|---|---|
-| CPU | Intel Core i7-10510U, 4C/8T | AMD EPYC 7763, 4 vCPU | AMD EPYC 9V74, 4 vCPU |
-| TDP | 15W (mobile, throttles) | 280W (server, stable) | 280W (server, stable) |
-| OS | Windows 10 (NTFS) | Ubuntu (ext4) | Windows Server 2022 (NTFS) |
-| Go | 1.24 | 1.26 | 1.26 |
-| GOMAXPROCS | 8 | 4 | 4 |
-| Runs | 3 (`-count=3`) | 3 (`-count=3`) | 3 (`-count=3`) |
 
-| Benchmark | What it measures | Laptop | Linux | Windows | B/op | allocs/op |
-|---|---|---|---|---|---|---|
-| Liveness | `atomic.Bool` load + stack Report | 1 ns | **1.6 ns** | 2.0 ns | 0 | 0 |
-| Readiness_NoChecks | Report with zero registered checks | 52 ns | **124 ns** | 44 ns | 4 | 1 |
-| Readiness_OneCheck | One no-op check + full machinery | 3.2 µs | **4.8 µs** | 7.7 µs | 1456 | 16 |
-| Readiness_TenChecks | Ten concurrent no-op checks | 18.8 µs | **36.2 µs** | 28.8 µs | 6321 | 81 |
-| Readiness_Parallel | Four checks, 4 concurrent callers | 2.4 µs | **6.0 µs** | 3.0 µs | 2853 | 37 |
+|            | Laptop                      | CI Server (Linux)     | CI Server (Windows)        |
+| ---------- | --------------------------- | --------------------- | -------------------------- |
+| CPU        | Intel Core i7-10510U, 4C/8T | AMD EPYC 7763, 4 vCPU | AMD EPYC 9V74, 4 vCPU      |
+| TDP        | 15W (mobile, throttles)     | 280W (server, stable) | 280W (server, stable)      |
+| OS         | Windows 10 (NTFS)           | Ubuntu (ext4)         | Windows Server 2022 (NTFS) |
+| Go         | 1.24                        | 1.26                  | 1.26                       |
+| GOMAXPROCS | 8                           | 4                     | 4                          |
+| Runs       | 3 (`-count=3`)              | 3 (`-count=3`)        | 3 (`-count=3`)             |
+
+
+
+| Benchmark           | What it measures                   | Laptop  | Linux       | Windows | B/op | allocs/op |
+| ------------------- | ---------------------------------- | ------- | ----------- | ------- | ---- | --------- |
+| Liveness            | `atomic.Bool` load + stack Report  | 1 ns    | **1.6 ns**  | 2.0 ns  | 0    | 0         |
+| Readiness_NoChecks  | Report with zero registered checks | 52 ns   | **124 ns**  | 44 ns   | 4    | 1         |
+| Readiness_OneCheck  | One no-op check + full machinery   | 3.2 µs  | **4.8 µs**  | 7.7 µs  | 1456 | 16        |
+| Readiness_TenChecks | Ten concurrent no-op checks        | 18.8 µs | **36.2 µs** | 28.8 µs | 6321 | 81        |
+| Readiness_Parallel  | Four checks, 4 concurrent callers  | 2.4 µs  | **6.0 µs**  | 3.0 µs  | 2853 | 37        |
+
+
+
 
 ### Analysis
 
@@ -362,18 +368,19 @@ Three environments, two hardware classes, two operating systems. All values are 
 
 ## Quality
 
-| Metric | Value |
-|---|---|
-| Test functions | 33 |
-| Benchmarks | 5 |
-| Fuzz targets | 3 (all pass, 30s each) |
-| Examples | 2 |
-| Coverage | 100.0% |
-| Race detector | All tests pass with `-race` |
-| Linter | 0 issues (`golangci-lint`) |
-| CI matrix | 6 configurations (2 OS × 3 Go versions) |
-| Go version | 1.24+ |
-| External deps | 0 (urx/panix internally; testify in tests only) |
+
+| Metric         | Value                                           |
+| -------------- | ----------------------------------------------- |
+| Test functions | 33                                              |
+| Benchmarks     | 5                                               |
+| Fuzz targets   | 3 (all pass, 30s each)                          |
+| Examples       | 2                                               |
+| Coverage       | 100.0%                                          |
+| Race detector  | All tests pass with `-race`                     |
+| Linter         | 0 issues (`golangci-lint`)                      |
+| CI matrix      | 6 configurations (2 OS × 3 Go versions)         |
+| Go version     | 1.24+                                           |
+| External deps  | 0 (urx/panix internally; testify in tests only) |
 
 
 

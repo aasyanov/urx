@@ -13,6 +13,8 @@ go get github.com/aasyanov/urx
 > [!IMPORTANT]
 > `clix` separates parsing from execution. [`New`] builds the command tree and parses arguments synchronously, but it does **not** run the matched action. You call [`Parser.Run`] yourself after inspecting [`Parser.Err`]. This is deliberate: it lets you check parse errors, print help, add middleware, or skip execution entirely in tests.
 
+
+
 ## The Problem
 
 CLI tools accrete flags and subcommands over time. A tool that starts as `mytool --verbose input.txt` grows into `mytool serve --port 8080 --no-color` with a dozen flags split across commands. Hand-rolled parsers handle this badly:
@@ -45,13 +47,15 @@ It occupies the niche of "Cobra-style command tree with generics and zero depend
                          │
 ┌────────────────────────▼─────────────────────────────────┐
 │  clix   Parser · Command tree · generic flag binding     │
-└──────────────┬───────────────────────┬───────────────────┘
+└──────────────┬────────────────────────┬──────────────────┘
                │                        │
-┌──────────────▼─────────┐   ┌──────────▼───────────────────┐
-│  cfgx (file defaults)  │   │  envx (env overrides)        │
-│  shared struct fields  │   │  shared struct fields        │
-└────────────────────────┘   └──────────────────────────────┘
+┌──────────────▼─────────┐   ┌──────────▼──────────────────┐
+│  cfgx (file defaults)  │   │  envx (env overrides)       │
+│  shared struct fields  │   │  shared struct fields       │
+└────────────────────────┘   └─────────────────────────────┘
 ```
+
+
 
 ## Architecture
 
@@ -86,6 +90,8 @@ It occupies the niche of "Cobra-style command tree with generics and zero depend
        └── migrate ── flags: --steps
 ```
 
+
+
 ## How It Works
 
 Parsing is a single left-to-right pass over the argument slice:
@@ -103,14 +109,16 @@ Each flag carries a generic setter captured at [`AddFlag`] time. The setter pars
 ## Normative Contracts
 
 
-| Invariant              | Guarantee                                                                                                |
-| ---------------------- | -------------------------------------------------------------------------------------------------------- |
-| Parse ≠ Run            | [`New`] never executes an action; only [`Parser.Run`] does.                                              |
-| Run after error        | [`Parser.Run`] returns nil (no-op) when [`Parser.Err`] is non-nil.                                       |
-| IsSet semantics        | True only when the flag appeared on the command line, even for zero values.                              |
-| Reset idempotence      | [`Parser.Reset`] restores bound targets to defaults and clears positionals before re-parsing.            |
+| Invariant              | Guarantee                                                                                                                      |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| Parse ≠ Run            | [`New`] never executes an action; only [`Parser.Run`] does.                                                                    |
+| Run after error        | [`Parser.Run`] returns nil (no-op) when [`Parser.Err`] is non-nil.                                                             |
+| IsSet semantics        | True only when the flag appeared on the command line, even for zero values.                                                    |
+| Reset idempotence      | [`Parser.Reset`] restores bound targets to defaults and clears positionals before re-parsing.                                  |
 | Fail-fast construction | Misconfiguration (empty names, duplicates, shadow flags, bad types, enum mismatch) panics inside [`New`], never at parse time. |
-| Structured errors      | Every parse error wraps a sentinel; compare with [`errors.Is`].                                          |
+| Structured errors      | Every parse error wraps a sentinel; compare with [`errors.Is`].                                                                |
+
+
 
 
 ## Quick Start
@@ -161,7 +169,11 @@ func main() {
 }
 ```
 
+
+
 ## Usage Scenarios
+
+
 
 ### Required flag with enum validation
 
@@ -179,6 +191,8 @@ if errors.Is(p.Err(), clix.ErrEnumViolated) {
 }
 ```
 
+
+
 ### Global flag inherited by subcommands
 
 ```go
@@ -191,6 +205,8 @@ p := clix.New(os.Args[1:], "app", "my app",
 // "app serve --verbose" and "app migrate --verbose" both work —
 // verbose is resolved from the root command.
 ```
+
+
 
 ### Distinguishing an explicit zero from a default
 
@@ -206,6 +222,8 @@ if p.IsSet("replicas") {
 }
 ```
 
+
+
 ### Re-parsing in table-driven tests
 
 ```go
@@ -219,34 +237,38 @@ for _, tc := range cases {
 }
 ```
 
+
+
 ## API
 
 
-| Symbol                | Signature                                                                                              | Description                                                  |
-| --------------------- | ------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------ |
-| `New`                 | `New(osArgs []string, name, desc string, opts ...Option) *Parser`                                      | Build the command tree and parse arguments.                  |
+| Symbol                | Signature                                                                                         | Description                                                  |
+| --------------------- | ------------------------------------------------------------------------------------------------- | ------------------------------------------------------------ |
+| `New`                 | `New(osArgs []string, name, desc string, opts ...Option) *Parser`                                 | Build the command tree and parse arguments.                  |
 | `AddFlag`             | `AddFlag[T any](target *T, name, short string, def T, usage string, extras ...FlagOption) Option` | Register a typed flag bound to a pointer.                    |
-| `FlagOption`          | `type FlagOption func(*flagMeta)`                                                                  | Modifier for [`AddFlag`] (e.g. [`Required`], [`Enum`]).    |
-| `SubCommand`          | `SubCommand(name, desc string, opts ...Option) Option`                                                 | Register a nested subcommand.                                |
-| `Run`                 | `Run(fn Action) Option`                                                                                | Set the action executed when the command matches.            |
-| `Alias`               | `Alias(names ...string) Option`                                                                        | Register alternative names for a subcommand.                 |
-| `Version`             | `Version(v string) Option`                                                                             | Enable `--version` / `-V` handling.                          |
-| `Required`            | `Required() FlagOption`                                                                            | Mark a flag mandatory (extra for `AddFlag`).                 |
-| `Enum`                | `Enum(vals ...any) FlagOption`                                                                     | Restrict a flag to a closed value set (extra for `AddFlag`). |
-| `Parser.Err`          | `Err() error`                                                                                          | First parse error, or `ErrHelp`/`ErrVersion`.                |
-| `Parser.Run`          | `Run() error`                                                                                          | Execute the matched action (no-op on parse error).           |
-| `Parser.Help`         | `Help() string`                                                                                        | Formatted help for the matched command.                      |
-| `Parser.Version`      | `Version() string`                                                                                     | Version string, or "".                                       |
-| `Parser.Command`      | `Command() *Command`                                                                                   | The matched command (root if none matched).                  |
-| `Parser.IsSet`        | `IsSet(name string) bool`                                                                              | Whether a flag was explicitly provided.                      |
-| `Parser.Reset`        | `Reset(osArgs []string) error`                                                                         | Re-parse new args against the same tree.                     |
-| `Context.Args`        | `Args() []string`                                                                                      | Positional arguments for the matched command.                |
-| `Context.Command`     | `Command() *Command`                                                                                   | The matched command.                                         |
-| `Context.Parser`      | `Parser() *Parser`                                                                                     | The owning parser.                                           |
-| `Command.Name`        | `Name() string`                                                                                        | Command name.                                                |
-| `Command.Description` | `Description() string`                                                                                 | One-line description.                                        |
-| `Command.Parent`      | `Parent() *Command`                                                                                    | Parent command (nil for root).                               |
-| `Command.Args`        | `Args() []string`                                                                                      | Collected positional arguments.                              |
+| `FlagOption`          | `type FlagOption func(*flagMeta)`                                                                 | Modifier for [`AddFlag`] (e.g. [`Required`], [`Enum`]).      |
+| `SubCommand`          | `SubCommand(name, desc string, opts ...Option) Option`                                            | Register a nested subcommand.                                |
+| `Run`                 | `Run(fn Action) Option`                                                                           | Set the action executed when the command matches.            |
+| `Alias`               | `Alias(names ...string) Option`                                                                   | Register alternative names for a subcommand.                 |
+| `Version`             | `Version(v string) Option`                                                                        | Enable `--version` / `-V` handling.                          |
+| `Required`            | `Required() FlagOption`                                                                           | Mark a flag mandatory (extra for `AddFlag`).                 |
+| `Enum`                | `Enum(vals ...any) FlagOption`                                                                    | Restrict a flag to a closed value set (extra for `AddFlag`). |
+| `Parser.Err`          | `Err() error`                                                                                     | First parse error, or `ErrHelp`/`ErrVersion`.                |
+| `Parser.Run`          | `Run() error`                                                                                     | Execute the matched action (no-op on parse error).           |
+| `Parser.Help`         | `Help() string`                                                                                   | Formatted help for the matched command.                      |
+| `Parser.Version`      | `Version() string`                                                                                | Version string, or "".                                       |
+| `Parser.Command`      | `Command() *Command`                                                                              | The matched command (root if none matched).                  |
+| `Parser.IsSet`        | `IsSet(name string) bool`                                                                         | Whether a flag was explicitly provided.                      |
+| `Parser.Reset`        | `Reset(osArgs []string) error`                                                                    | Re-parse new args against the same tree.                     |
+| `Context.Args`        | `Args() []string`                                                                                 | Positional arguments for the matched command.                |
+| `Context.Command`     | `Command() *Command`                                                                              | The matched command.                                         |
+| `Context.Parser`      | `Parser() *Parser`                                                                                | The owning parser.                                           |
+| `Command.Name`        | `Name() string`                                                                                   | Command name.                                                |
+| `Command.Description` | `Description() string`                                                                            | One-line description.                                        |
+| `Command.Parent`      | `Parent() *Command`                                                                               | Parent command (nil for root).                               |
+| `Command.Args`        | `Args() []string`                                                                                 | Collected positional arguments.                              |
+
+
 
 
 ## Flag Types
@@ -279,6 +301,8 @@ Any other type panics inside [`New`] at construction time.
 | `ErrEnumViolated`   | A value is outside the `Enum` set.                                               |
 
 
+
+
 ## Pitfalls
 
 > [!WARNING]
@@ -293,12 +317,16 @@ Any other type panics inside [`New`] at construction time.
 > [!WARNING]
 > String flags consume exactly one token. `--msg hello world` sets `msg=hello` and leaves `world` as a positional. Quote multi-word values: `--msg "hello world"`.
 
+
+
 ## Known Limitations
 
 - **POSIX grouped short ambiguity.** A token like `-vp` without a space binds `port` to `"v"` when `p` is the trailing non-bool in the group. Use `-v -p 3000` or `-p 3000` when both flags need distinct values.
 - **cfgx/envx type subset.** CLI flags support `string`, `int`, `bool`, `float64`, `time.Duration`, and `time.Time`. Environment-only types (`[]string`, `int64`, `uint`) must be mapped before sharing a struct field with [`AddFlag`].
 - **Version is root-scoped.** Pass [`Version`] to the root [`New`] call. A [`Version`] option on a subcommand is ignored by the parser.
 - **No shell completion generation.** Help text is for human `--help` only.
+
+
 
 ## Safety and Concurrency
 
@@ -310,25 +338,33 @@ Three environments, two hardware classes, two operating systems. All values are 
 
 ### Environments
 
-| | Laptop | CI Server (Linux) | CI Server (Windows) |
-|---|---|---|---|
-| CPU | Intel Core i7-10510U, 4C/8T | AMD EPYC 7763, 4 vCPU | AMD EPYC 9V74, 4 vCPU |
-| TDP | 15W (mobile, throttles) | 280W (server, stable) | server, stable |
-| OS | Windows 10 | Ubuntu | Windows Server 2022 |
-| Go | 1.26.2 | 1.26 | 1.26 |
-| GOMAXPROCS | 8 | 4 | 4 |
-| Runs | 3 (`-count=3`) | 3 (`-count=3`) | 3 (`-count=3`) |
+
+|            | Laptop                      | CI Server (Linux)     | CI Server (Windows)   |
+| ---------- | --------------------------- | --------------------- | --------------------- |
+| CPU        | Intel Core i7-10510U, 4C/8T | AMD EPYC 7763, 4 vCPU | AMD EPYC 9V74, 4 vCPU |
+| TDP        | 15W (mobile, throttles)     | 280W (server, stable) | server, stable        |
+| OS         | Windows 10                  | Ubuntu                | Windows Server 2022   |
+| Go         | 1.26.2                      | 1.26                  | 1.26                  |
+| GOMAXPROCS | 8                           | 4                     | 4                     |
+| Runs       | 3 (`-count=3`)              | 3 (`-count=3`)        | 3 (`-count=3`)        |
+
+
+
 
 ### Parser Construction
 
-| Benchmark | What it measures | Laptop | Linux | Windows | B/op | allocs/op |
-|---|---|---|---|---|---|---|
-| New_SingleFlag | One typed flag + maps | 766 ns | **678 ns** | 934 ns | 1216 | 15 |
-| New_ManyFlags | Five flags | 2.27 µs | **2.00 µs** | 2.73 µs | 2560 | 34 |
-| New_Subcommand | Subcommand tree | 1.16 µs | **1.01 µs** | 1.40 µs | 1776 | 21 |
-| Parser_Reset | Reuse tree, zero allocs | 54.7 ns | 48.7 ns | **44.9 ns** | 0 | 0 |
-| Parser_Help | Help text render | 800 ns | **765 ns** | 888 ns | 528 | 10 |
-| New_Parallel | Independent `New` per iter | 905 ns | **703 ns** | 1.10 µs | 1544 | 20 |
+
+| Benchmark      | What it measures           | Laptop  | Linux       | Windows     | B/op | allocs/op |
+| -------------- | -------------------------- | ------- | ----------- | ----------- | ---- | --------- |
+| New_SingleFlag | One typed flag + maps      | 766 ns  | **678 ns**  | 934 ns      | 1216 | 15        |
+| New_ManyFlags  | Five flags                 | 2.27 µs | **2.00 µs** | 2.73 µs     | 2560 | 34        |
+| New_Subcommand | Subcommand tree            | 1.16 µs | **1.01 µs** | 1.40 µs     | 1776 | 21        |
+| Parser_Reset   | Reuse tree, zero allocs    | 54.7 ns | 48.7 ns     | **44.9 ns** | 0    | 0         |
+| Parser_Help    | Help text render           | 800 ns  | **765 ns**  | 888 ns      | 528  | 10        |
+| New_Parallel   | Independent `New` per iter | 905 ns  | **703 ns**  | 1.10 µs     | 1544 | 20        |
+
+
+
 
 ### Analysis
 
@@ -358,6 +394,8 @@ Three environments, two hardware classes, two operating systems. All values are 
 | External deps  | 0 (testify in dev only) |
 
 
+
+
 ## File Structure
 
 ```
@@ -375,6 +413,8 @@ clix/
 ├── example_test.go    # runnable GoDoc examples
 └── README.md          # this file
 ```
+
+
 
 ## License
 

@@ -47,12 +47,12 @@ envx **is** the environment layer of a configuration pipeline: string env → ty
                          │ overlays typed fields
 ┌────────────────────────▼─────────────────────────────────┐
 │  envx   Env · Bind[T] · BindTo · Validate                │
-└──────────────┬───────────────────────┬───────────────────┘
+└──────────────┬────────────────────────┬──────────────────┘
                │                        │
-┌──────────────▼─────────┐   ┌──────────▼───────────────────┐
-│  cfgx (file defaults)  │   │  clix (flag overrides)       │
-│  Load → struct         │   │  parse → struct fields       │
-└────────────────────────┘   └──────────────────────────────┘
+┌──────────────▼─────────┐   ┌──────────▼──────────────────┐
+│  cfgx (file defaults)  │   │  clix (flag overrides)      │
+│  Load → struct         │   │  parse → struct fields      │
+└────────────────────────┘   └─────────────────────────────┘
 ```
 
 
@@ -277,30 +277,36 @@ Three environments, two hardware classes, two operating systems. All values are 
 
 ### Environments
 
-| | Laptop | CI Server (Linux) | CI Server (Windows) |
-|---|---|---|---|
-| CPU | Intel Core i7-10510U, 4C/8T | AMD EPYC 7763, 4 vCPU | AMD EPYC 9V74, 4 vCPU |
-| TDP | 15W (mobile, throttles) | 280W (server, stable) | server, stable |
-| OS | Windows 10 | Ubuntu | Windows Server 2022 |
-| Go | 1.26.2 | 1.26 | 1.26 |
-| GOMAXPROCS | 8 | 4 | 4 |
-| Runs | 3 (`-count=3`) | 3 (`-count=3`) | 3 (`-count=3`) |
+
+|            | Laptop                      | CI Server (Linux)     | CI Server (Windows)   |
+| ---------- | --------------------------- | --------------------- | --------------------- |
+| CPU        | Intel Core i7-10510U, 4C/8T | AMD EPYC 7763, 4 vCPU | AMD EPYC 9V74, 4 vCPU |
+| TDP        | 15W (mobile, throttles)     | 280W (server, stable) | server, stable        |
+| OS         | Windows 10                  | Ubuntu                | Windows Server 2022   |
+| Go         | 1.26.2                      | 1.26                  | 1.26                  |
+| GOMAXPROCS | 8                           | 4                     | 4                     |
+| Runs       | 3 (`-count=3`)              | 3 (`-count=3`)        | 3 (`-count=3`)        |
+
 
 No `_Parallel` benchmarks — binding is a cold startup path on a single goroutine, not a concurrent hot path.
 
 ### Bind / Validate
 
-| Benchmark | What it measures | Laptop | Linux | Windows | B/op | allocs/op |
-|---|---|---|---|---|---|---|
-| Bind_Int | Parse + store `Var[int]` | 134 ns | **129 ns** | 130 ns | 160 | 1 |
-| Bind_String | Parse + store `Var[string]` | **120 ns** | 142 ns | 128 ns | 178 | 1 |
-| Bind_Duration | `time.ParseDuration` path | 177 ns | **170 ns** | 161 ns | 174 | 1 |
-| Bind_List | Split + parse slice | 341 ns | **353 ns** | 344 ns | 348 | 3 |
-| Bind_Absent | Lookup miss, no parse | **112 ns** | 112 ns | 119 ns | 168 | 1 |
-| Bind_Time | RFC3339 parse | **157 ns** | 170 ns | 184 ns | 195 | 1 |
-| Validate | Cross-field check | 356 ns | **316 ns** | 400 ns | 184 | 6 |
-| Parse_Int | Internal int parse only | **9.4 ns** | 9.8 ns | 11.3 ns | 0 | 0 |
-| Parse_Time | Internal time parse only | **40 ns** | 38 ns | 47 ns | 0 | 0 |
+
+| Benchmark     | What it measures            | Laptop     | Linux      | Windows | B/op | allocs/op |
+| ------------- | --------------------------- | ---------- | ---------- | ------- | ---- | --------- |
+| Bind_Int      | Parse + store `Var[int]`    | 134 ns     | **129 ns** | 130 ns  | 160  | 1         |
+| Bind_String   | Parse + store `Var[string]` | **120 ns** | 142 ns     | 128 ns  | 178  | 1         |
+| Bind_Duration | `time.ParseDuration` path   | 177 ns     | **170 ns** | 161 ns  | 174  | 1         |
+| Bind_List     | Split + parse slice         | 341 ns     | **353 ns** | 344 ns  | 348  | 3         |
+| Bind_Absent   | Lookup miss, no parse       | **112 ns** | 112 ns     | 119 ns  | 168  | 1         |
+| Bind_Time     | RFC3339 parse               | **157 ns** | 170 ns     | 184 ns  | 195  | 1         |
+| Validate      | Cross-field check           | 356 ns     | **316 ns** | 400 ns  | 184  | 6         |
+| Parse_Int     | Internal int parse only     | **9.4 ns** | 9.8 ns     | 11.3 ns | 0    | 0         |
+| Parse_Time    | Internal time parse only    | **40 ns**  | 38 ns      | 47 ns   | 0    | 0         |
+
+
+
 
 ### Analysis
 
@@ -315,8 +321,6 @@ No `_Parallel` benchmarks — binding is a cold startup path on a single gorouti
 **Validate scales with binding count — runs once at startup.** ~316 ns (Linux) / 400 ns (Windows) with six allocs for the joined error slice. Off any request hot path by design.
 
 **No parallel benchmarks by intent.** Concurrent use applies only after startup to the resolved values; the `Env` itself is single-goroutine during bind.
-
-
 
 ## Quality
 

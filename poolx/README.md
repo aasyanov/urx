@@ -13,6 +13,8 @@ go get github.com/aasyanov/urx
 > [!IMPORTANT]
 > **These are three independent primitives, not a unified framework.** `WorkerPool` bounds *concurrency* (goroutines + queue), `ObjectPool` bounds *allocation* (reuse via `sync.Pool`), and `Batch` bounds *I/O frequency* (amortize writes). They share conventions — `Stats()`, idempotent `Close`, panic-safe user code — but compose through plain Go, not through each other. Pick the one that matches your bottleneck.
 
+
+
 ## The Problem
 
 Three recurring production needs sit just above the standard library, each with the same set of easy-to-get-wrong details:
@@ -36,16 +38,18 @@ Hand-rolled versions of these repeat the same bugs: send-on-closed-channel panic
 ❌ NOT a rate limiter (use ratex/quotax for request-rate control)
 ```
 
+
+
 ### Position in the urx Stack
 
 ```text
-┌──────────────────────────────────────────────────────────┐
-│  service code: handlers, I/O pipelines, background work  │
-└────────────────────────┬─────────────────────────────────┘
+┌───────────────────────────────────────────────────────────┐
+│  service code: handlers, I/O pipelines, background work   │
+└────────────────────────┬──────────────────────────────────┘
                          │
-┌────────────────────────▼─────────────────────────────────┐
-│  poolx   WorkerPool · ObjectPool[T] · Batch[T]           │
-└──────────────┬───────────────────────┬───────────────────┘
+┌────────────────────────▼──────────────────────────────────┐
+│  poolx   WorkerPool · ObjectPool[T] · Batch[T]            │
+└──────────────┬────────────────────────┬───────────────────┘
                │                        │
 ┌──────────────▼─────────┐   ┌──────────▼───────────────────┐
 │  panix.Safe / SafeVoid │   │  sync.Pool · channels · time │
@@ -71,7 +75,11 @@ Each primitive runs user code through `[panix](../panix)` so a panicking task or
 └─────────────────────────┘
 ```
 
+
+
 ## How It Works
+
+
 
 ### WorkerPool
 
@@ -106,21 +114,23 @@ A thin, type-safe generic wrapper over `sync.Pool`. `Get` returns a pooled `T` (
 ## Normative Contracts
 
 
-| Contract                          | Guarantee                                                                                    |
-| --------------------------------- | -------------------------------------------------------------------------------------------- |
-| Tasks never crash a worker        | Every task runs under `panix.SafeVoid`; a panic becomes a counter increment / returned error |
-| No send-on-closed-channel         | The task channel is never closed; shutdown is signaled via a separate `done` channel         |
-| `Close` drains accepted work      | Tasks enqueued before `Close` run to completion before workers exit                          |
-| `Close` is idempotent             | `WorkerPool.Close` / `Batch.Close` use `sync.Once`; repeat calls are no-ops                  |
+| Contract                             | Guarantee                                                                                                          |
+| ------------------------------------ | ------------------------------------------------------------------------------------------------------------------ |
+| Tasks never crash a worker           | Every task runs under `panix.SafeVoid`; a panic becomes a counter increment / returned error                       |
+| No send-on-closed-channel            | The task channel is never closed; shutdown is signaled via a separate `done` channel                               |
+| `Close` drains accepted work         | Tasks enqueued before `Close` run to completion before workers exit                                                |
+| `Close` is idempotent                | `WorkerPool.Close` / `Batch.Close` use `sync.Once`; repeat calls are no-ops                                        |
 | `SubmitWait` delivers queued results | After enqueue, `Close` drains every accepted task; `SubmitWait` waits for the result unless ctx is cancelled first |
-| Cancelled ctx rejected at admission | `Submit`, `TrySubmit`, and `SubmitWait` call `ctx.Err()` before enqueue, matching urx bulkhead semantics |
-| Failed batch flush restores items | A flush error re-queues the batch slice so a later `Flush`/`Add` can retry |
-| `Panics` ⊆ `Failed`               | A panicking task increments both counters; a regular error increments only `Failed`          |
-| `Put` reset runs before pooling   | With `WithReset`, the object is cleaned before reuse                                         |
-| Batch flush is context-aware      | The flush function receives a context cancelled on `Close`                                   |
-| Batch final flush always runs     | `Close` flushes remaining items with a background context                                    |
-| Batch shutdown is lossless        | `Add` checks `closed` under the buffer mutex; `Close` sets `closed` under the same lock before the final drain |
-| `Batch.Flush` rejected after close | Manual `Flush` after `Close` returns [ErrClosed]; only the internal final flush runs during shutdown |
+| Cancelled ctx rejected at admission  | `Submit`, `TrySubmit`, and `SubmitWait` call `ctx.Err()` before enqueue, matching urx bulkhead semantics           |
+| Failed batch flush restores items    | A flush error re-queues the batch slice so a later `Flush`/`Add` can retry                                         |
+| `Panics` ⊆ `Failed`                  | A panicking task increments both counters; a regular error increments only `Failed`                                |
+| `Put` reset runs before pooling      | With `WithReset`, the object is cleaned before reuse                                                               |
+| Batch flush is context-aware         | The flush function receives a context cancelled on `Close`                                                         |
+| Batch final flush always runs        | `Close` flushes remaining items with a background context                                                          |
+| Batch shutdown is lossless           | `Add` checks `closed` under the buffer mutex; `Close` sets `closed` under the same lock before the final drain     |
+| `Batch.Flush` rejected after close   | Manual `Flush` after `Close` returns [ErrClosed]; only the internal final flush runs during shutdown               |
+
+
 
 
 ## Quick Start
@@ -151,7 +161,11 @@ func main() {
 }
 ```
 
+
+
 ## Usage Scenarios
+
+
 
 ### Bounded request processing with backpressure
 
@@ -170,6 +184,8 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 ```
+
+
 
 ### Synchronous fan-out with results
 
@@ -192,6 +208,8 @@ for i, url := range urls {
 wg.Wait()
 ```
 
+
+
 ### Zero-allocation buffer reuse
 
 ```go
@@ -210,6 +228,8 @@ func render(data any) string {
 	return buf.String()
 }
 ```
+
+
 
 ### Batched database inserts with error handling
 
@@ -236,71 +256,77 @@ for row := range stream {
 }
 ```
 
+
+
 ## API
 
 
-| Symbol                  | Signature                                                                               | Description                                              |
-| ----------------------- | --------------------------------------------------------------------------------------- | -------------------------------------------------------- |
-| **WorkerPool**          |                                                                                         |                                                          |
-| `NewWorkerPool`         | `func NewWorkerPool(opts ...WorkerOption) *WorkerPool`                                  | Start a pool (default 4 workers, 64-slot queue)          |
-| `WorkerPool.Submit`     | `func (wp *WorkerPool) Submit(ctx, fn func(ctx) error) error`                           | Enqueue, blocking until a slot opens / ctx done / closed |
-| `WorkerPool.TrySubmit`  | `func (wp *WorkerPool) TrySubmit(ctx, fn func(ctx) error) error`                        | Enqueue without blocking; `ErrQueueFull` if saturated    |
-| `WorkerPool.SubmitWait` | `func (wp *WorkerPool) SubmitWait(ctx, fn func(ctx) error) error`                       | Enqueue and block for the task's own result              |
-| `WorkerPool.Stats`      | `func (wp *WorkerPool) Stats() WorkerStats`                                             | Snapshot counters                                        |
-| `WorkerPool.ResetStats` | `func (wp *WorkerPool) ResetStats()`                                                    | Zero the counters                                        |
-| `WorkerPool.Close`      | `func (wp *WorkerPool) Close() error`                                                   | Drain queued tasks, stop workers (idempotent)            |
-| `WorkerPool.IsClosed`   | `func (wp *WorkerPool) IsClosed() bool`                                                 | Report closed state                                      |
-| `WithWorkers`           | `func WithWorkers(n int) WorkerOption`                                                  | Worker goroutine count (default [DefaultWorkers])        |
-| `WithQueueSize`         | `func WithQueueSize(n int) WorkerOption`                                                | Queue capacity (default [DefaultQueueSize])              |
-| `WithWorkerOp`          | `func WithWorkerOp(op string) WorkerOption`                                             | Custom panix op label for worker tasks                   |
-| **ObjectPool**          |                                                                                         |                                                          |
-| `NewObjectPool[T]`      | `func NewObjectPool[T any](factory func() T, opts ...ObjectOption[T]) (*ObjectPool[T], error)` | Create a typed pool; [ErrNilFactory] when factory is nil |
-| `ObjectPool.Get`        | `func (op *ObjectPool[T]) Get() T`                                                      | Acquire (or create) an object                            |
-| `ObjectPool.Put`        | `func (op *ObjectPool[T]) Put(v T)`                                                     | Return an object (runs reset hook if set)                |
-| `ObjectPool.Stats`      | `func (op *ObjectPool[T]) Stats() ObjectStats`                                          | Snapshot counters                                        |
-| `ObjectPool.ResetStats` | `func (op *ObjectPool[T]) ResetStats()`                                                 | Zero the counters                                        |
-| `WithReset[T]`          | `func WithReset[T any](fn func(T)) ObjectOption[T]`                                     | Reset hook run on `Put`                                  |
-| **Batch**               |                                                                                         |                                                          |
-| `NewBatch[T]`           | `func NewBatch[T any](flush func(ctx, items []T) error, opts ...BatchOption) (*Batch[T], error)` | Create and start a batch; [ErrNilFlush] when flush is nil |
-| `Batch.Add`             | `func (b *Batch[T]) Add(item T) error`                                                  | Buffer an item; size-flush when full                     |
-| `Batch.Flush`           | `func (b *Batch[T]) Flush(ctx context.Context) error`                                   | Flush the current buffer now; [ErrClosed] after [Batch.Close] |
-| `Batch.Stats`           | `func (b *Batch[T]) Stats() BatchStats`                                                 | Snapshot counters                                        |
-| `Batch.ResetStats`      | `func (b *Batch[T]) ResetStats()`                                                       | Zero the counters                                        |
-| `Batch.Close`           | `func (b *Batch[T]) Close() error`                                                      | Stop ticker, final flush (idempotent)                    |
-| `Batch.IsClosed`        | `func (b *Batch[T]) IsClosed() bool`                                                    | Report closed state                                      |
-| `WithBatchSize`         | `func WithBatchSize(n int) BatchOption`                                                 | Flush threshold (default 100)                            |
-| `WithFlushInterval`     | `func WithFlushInterval(d time.Duration) BatchOption`                                   | Periodic flush interval (default 1s)                     |
-| `WithBatchOp`           | `func WithBatchOp(op string) BatchOption`                                               | Custom panix op label for flush callbacks                |
-| `WithErrorHandler`      | `func WithErrorHandler(fn func(error)) BatchOption`                                     | Callback for flush errors (incl. ticker)                 |
+| Symbol                  | Signature                                                                                        | Description                                                   |
+| ----------------------- | ------------------------------------------------------------------------------------------------ | ------------------------------------------------------------- |
+| **WorkerPool**          |                                                                                                  |                                                               |
+| `NewWorkerPool`         | `func NewWorkerPool(opts ...WorkerOption) *WorkerPool`                                           | Start a pool (default 4 workers, 64-slot queue)               |
+| `WorkerPool.Submit`     | `func (wp *WorkerPool) Submit(ctx, fn func(ctx) error) error`                                    | Enqueue, blocking until a slot opens / ctx done / closed      |
+| `WorkerPool.TrySubmit`  | `func (wp *WorkerPool) TrySubmit(ctx, fn func(ctx) error) error`                                 | Enqueue without blocking; `ErrQueueFull` if saturated         |
+| `WorkerPool.SubmitWait` | `func (wp *WorkerPool) SubmitWait(ctx, fn func(ctx) error) error`                                | Enqueue and block for the task's own result                   |
+| `WorkerPool.Stats`      | `func (wp *WorkerPool) Stats() WorkerStats`                                                      | Snapshot counters                                             |
+| `WorkerPool.ResetStats` | `func (wp *WorkerPool) ResetStats()`                                                             | Zero the counters                                             |
+| `WorkerPool.Close`      | `func (wp *WorkerPool) Close() error`                                                            | Drain queued tasks, stop workers (idempotent)                 |
+| `WorkerPool.IsClosed`   | `func (wp *WorkerPool) IsClosed() bool`                                                          | Report closed state                                           |
+| `WithWorkers`           | `func WithWorkers(n int) WorkerOption`                                                           | Worker goroutine count (default [DefaultWorkers])             |
+| `WithQueueSize`         | `func WithQueueSize(n int) WorkerOption`                                                         | Queue capacity (default [DefaultQueueSize])                   |
+| `WithWorkerOp`          | `func WithWorkerOp(op string) WorkerOption`                                                      | Custom panix op label for worker tasks                        |
+| **ObjectPool**          |                                                                                                  |                                                               |
+| `NewObjectPool[T]`      | `func NewObjectPool[T any](factory func() T, opts ...ObjectOption[T]) (*ObjectPool[T], error)`   | Create a typed pool; [ErrNilFactory] when factory is nil      |
+| `ObjectPool.Get`        | `func (op *ObjectPool[T]) Get() T`                                                               | Acquire (or create) an object                                 |
+| `ObjectPool.Put`        | `func (op *ObjectPool[T]) Put(v T)`                                                              | Return an object (runs reset hook if set)                     |
+| `ObjectPool.Stats`      | `func (op *ObjectPool[T]) Stats() ObjectStats`                                                   | Snapshot counters                                             |
+| `ObjectPool.ResetStats` | `func (op *ObjectPool[T]) ResetStats()`                                                          | Zero the counters                                             |
+| `WithReset[T]`          | `func WithReset[T any](fn func(T)) ObjectOption[T]`                                              | Reset hook run on `Put`                                       |
+| **Batch**               |                                                                                                  |                                                               |
+| `NewBatch[T]`           | `func NewBatch[T any](flush func(ctx, items []T) error, opts ...BatchOption) (*Batch[T], error)` | Create and start a batch; [ErrNilFlush] when flush is nil     |
+| `Batch.Add`             | `func (b *Batch[T]) Add(item T) error`                                                           | Buffer an item; size-flush when full                          |
+| `Batch.Flush`           | `func (b *Batch[T]) Flush(ctx context.Context) error`                                            | Flush the current buffer now; [ErrClosed] after [Batch.Close] |
+| `Batch.Stats`           | `func (b *Batch[T]) Stats() BatchStats`                                                          | Snapshot counters                                             |
+| `Batch.ResetStats`      | `func (b *Batch[T]) ResetStats()`                                                                | Zero the counters                                             |
+| `Batch.Close`           | `func (b *Batch[T]) Close() error`                                                               | Stop ticker, final flush (idempotent)                         |
+| `Batch.IsClosed`        | `func (b *Batch[T]) IsClosed() bool`                                                             | Report closed state                                           |
+| `WithBatchSize`         | `func WithBatchSize(n int) BatchOption`                                                          | Flush threshold (default 100)                                 |
+| `WithFlushInterval`     | `func WithFlushInterval(d time.Duration) BatchOption`                                            | Periodic flush interval (default 1s)                          |
+| `WithBatchOp`           | `func WithBatchOp(op string) BatchOption`                                                        | Custom panix op label for flush callbacks                     |
+| `WithErrorHandler`      | `func WithErrorHandler(fn func(error)) BatchOption`                                              | Callback for flush errors (incl. ticker)                      |
+
+
 
 
 ## Configuration
 
 
-| Option                 | Default                              | Description                                                      |
-| ---------------------- | ------------------------------------ | ---------------------------------------------------------------- |
-| `WithWorkers(n)`       | `DefaultWorkers` (4)                 | Worker goroutines. Non-positive ignored.                         |
-| `WithQueueSize(n)`     | `DefaultQueueSize` (64)              | Task queue capacity. Non-positive ignored.                       |
-| `WithWorkerOp(op)`     | `poolx.WorkerPool`                   | Panic-report operation name for worker tasks.                    |
-| `WithReset(fn)`        | nil                                  | Object reset hook run on `Put`.                                  |
-| `WithBatchSize(n)`     | `DefaultBatchSize` (100)             | Items buffered before an automatic flush. Non-positive ignored.  |
-| `WithFlushInterval(d)` | `DefaultFlushInterval` (1s)          | Periodic flush interval. Non-positive ignored.                   |
-| `WithBatchOp(op)`      | `poolx.Batch.Flush`                  | Panic-report operation name for flush callbacks.                 |
-| `WithErrorHandler(fn)` | nil                                  | Receives errors from any flush, including the background ticker. |
+| Option                 | Default                     | Description                                                      |
+| ---------------------- | --------------------------- | ---------------------------------------------------------------- |
+| `WithWorkers(n)`       | `DefaultWorkers` (4)        | Worker goroutines. Non-positive ignored.                         |
+| `WithQueueSize(n)`     | `DefaultQueueSize` (64)     | Task queue capacity. Non-positive ignored.                       |
+| `WithWorkerOp(op)`     | `poolx.WorkerPool`          | Panic-report operation name for worker tasks.                    |
+| `WithReset(fn)`        | nil                         | Object reset hook run on `Put`.                                  |
+| `WithBatchSize(n)`     | `DefaultBatchSize` (100)    | Items buffered before an automatic flush. Non-positive ignored.  |
+| `WithFlushInterval(d)` | `DefaultFlushInterval` (1s) | Periodic flush interval. Non-positive ignored.                   |
+| `WithBatchOp(op)`      | `poolx.Batch.Flush`         | Panic-report operation name for flush callbacks.                 |
+| `WithErrorHandler(fn)` | nil                         | Receives errors from any flush, including the background ticker. |
+
+
 
 
 ## Errors
 
 
-| Error            | Condition                                                                                  |
-| ---------------- | ------------------------------------------------------------------------------------------ |
-| `ErrClosed`      | Submit/Add/Flush on a closed pool or batch                                                 |
-| `ErrQueueFull`   | `TrySubmit` when the queue is at capacity                                                  |
-| `ErrCancelled`   | `Submit`/`TrySubmit`/`SubmitWait` when ctx is cancelled or times out during wait           |
-| `ErrNilFunc`     | `Submit`/`TrySubmit`/`SubmitWait` when the task function is nil                          |
-| `ErrNilFactory`  | `NewObjectPool` when factory is nil                                                        |
-| `ErrNilFlush`    | `NewBatch` when flush is nil                                                               |
-| `ErrFlushFailed` | Flush returned an error or panicked; items are restored to the buffer for retry            |
+| Error            | Condition                                                                        |
+| ---------------- | -------------------------------------------------------------------------------- |
+| `ErrClosed`      | Submit/Add/Flush on a closed pool or batch                                       |
+| `ErrQueueFull`   | `TrySubmit` when the queue is at capacity                                        |
+| `ErrCancelled`   | `Submit`/`TrySubmit`/`SubmitWait` when ctx is cancelled or times out during wait |
+| `ErrNilFunc`     | `Submit`/`TrySubmit`/`SubmitWait` when the task function is nil                  |
+| `ErrNilFactory`  | `NewObjectPool` when factory is nil                                              |
+| `ErrNilFlush`    | `NewBatch` when flush is nil                                                     |
+| `ErrFlushFailed` | Flush returned an error or panicked; items are restored to the buffer for retry  |
 
 
 All are sentinel errors created with `errors.New`; compare with `errors.Is`. A panicking task surfaces as `*panix.PanicError` (via `SubmitWait`) with `Op == "poolx.WorkerPool"`; a panicking flush is joined under `ErrFlushFailed`.
@@ -311,7 +337,7 @@ All are sentinel errors created with `errors.New`; compare with `errors.Is`. A p
 > **Submit** and `TrySubmit` do not return the task's error.** They report only enqueue failures (`ErrClosed`, `ErrQueueFull`, `ErrCancelled`, `ErrNilFunc`). The task's own error/panic is recorded in `Stats()`. Use `SubmitWait` when you need the result.
 
 > [!WARNING]
-> **`SubmitWait` waits for the task result after enqueue.** `Close` drains every accepted task before returning, so a queued `SubmitWait` receives its result unless the caller's ctx is cancelled first. Cancelled contexts are rejected before enqueue via `ctx.Err()`.
+> `SubmitWait` **waits for the task result after enqueue.** `Close` drains every accepted task before returning, so a queued `SubmitWait` receives its result unless the caller's ctx is cancelled first. Cancelled contexts are rejected before enqueue via `ctx.Err()`.
 
 > [!WARNING]
 > **Failed batch flushes restore buffered items.** `ErrFlushFailed` means the flush callback failed but items remain in the buffer for a later retry. Only successful flushes increment `Items`/`Flushed`.
@@ -320,16 +346,18 @@ All are sentinel errors created with `errors.New`; compare with `errors.Is`. A p
 > **Sequence shutdown after you stop submitting.** Call `Close` only after producers stop. `WorkerPool.Close` drains every queued task before returning. `Batch.Close` rejects further `Add` calls and performs one final flush.
 
 > [!WARNING]
-> **`Batch.Flush` after `Close` returns [ErrClosed].** The final flush runs only inside `Close`. If the final flush fails, items remain in the buffer for a manual retry only before you discard the instance — do not call `Flush` after `Close`.
+> `Batch.Flush` **after** `Close` **returns [ErrClosed].** The final flush runs only inside `Close`. If the final flush fails, items remain in the buffer for a manual retry only before you discard the instance — do not call `Flush` after `Close`.
 
 > [!WARNING]
 > **ObjectPool** makes no retention guarantee.** `sync.Pool` may evict pooled objects on any GC cycle. Never store state in the pool that must survive; it is a reuse cache, not a registry.
 
 > [!WARNING]
-> **Without `WithReset`, pooled objects keep their state.** A `bytes.Buffer` put back with data still in it will be handed to the next `Get` with that data. Always reset mutable objects — either via `WithReset` or before `Put`.
+> **Without** `WithReset`**, pooled objects keep their state.** A `bytes.Buffer` put back with data still in it will be handed to the next `Get` with that data. Always reset mutable objects — either via `WithReset` or before `Put`.
 
 > [!WARNING]
 > **Batch flushes can run concurrently.** A size-triggered `Add` flush and the periodic ticker flush both call your flush function; they never share the same slice, but your flush target (DB, socket) must tolerate concurrent calls.
+
+
 
 ## Safety and Concurrency
 
@@ -345,26 +373,32 @@ Three environments, two hardware classes, two operating systems. All values are 
 
 ### Environments
 
-| | Laptop | CI Server (Linux) | CI Server (Windows) |
-|---|---|---|---|
-| CPU | Intel Core i7-10510U, 4C/8T | AMD EPYC 7763, 4 vCPU | AMD EPYC 9V74, 4 vCPU |
-| TDP | 15W (mobile, throttles) | 280W (server, stable) | server, stable |
-| OS | Windows 10 | Ubuntu | Windows Server 2022 |
-| Go | 1.26 | 1.26 | 1.26 |
-| GOMAXPROCS | 8 | 4 | 4 |
-| Source | `quality.result` | `benchmark-ubuntu-latest.txt` | `benchmark-windows-latest.txt` |
 
-| Benchmark | What it measures | Laptop | Linux | Windows | B/op | allocs/op |
-|---|---|---|---|---|---|---|
-| `ObjectPool_GetPut` | `sync.Pool` get/put round trip | 23.2 ns | **16.3 ns** | 16.8 ns | 0 | 0 |
-| `ObjectPool_GetPut_WithReset` | Get/put with `Reset` callback | 24.1 ns | **16.9 ns** | 18.1 ns | 0 | 0 |
-| `ObjectPool_GetPut_Parallel` | Get/put, 8/4 goroutines | 50.5 ns | **47.8 ns** | 51.8 ns | 0 | 0 |
-| `ObjectPool_GetPut_WithReset_Parallel` | Get/put + reset, parallel | 52.4 ns | **47.8 ns** | 43.2 ns | 0 | 0 |
-| `Batch_Add` | Mutex + slice append | 15.4 ns | **7.2 ns** | 8.0 ns | 8 | 0 |
-| `Batch_Add_Parallel` | `Add` under contention | 53.6 ns | **26.4 ns** | 27.2 ns | 8 | 0 |
-| `WorkerPool_Submit` | Fire-and-forget enqueue | 599.8 ns | **284.3 ns** | 540.3 ns | 48 | 1 |
-| `WorkerPool_SubmitWait` | Enqueue + result round trip | 1.29 µs | **753.2 ns** | 2.27 µs | 176 | 3 |
-| `WorkerPool_Submit_Parallel` | `SubmitWait`, parallel | 1.69 µs | **1.23 µs** | 1.66 µs | 176 | 3 |
+|            | Laptop                      | CI Server (Linux)             | CI Server (Windows)            |
+| ---------- | --------------------------- | ----------------------------- | ------------------------------ |
+| CPU        | Intel Core i7-10510U, 4C/8T | AMD EPYC 7763, 4 vCPU         | AMD EPYC 9V74, 4 vCPU          |
+| TDP        | 15W (mobile, throttles)     | 280W (server, stable)         | server, stable                 |
+| OS         | Windows 10                  | Ubuntu                        | Windows Server 2022            |
+| Go         | 1.26                        | 1.26                          | 1.26                           |
+| GOMAXPROCS | 8                           | 4                             | 4                              |
+| Source     | `quality.result`            | `benchmark-ubuntu-latest.txt` | `benchmark-windows-latest.txt` |
+
+
+
+| Benchmark                              | What it measures               | Laptop   | Linux        | Windows  | B/op | allocs/op |
+| -------------------------------------- | ------------------------------ | -------- | ------------ | -------- | ---- | --------- |
+| `ObjectPool_GetPut`                    | `sync.Pool` get/put round trip | 23.2 ns  | **16.3 ns**  | 16.8 ns  | 0    | 0         |
+| `ObjectPool_GetPut_WithReset`          | Get/put with `Reset` callback  | 24.1 ns  | **16.9 ns**  | 18.1 ns  | 0    | 0         |
+| `ObjectPool_GetPut_Parallel`           | Get/put, 8/4 goroutines        | 50.5 ns  | **47.8 ns**  | 51.8 ns  | 0    | 0         |
+| `ObjectPool_GetPut_WithReset_Parallel` | Get/put + reset, parallel      | 52.4 ns  | **47.8 ns**  | 43.2 ns  | 0    | 0         |
+| `Batch_Add`                            | Mutex + slice append           | 15.4 ns  | **7.2 ns**   | 8.0 ns   | 8    | 0         |
+| `Batch_Add_Parallel`                   | `Add` under contention         | 53.6 ns  | **26.4 ns**  | 27.2 ns  | 8    | 0         |
+| `WorkerPool_Submit`                    | Fire-and-forget enqueue        | 599.8 ns | **284.3 ns** | 540.3 ns | 48   | 1         |
+| `WorkerPool_SubmitWait`                | Enqueue + result round trip    | 1.29 µs  | **753.2 ns** | 2.27 µs  | 176  | 3         |
+| `WorkerPool_Submit_Parallel`           | `SubmitWait`, parallel         | 1.69 µs  | **1.23 µs**  | 1.66 µs  | 176  | 3         |
+
+
+
 
 ### Analysis
 
@@ -395,6 +429,8 @@ Three environments, two hardware classes, two operating systems. All values are 
 | External deps         | 0 (urx/panix internally; testify in tests only) |
 
 
+
+
 ## File Structure
 
 ```text
@@ -418,6 +454,8 @@ poolx/
 ├── footprint_test.go   # Primary type + stats/config struct size guards
 └── README.md           # This file
 ```
+
+
 
 ## License
 

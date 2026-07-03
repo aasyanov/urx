@@ -13,6 +13,8 @@ go get github.com/aasyanov/urx
 > [!IMPORTANT]
 > **Hedging multiplies load — bound it and make copies idempotent.** Every hedge copy is a *real* request to your backend. A request that is hedged 3-way can triple the work for that one call. Only hedge operations that are safe to run more than once (reads, idempotent writes) and size `[WithMaxParallel](#configuration)` and `[WithDelay](#configuration)` so the extra load is worth the latency you buy back.
 
+
+
 ## The Problem
 
 A service that fans out to a database, a cache, or a downstream RPC inherits that backend's *tail*, not its median. A backend with a 1 ms median but a 200 ms p99 — caused by a GC pause, a cold replica, a packet loss, a noisy neighbour — drags every dependent request's p99 to 200 ms even though almost all calls are instant. Three problems compound:
@@ -40,6 +42,8 @@ A service that fans out to a database, a cache, or a downstream RPC inherits tha
 ❌ NOT a deduplicator — it multiplies a request on purpose; it does not collapse duplicates
 ```
 
+
+
 ### Position in the urx Stack
 
 ```text
@@ -50,13 +54,15 @@ A service that fans out to a database, a cache, or a downstream RPC inherits tha
 ┌────────────────────────▼─────────────────────────────────┐
 │  hedgex   Hedger · Execute[T] · HedgeController          │
 │           race N staggered copies, keep the first win    │
-└──────────────┬───────────────────────┬───────────────────┘
+└──────────────┬────────────────────────┬──────────────────┘
                │                        │
 ┌──────────────▼─────────┐   ┌──────────▼──────────────────┐
 │  panix.Safe            │   │  context · time · atomic    │
 │  (panic → PanicError)  │   │  (cancel fan-out, stagger)  │
 └────────────────────────┘   └─────────────────────────────┘
 ```
+
+
 
 ## Architecture
 
@@ -78,6 +84,8 @@ A service that fans out to a database, a cache, or a downstream RPC inherits tha
    │                   (linear → spread)     ErrCancelled
  panix.Safe(copy)
 ```
+
+
 
 ## How It Works
 
@@ -134,9 +142,11 @@ When a call has exactly one launchable backend (`MaxParallel == 1`, or an `Execu
 | Withdrawal neutrality | A copy that calls `Cancel` is neither winner nor failure; its result is discarded                                                             |
 | Panic safety          | A panicking copy becomes a `*panix.PanicError`, handled like an ordinary copy failure — never a crash                                         |
 | Monotonic schedule    | Hedge launch times are non-decreasing; copies past `maxDelay` are spread, not bunched                                                         |
-| Parallelism cap       | At most [WithMaxParallel] slice entries; [Backends] counts only non-nil launchables |
+| Parallelism cap       | At most [WithMaxParallel] slice entries; [Backends] counts only non-nil launchables                                                           |
 | Controller scope      | A `HedgeController` is valid only during its copy's callback; do not retain it                                                                |
 | Construction safety   | `New` floors a non-positive `MaxParallel` to 1 and raises a too-small `MaxDelay` to `Delay`; it never returns an unusable hedger              |
+
+
 
 
 ## Quick Start
@@ -183,7 +193,11 @@ func readPrimary(context.Context) (string, error) { return "primary", nil }
 func readReplica(context.Context) (string, error) { return "replica", nil }
 ```
 
+
+
 ## Usage Scenarios
+
+
 
 ### Hedge a replicated read
 
@@ -196,6 +210,8 @@ val, err := hedgex.Execute(h, ctx,
 	})
 ```
 
+
+
 ### Race heterogeneous backends with ExecuteMulti
 
 ```go
@@ -205,6 +221,8 @@ val, err := hedgex.ExecuteMulti(h, ctx, []hedgex.HedgeFunc[Value]{
 	func(ctx context.Context, _ hedgex.HedgeController) (Value, error) { return cache.Get(ctx, k) },
 })
 ```
+
+
 
 ### Withdraw a copy that cannot win
 
@@ -220,6 +238,8 @@ val, err := hedgex.Execute(h, ctx,
 	})
 ```
 
+
+
 ### Bound total latency by composing with toutx
 
 ```go
@@ -232,6 +252,8 @@ val, err := toutx.Execute(ctx, 300*time.Millisecond,
 			})
 	})
 ```
+
+
 
 ### Observe hedge activity
 
@@ -246,13 +268,15 @@ h := hedgex.New(
 s := h.Stats() // {Calls, Wins, Hedges, Failures}
 ```
 
+
+
 ## API
 
 
 | Symbol               | Signature                                                                                 | Description                                  |
 | -------------------- | ----------------------------------------------------------------------------------------- | -------------------------------------------- |
 | `New`                | `func New(opts ...Option) *Hedger`                                                        | Create a hedger with defaults + options      |
-| `Option`             | `type Option func(*config)`                                                               | Functional option for [New]                    |
+| `Option`             | `type Option func(*config)`                                                               | Functional option for [New]                  |
 | `Execute`            | `func Execute[T any](h *Hedger, ctx context.Context, fn HedgeFunc[T]) (T, error)`         | Hedge one function across N staggered copies |
 | `ExecuteMulti`       | `func ExecuteMulti[T any](h *Hedger, ctx context.Context, fns []HedgeFunc[T]) (T, error)` | Hedge across distinct backends               |
 | `HedgeFunc[T]`       | `type HedgeFunc[T any] func(context.Context, HedgeController) (T, error)`                 | The hedged unit of work                      |
@@ -267,28 +291,34 @@ s := h.Stats() // {Calls, Wins, Hedges, Failures}
 | `Stats`              | `type Stats struct { Calls, Wins, Hedges, Failures int64 }`                               | Observability snapshot                       |
 
 
+
+
 ### HedgeController
 
 
-| Method     | Signature                 | Description                                    |
-| ---------- | ------------------------- | ---------------------------------------------- |
+| Method     | Signature                 | Description                                                          |
+| ---------- | ------------------------- | -------------------------------------------------------------------- |
 | `Attempt`  | `Attempt() int`           | 1-based launch ordinal (1 = original, 2+ = hedge; nil slots skipped) |
-| `IsHedge`  | `IsHedge() bool`          | Whether this copy is a speculative hedge       |
-| `Backends` | `Backends() int`          | Launchable copies scheduled (non-nil entries after cap) |
-| `Elapsed`  | `Elapsed() time.Duration` | Time since the first copy launched             |
-| `Cancel`   | `Cancel()`                | Withdraw this copy from the race (idempotent)  |
+| `IsHedge`  | `IsHedge() bool`          | Whether this copy is a speculative hedge                             |
+| `Backends` | `Backends() int`          | Launchable copies scheduled (non-nil entries after cap)              |
+| `Elapsed`  | `Elapsed() time.Duration` | Time since the first copy launched                                   |
+| `Cancel`   | `Cancel()`                | Withdraw this copy from the race (idempotent)                        |
+
+
 
 
 ## Configuration
 
 
-| Option               | Default                  | Description                                                                       |
-| -------------------- | ------------------------ | --------------------------------------------------------------------------------- |
-| `WithMaxParallel(n)` | `DefaultMaxParallel` (3) | Max concurrent copies; ≤ 0 ignored, final value floored to 1 (1 disables hedging) |
+| Option               | Default                  | Description                                                                               |
+| -------------------- | ------------------------ | ----------------------------------------------------------------------------------------- |
+| `WithMaxParallel(n)` | `DefaultMaxParallel` (3) | Max concurrent copies; ≤ 0 ignored, final value floored to 1 (1 disables hedging)         |
 | `WithDelay(d)`       | `DefaultDelay` (100ms)   | Stagger before the next copy; fast failures launch the next copy immediately; ≤ 0 ignored |
-| `WithMaxDelay(d)`    | `DefaultMaxDelay` (1s)   | Cap on the stagger window; copies past it are spread `delay/4` apart; ≤ 0 ignored |
-| `WithOnHedge(fn)`    | none                     | Async, panic-safe callback fired with the attempt number when a hedge launches    |
-| `WithOp(s)`          | `"hedgex.Execute"`       | Operation name attached to panic reports                                          |
+| `WithMaxDelay(d)`    | `DefaultMaxDelay` (1s)   | Cap on the stagger window; copies past it are spread `delay/4` apart; ≤ 0 ignored         |
+| `WithOnHedge(fn)`    | none                     | Async, panic-safe callback fired with the attempt number when a hedge launches            |
+| `WithOp(s)`          | `"hedgex.Execute"`       | Operation name attached to panic reports                                                  |
+
+
 
 
 ## Errors
@@ -296,7 +326,7 @@ s := h.Stats() // {Calls, Wins, Hedges, Failures}
 
 | Error          | Condition                                                                       |
 | -------------- | ------------------------------------------------------------------------------- |
-| `ErrNilFunc`    | `Execute` got a nil function, or `ExecuteMulti` got an empty / all-nil slice    |
+| `ErrNilFunc`   | `Execute` got a nil function, or `ExecuteMulti` got an empty / all-nil slice    |
 | `ErrAllFailed` | Every launched copy failed (or withdrew); wraps the first failure               |
 | `ErrCancelled` | The caller's context was cancelled before any copy succeeded; wraps `ctx.Err()` |
 
@@ -317,6 +347,8 @@ A panicking copy surfaces as a `*panix.PanicError` joined under `ErrAllFailed` (
 > [!NOTE]
 > **Losing copies are cancelled, not awaited.** When a winner returns, the other copies' context is cancelled and `Execute` returns immediately; it does not wait for the losers to observe cancellation. Ensure your function respects `ctx.Done()` so cancelled copies release their resources promptly.
 
+
+
 ## Safety and Concurrency
 
 `Hedger` is safe for concurrent use from any number of goroutines and is meant to be created once and shared. It holds only immutable configuration plus four `sync/atomic` counters (`calls`, `wins`, `hedges`, `failures`); there is no lock on any path. Each call gets its own cancellable child context, buffered result channel, and timer, so concurrent calls never interfere. The `HedgeController`'s `withdrawn` flag is an `atomic.Bool` because `Cancel` may be observed across the copy and dispatch goroutines; its other fields are immutable for the copy's lifetime. Every copy runs under `panix.Safe`. The test suite exercises 50-goroutine × 200-iteration `Execute` stress, mid-flight cancellation, and panic recovery, all under `-race`.
@@ -327,23 +359,29 @@ Three environments, two hardware classes, two operating systems. All values are 
 
 ### Environments
 
-| | Laptop | CI Server (Linux) | CI Server (Windows) |
-|---|---|---|---|
-| CPU | Intel Core i7-10510U, 4C/8T | AMD EPYC 7763, 4 vCPU | AMD EPYC 9V74, 4 vCPU |
-| TDP | 15W (mobile, throttles) | 280W (server, stable) | 280W (server, stable) |
-| OS | Windows 10 (NTFS) | Ubuntu (ext4) | Windows Server 2022 (NTFS) |
-| Go | 1.24 | 1.26 | 1.26 |
-| GOMAXPROCS | 8 | 4 | 4 |
-| Runs | 3 (`-count=3`) | 3 (`-count=3`) | 3 (`-count=3`) |
 
-| Benchmark | What it measures | Laptop | Linux | Windows | B/op | allocs/op |
-|---|---|---|---|---|---|---|
-| Execute_NoHedging | Sync path, `MaxParallel == 1` | 57 ns | **99 ns** | 63 ns | 48 | 1 |
-| Execute_PrimaryWins | Hedged call, primary wins before hedge | 2.0 µs | **1.9 µs** | 4.9 µs | 792 | 11 |
-| Execute_PrimaryWins_Parallel | Primary wins, 4 goroutines | 570 ns | **800 ns** | 820 ns | 792 | 11 |
-| ExecuteMulti_PrimaryWins | `ExecuteMulti`, primary wins | 2.1 µs | **1.9 µs** | 5.0 µs | 792 | 11 |
-| Execute_HedgeWins | Hedge copy fires and wins | 5.4 ms | **5.16 ms** | 5.29 ms | 864 | 13 |
-| Delays | Delay schedule computation | 37 ns | **34 ns** | 45 ns | 64 | 1 |
+|            | Laptop                      | CI Server (Linux)     | CI Server (Windows)        |
+| ---------- | --------------------------- | --------------------- | -------------------------- |
+| CPU        | Intel Core i7-10510U, 4C/8T | AMD EPYC 7763, 4 vCPU | AMD EPYC 9V74, 4 vCPU      |
+| TDP        | 15W (mobile, throttles)     | 280W (server, stable) | 280W (server, stable)      |
+| OS         | Windows 10 (NTFS)           | Ubuntu (ext4)         | Windows Server 2022 (NTFS) |
+| Go         | 1.24                        | 1.26                  | 1.26                       |
+| GOMAXPROCS | 8                           | 4                     | 4                          |
+| Runs       | 3 (`-count=3`)              | 3 (`-count=3`)        | 3 (`-count=3`)             |
+
+
+
+| Benchmark                    | What it measures                       | Laptop | Linux       | Windows | B/op | allocs/op |
+| ---------------------------- | -------------------------------------- | ------ | ----------- | ------- | ---- | --------- |
+| Execute_NoHedging            | Sync path, `MaxParallel == 1`          | 57 ns  | **99 ns**   | 63 ns   | 48   | 1         |
+| Execute_PrimaryWins          | Hedged call, primary wins before hedge | 2.0 µs | **1.9 µs**  | 4.9 µs  | 792  | 11        |
+| Execute_PrimaryWins_Parallel | Primary wins, 4 goroutines             | 570 ns | **800 ns**  | 820 ns  | 792  | 11        |
+| ExecuteMulti_PrimaryWins     | `ExecuteMulti`, primary wins           | 2.1 µs | **1.9 µs**  | 5.0 µs  | 792  | 11        |
+| Execute_HedgeWins            | Hedge copy fires and wins              | 5.4 ms | **5.16 ms** | 5.29 ms | 864  | 13        |
+| Delays                       | Delay schedule computation             | 37 ns  | **34 ns**   | 45 ns   | 64   | 1         |
+
+
+
 
 ### Analysis
 
@@ -365,18 +403,21 @@ Three environments, two hardware classes, two operating systems. All values are 
 
 ## Quality
 
-| Metric | Value |
-|---|---|
-| Test functions | 51 |
-| Benchmarks | 6 |
-| Fuzz targets | 3 (`FuzzExecute`, `FuzzDelays` pass; `FuzzExecuteMulti` fails on negative len — see `testdata/fuzz/`) |
-| Examples | 4 |
-| Coverage | 100.0% |
-| Race detector | All tests pass with `-race` |
-| Linter | 0 issues (`golangci-lint`) |
-| CI matrix | 6 configurations (2 OS × 3 Go versions) |
-| Go version | 1.24+ |
-| External deps | 0 (panix; testify in dev only) |
+
+| Metric         | Value                                                                                                 |
+| -------------- | ----------------------------------------------------------------------------------------------------- |
+| Test functions | 51                                                                                                    |
+| Benchmarks     | 6                                                                                                     |
+| Fuzz targets   | 3 (`FuzzExecute`, `FuzzDelays` pass; `FuzzExecuteMulti` fails on negative len — see `testdata/fuzz/`) |
+| Examples       | 4                                                                                                     |
+| Coverage       | 100.0%                                                                                                |
+| Race detector  | All tests pass with `-race`                                                                           |
+| Linter         | 0 issues (`golangci-lint`)                                                                            |
+| CI matrix      | 6 configurations (2 OS × 3 Go versions)                                                               |
+| Go version     | 1.24+                                                                                                 |
+| External deps  | 0 (panix; testify in dev only)                                                                        |
+
+
 
 
 ## File Structure
@@ -394,6 +435,8 @@ hedgex/
 ├── footprint_test.go   # struct size guards
 └── README.md           # this file
 ```
+
+
 
 ## License
 

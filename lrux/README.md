@@ -55,11 +55,11 @@ Without a purpose-built cache, each call site re-implements an LRU list, a TTL s
 │ lrux   Cache[K,V] · ShardedCache · Compute (singleflight)│
 └──────────────┬───────────────────────┬───────────────────┘
                │                        │
-┌──────────────▼─────────┐   ┌──────────▼───────────────────┐
-│  panix.Safe            │   │  sync · hash/maphash         │
-│  golang.org/x/sync     │   │  (sharded locks, LRU list)   │
-│  (singleflight.Group)  │   │                              │
-└────────────────────────┘   └──────────────────────────────┘
+┌──────────────▼─────────┐   ┌──────────▼──────────────────┐
+│  panix.Safe            │   │  sync · hash/maphash        │
+│  golang.org/x/sync     │   │  (sharded locks, LRU list)  │
+│  (singleflight.Group)  │   │                             │
+└────────────────────────┘   └─────────────────────────────┘
 ```
 
 
@@ -394,36 +394,48 @@ Three environments, two hardware classes, two operating systems. All values are 
 
 ### Environments
 
-| | Laptop | CI Server (Linux) | CI Server (Windows) |
-|---|---|---|---|
-| CPU | Intel Core i7-10510U, 4C/8T | AMD EPYC 7763, 4 vCPU | AMD EPYC 9V74, 4 vCPU |
-| TDP | 15W (mobile, throttles) | 280W (server, stable) | 280W (server, stable) |
-| OS | Windows 10 (NTFS) | Ubuntu (ext4) | Windows Server 2022 (NTFS) |
-| Go | 1.24 | 1.26 | 1.26 |
-| GOMAXPROCS | 8 | 4 | 4 |
-| Runs | 3 (`-count=3`) | 3 (`-count=3`) | 3 (`-count=3`) |
+
+|            | Laptop                      | CI Server (Linux)     | CI Server (Windows)        |
+| ---------- | --------------------------- | --------------------- | -------------------------- |
+| CPU        | Intel Core i7-10510U, 4C/8T | AMD EPYC 7763, 4 vCPU | AMD EPYC 9V74, 4 vCPU      |
+| TDP        | 15W (mobile, throttles)     | 280W (server, stable) | 280W (server, stable)      |
+| OS         | Windows 10 (NTFS)           | Ubuntu (ext4)         | Windows Server 2022 (NTFS) |
+| Go         | 1.24                        | 1.26                  | 1.26                       |
+| GOMAXPROCS | 8                           | 4                     | 4                          |
+| Runs       | 3 (`-count=3`)              | 3 (`-count=3`)        | 3 (`-count=3`)             |
+
+
+
 
 ### Single Cache
 
-| Benchmark | What it measures | Laptop | Linux | Windows | B/op | allocs/op |
-|---|---|---|---|---|---|---|
-| Cache_Set | Insert/update fixed key set | 54 ns | **73 ns** | 25 ns | 0 | 0 |
-| Cache_Get_Hit | Hit + LRU promote (write lock) | 58 ns | **91 ns** | 40 ns | 0 | 0 |
-| Cache_Get_Miss | Miss lookup, no promote | 37 ns | **13 ns** | 14 ns | 0 | 0 |
-| Cache_GetFast_Hit | Hit without promotion (read lock) | 34 ns | **20 ns** | 19 ns | 0 | 0 |
-| Cache_Mixed | 90% read / 10% write | 62 ns | **90 ns** | 40 ns | 0 | 0 |
-| Cache_Get_Parallel | Hit under 4 goroutines | 136 ns | **124 ns** | 83 ns | 0 | 0 |
-| Cache_GetOrCompute_Hit | Hit on populated cache | 74 ns | **93 ns** | 57 ns | 0 | 0 |
-| Cache_GetOrCompute_Miss | Miss + compute closure | 5.5 µs | **554 ns** | 548 ns | 174 | 3 |
+
+| Benchmark               | What it measures                  | Laptop | Linux      | Windows | B/op | allocs/op |
+| ----------------------- | --------------------------------- | ------ | ---------- | ------- | ---- | --------- |
+| Cache_Set               | Insert/update fixed key set       | 54 ns  | **73 ns**  | 25 ns   | 0    | 0         |
+| Cache_Get_Hit           | Hit + LRU promote (write lock)    | 58 ns  | **91 ns**  | 40 ns   | 0    | 0         |
+| Cache_Get_Miss          | Miss lookup, no promote           | 37 ns  | **13 ns**  | 14 ns   | 0    | 0         |
+| Cache_GetFast_Hit       | Hit without promotion (read lock) | 34 ns  | **20 ns**  | 19 ns   | 0    | 0         |
+| Cache_Mixed             | 90% read / 10% write              | 62 ns  | **90 ns**  | 40 ns   | 0    | 0         |
+| Cache_Get_Parallel      | Hit under 4 goroutines            | 136 ns | **124 ns** | 83 ns   | 0    | 0         |
+| Cache_GetOrCompute_Hit  | Hit on populated cache            | 74 ns  | **93 ns**  | 57 ns   | 0    | 0         |
+| Cache_GetOrCompute_Miss | Miss + compute closure            | 5.5 µs | **554 ns** | 548 ns  | 174  | 3         |
+
+
+
 
 ### Sharded Cache & Hashing
 
-| Benchmark | What it measures | Laptop | Linux | Windows | B/op | allocs/op |
-|---|---|---|---|---|---|---|
-| ShardedCache_Get_Parallel | Hit under 4 goroutines, 16 shards | 55 ns | **79 ns** | 50 ns | 0 | 0 |
-| ShardedCache_Set_Parallel | Insert under 4 goroutines | 147 ns | **158 ns** | 156 ns | 55 | 0 |
-| Hasher_String | `maphash.Comparable` on string key | 11 ns | **7.2 ns** | 7.7 ns | 0 | 0 |
-| Hasher_Int | `maphash.Comparable` on int key | 8 ns | **5.9 ns** | 7.3 ns | 0 | 0 |
+
+| Benchmark                 | What it measures                   | Laptop | Linux      | Windows | B/op | allocs/op |
+| ------------------------- | ---------------------------------- | ------ | ---------- | ------- | ---- | --------- |
+| ShardedCache_Get_Parallel | Hit under 4 goroutines, 16 shards  | 55 ns  | **79 ns**  | 50 ns   | 0    | 0         |
+| ShardedCache_Set_Parallel | Insert under 4 goroutines          | 147 ns | **158 ns** | 156 ns  | 55   | 0         |
+| Hasher_String             | `maphash.Comparable` on string key | 11 ns  | **7.2 ns** | 7.7 ns  | 0    | 0         |
+| Hasher_Int                | `maphash.Comparable` on int key    | 8 ns   | **5.9 ns** | 7.3 ns  | 0    | 0         |
+
+
+
 
 ### Analysis
 
@@ -447,18 +459,19 @@ Three environments, two hardware classes, two operating systems. All values are 
 
 ## Quality
 
-| Metric | Value |
-|---|---|
-| Test functions | 113 |
-| Benchmarks | 12 |
-| Fuzz targets | 3 (all pass, 30s each) |
-| Examples | 5 |
-| Coverage | 98.4% |
-| Race detector | All tests pass with `-race` |
-| Linter | 0 issues (`golangci-lint`) |
-| CI matrix | 6 configurations (2 OS × 3 Go versions) |
-| Go version | 1.24+ |
-| External deps | panix, golang.org/x/sync (testify in dev only) |
+
+| Metric         | Value                                          |
+| -------------- | ---------------------------------------------- |
+| Test functions | 113                                            |
+| Benchmarks     | 12                                             |
+| Fuzz targets   | 3 (all pass, 30s each)                         |
+| Examples       | 5                                              |
+| Coverage       | 98.4%                                          |
+| Race detector  | All tests pass with `-race`                    |
+| Linter         | 0 issues (`golangci-lint`)                     |
+| CI matrix      | 6 configurations (2 OS × 3 Go versions)        |
+| Go version     | 1.24+                                          |
+| External deps  | panix, golang.org/x/sync (testify in dev only) |
 
 
 
