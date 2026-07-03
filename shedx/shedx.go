@@ -134,7 +134,8 @@ func (s *Shedder) Acquire(priority Priority) (*Token, error) {
 // admitted, so concurrent observers never see a count above the capacity bound.
 // The loop is lock-free and retries only under genuine contention on the slot.
 // When the shedder is closed the loop exits with closed=true so callers return
-// [ErrClosed] rather than [ErrRejected].
+// [ErrClosed] rather than [ErrRejected]. A successful CAS is finalized by
+// [commitReservation], which rolls back when [Shedder.Close] wins the race.
 func (s *Shedder) tryReserve(priority Priority) (int64, bool, bool) {
 	for {
 		if s.closed.Load() {
@@ -146,9 +147,21 @@ func (s *Shedder) tryReserve(priority Priority) (int64, bool, bool) {
 			return 0, false, false
 		}
 		if s.inflight.CompareAndSwap(cur, next) {
-			return next, true, false
+			return s.commitReservation(next)
 		}
 	}
+}
+
+// commitReservation validates the shedder is still open after inflight was
+// incremented. If [Shedder.Close] ran concurrently, the reservation is rolled
+// back and callers receive closed=true so no operation is admitted after
+// shutdown.
+func (s *Shedder) commitReservation(next int64) (int64, bool, bool) {
+	if s.closed.Load() {
+		s.inflight.Add(-1)
+		return 0, false, true
+	}
+	return next, true, false
 }
 
 // Release frees the in-flight slot held by the token. It is safe to call
@@ -260,7 +273,7 @@ func runAfterAdmit[T any](s *Shedder, ctx context.Context, priority Priority, n 
 // priority is admitted only while the overload fraction stays under its cutoff.
 // It is pure: the count is supplied by the caller after reserving a slot.
 func (s *Shedder) admits(priority Priority, inflight int64) bool {
-	if priority >= PriorityCritical {
+	if priority == PriorityCritical {
 		return true
 	}
 
@@ -280,8 +293,8 @@ func (s *Shedder) admits(priority Priority, inflight int64) bool {
 	case PriorityNormal:
 		return overload < cutoffNormal
 	default:
-		// PriorityHigh is the only remaining value below PriorityCritical, which
-		// returned above; anything else is treated as high.
+		// Values outside the named constants (including corrupt casts) are
+		// treated like PriorityHigh — shed under severe overload only.
 		return overload < cutoffHigh
 	}
 }
@@ -337,9 +350,11 @@ func (s *Shedder) ResetStats() {
 }
 
 // Close shuts the shedder down: subsequent [Execute], [TryExecute], and
-// [Acquire] calls return [ErrClosed]. In-flight operations are unaffected and
-// their tokens may still be released. Close is idempotent and always returns nil;
-// the error return satisfies the common closer contract used across urx.
+// [Acquire] calls return [ErrClosed]. Optimistic CAS reservations re-check
+// closed via [commitReservation] and roll back when shutdown wins the race.
+// In-flight operations are unaffected and their tokens may still be released.
+// Close is idempotent and always returns nil; the error return satisfies the
+// common closer contract used across urx.
 func (s *Shedder) Close() error {
 	s.closed.Store(true)
 	return nil

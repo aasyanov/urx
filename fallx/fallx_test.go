@@ -1,6 +1,7 @@
 package fallx
 
 import (
+	"container/heap"
 	"context"
 	"errors"
 	"fmt"
@@ -64,6 +65,29 @@ func TestNew_DefaultsToStatic(t *testing.T) {
 	fb := New[int]()
 	defer func() { _ = fb.Close() }()
 	assert.Equal(t, StrategyStatic, fb.Strategy())
+	assert.Empty(t, fb.shards)
+}
+
+func TestNew_StaticStrategyAllocatesNoCache(t *testing.T) {
+	fb := New(WithStatic("backup"))
+	defer func() { _ = fb.Close() }()
+	assert.Empty(t, fb.shards)
+}
+
+func TestNew_CachedStrategyAllocatesShards(t *testing.T) {
+	fb := New(WithCached[int](time.Minute, 16), WithShards[int](4))
+	defer func() { _ = fb.Close() }()
+	assert.Len(t, fb.shards, 4)
+}
+
+func TestSeed_StaticStrategyIsNoOp(t *testing.T) {
+	fb := New(WithStatic("backup"))
+	defer func() { _ = fb.Close() }()
+
+	fb.Seed("k", "ignored")
+	fb.SeedWithTTL("k", "ignored", time.Minute)
+	assert.Empty(t, fb.shards)
+	assert.Zero(t, fb.Stats().CacheSize)
 }
 
 // --- Static strategy ---
@@ -186,6 +210,7 @@ func TestExecute_CachedMissReturnsErrNoCached(t *testing.T) {
 
 	_, err := Execute(fb, context.Background(), failFn[int](errPrimary))
 	require.ErrorIs(t, err, ErrNoCached)
+	assert.Contains(t, err.Error(), "key="+DefaultKey)
 	assert.Equal(t, int64(1), fb.Stats().CacheMisses)
 }
 
@@ -422,6 +447,19 @@ func TestExecute_CancelledCtxStillRunsFallback(t *testing.T) {
 	assert.Equal(t, int64(1), fb.Stats().FallbackUsed)
 }
 
+func TestExecute_ExpiredCtxStillRunsFallback(t *testing.T) {
+	fb := New(WithStatic("backup"))
+	defer func() { _ = fb.Close() }()
+
+	got, err := Execute(fb, testx.ExpiredCtx(),
+		func(ctx context.Context, _ FallController) (string, error) {
+			return "", ctx.Err()
+		})
+	require.NoError(t, err)
+	assert.Equal(t, "backup", got)
+	assert.Equal(t, int64(1), fb.Stats().FallbackUsed)
+}
+
 func TestExecute_CtxThreadedToFuncFallback(t *testing.T) {
 	fb := New(WithFunc(func(ctx context.Context, fc FallController) (int, error) {
 		// The same cancelled ctx is handed to the fallback unchanged.
@@ -514,6 +552,19 @@ func TestWithOnFallback_FiresOnFailure(t *testing.T) {
 	assert.Equal(t, int64(1), fired.Load())
 }
 
+func TestWithOnFallback_NilIgnored(t *testing.T) {
+	var fired atomic.Int64
+	fb := New(
+		WithStatic("backup"),
+		WithOnFallback[string](func(error, Strategy) { fired.Add(1) }),
+		WithOnFallback[string](nil),
+	)
+	defer func() { _ = fb.Close() }()
+
+	_, _ = Execute(fb, context.Background(), failFn[string](errPrimary))
+	assert.Equal(t, int64(1), fired.Load())
+}
+
 func TestWithOp_LabelsPrimaryPanic(t *testing.T) {
 	fb := New(WithFunc(func(_ context.Context, fc FallController) (int, error) {
 		// Surface the primary panic by re-failing; assert via Error path below.
@@ -572,20 +623,33 @@ func TestOptions_ShardClamping(t *testing.T) {
 	tests := []struct {
 		name      string
 		opts      []Option[int]
+		want      int
 		minShards int
 		maxShards int
 	}{
-		{name: "negative shards floored", opts: []Option[int]{WithShards[int](-3)}, minShards: DefaultShards, maxShards: DefaultShards},
-		{name: "shards bounded by capacity", opts: []Option[int]{WithCached[int](time.Minute, 8), WithShards[int](100)}, minShards: 1, maxShards: 8},
-		{name: "nil option skipped", opts: []Option[int]{nil}, minShards: DefaultShards, maxShards: DefaultShards},
+		{name: "negative shards floored", opts: []Option[int]{WithShards[int](-3)}, want: DefaultShards, minShards: DefaultShards, maxShards: DefaultShards},
+		{name: "shards capped by capacity", opts: []Option[int]{WithCached[int](time.Minute, 8), WithShards[int](100)}, want: 2, minShards: 2, maxShards: 2},
+		{name: "nil option skipped", opts: []Option[int]{nil}, want: DefaultShards, minShards: DefaultShards, maxShards: DefaultShards},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := newConfig(tt.opts)
+			if tt.want != 0 {
+				assert.Equal(t, tt.want, cfg.shardCount)
+			}
 			assert.GreaterOrEqual(t, cfg.shardCount, tt.minShards)
 			assert.LessOrEqual(t, cfg.shardCount, tt.maxShards)
 		})
 	}
+}
+
+func TestOptions_StrategyLastWins(t *testing.T) {
+	cfg := newConfig([]Option[int]{
+		WithStatic(1),
+		WithFunc(func(context.Context, FallController) (int, error) { return 2, nil }),
+		WithCached[int](time.Minute, 16),
+	})
+	assert.Equal(t, StrategyCached, cfg.strategy)
 }
 
 func TestWithCached_NonPositiveUsesDefaults(t *testing.T) {
@@ -617,6 +681,20 @@ func TestExecute_ConcurrentCachedAccess(t *testing.T) {
 	assertCacheSizeConsistent(t, fb)
 }
 
+func TestFuzzRegression_CachedReplayShortTTL(t *testing.T) {
+	key := "\xfcQ&user-42"
+	fb := New(WithCached[int](16*time.Millisecond, -12), WithShards[int](4))
+	defer func() { _ = fb.Close() }()
+
+	_, err := ExecuteWithKey(fb, context.Background(), key, okFn(1))
+	require.NoError(t, err)
+	assert.Equal(t, 1, fb.Stats().CacheSize)
+
+	got, err := ExecuteWithKey(fb, context.Background(), key, failFn[int](errPrimary))
+	require.NoError(t, err)
+	assert.Equal(t, 1, got)
+}
+
 func TestExecute_ConcurrentStaticFallback(t *testing.T) {
 	fb := New(WithStatic(-1))
 	defer func() { _ = fb.Close() }()
@@ -627,4 +705,28 @@ func TestExecute_ConcurrentStaticFallback(t *testing.T) {
 	})
 	st := fb.Stats()
 	assert.Equal(t, st.Calls, st.FallbackUsed)
+}
+
+func TestEvictIfNeeded_ResyncsOnStaleHeapEntry(t *testing.T) {
+	fb := New(WithCached[int](time.Minute, 4), WithShards[int](1))
+	defer func() { _ = fb.Close() }()
+
+	for i := 0; i < 4; i++ {
+		fb.Seed(fmt.Sprintf("k%d", i), i)
+	}
+	fb.cacheSize.Store(100)
+
+	shard := fb.shards[0]
+	shard.mu.Lock()
+	ghost := &cacheEntry[int]{
+		key:        "ghost",
+		lastAccess: time.Now(),
+		heapIndex:  -1,
+	}
+	heap.Push(&shard.lru, ghost)
+	shard.mu.Unlock()
+
+	fb.evictIfNeeded()
+	assert.LessOrEqual(t, fb.Stats().CacheSize, 4)
+	assertCacheSizeConsistent(t, fb)
 }

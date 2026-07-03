@@ -29,6 +29,22 @@ func (c *fixConfig) Validate(fix bool) []error {
 	return nil
 }
 
+// autofixCleanConfig repairs Port when fix=true and reports success (nil).
+type autofixCleanConfig struct {
+	Port int `yaml:"port" json:"port" toml:"port"`
+}
+
+func (c *autofixCleanConfig) Validate(fix bool) []error {
+	if c.Port <= 0 {
+		if fix {
+			c.Port = 8080
+			return nil
+		}
+		return []error{errors.New("port must be > 0")}
+	}
+	return nil
+}
+
 func staticReader(data []byte, err error) func(string) ([]byte, error) {
 	return func(string) ([]byte, error) { return data, err }
 }
@@ -358,10 +374,14 @@ func TestMarshal_ErrorPaths(t *testing.T) {
 		_, err := Marshal(&testConfig{}, FormatAuto)
 		require.ErrorIs(t, err, ErrUnsupportedFormat)
 	})
-	t.Run("unencodable value", func(t *testing.T) {
-		_, err := Marshal(map[string]any{"fn": func() {}}, FormatJSON)
-		require.ErrorIs(t, err, ErrWriteFailed)
-	})
+		t.Run("unencodable value", func(t *testing.T) {
+			_, err := Marshal(map[string]any{"fn": func() {}}, FormatJSON)
+			require.ErrorIs(t, err, ErrWriteFailed)
+		})
+		t.Run("unencodable value yaml", func(t *testing.T) {
+			_, err := Marshal(map[string]any{"fn": func() {}}, FormatYAML)
+			require.ErrorIs(t, err, ErrWriteFailed)
+		})
 }
 
 func TestFormat_String(t *testing.T) {
@@ -394,4 +414,154 @@ func TestLoad_NoValidatorIsFine(t *testing.T) {
 	var cfg testConfig // does not implement Validator
 	err := Load("c.yaml", &cfg, WithReader(staticReader([]byte("port: 1\n"), nil)))
 	require.NoError(t, err)
+}
+
+func TestParse_EmptyPayloadPerCodec(t *testing.T) {
+	tests := []struct {
+		name    string
+		format  Format
+		wantErr error
+	}{
+		{name: "yaml accepts empty", format: FormatYAML, wantErr: nil},
+		{name: "toml accepts empty", format: FormatTOML, wantErr: nil},
+		{name: "json rejects empty", format: FormatJSON, wantErr: ErrParseFailed},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := testConfig{Port: 99, Host: "keep"}
+			err := Parse([]byte(""), &cfg, WithFormat(tt.format))
+			if tt.wantErr != nil {
+				require.ErrorIs(t, err, tt.wantErr)
+				assert.Equal(t, 99, cfg.Port, "decode failure must not mutate dst")
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, 99, cfg.Port)
+		})
+	}
+}
+
+func TestLoad_ExtensionlessPath(t *testing.T) {
+	var cfg testConfig
+	err := Load("config", &cfg, WithReader(staticReader([]byte("port: 1\n"), nil)))
+	require.ErrorIs(t, err, ErrUnsupportedFormat)
+}
+
+func TestLoad_CreateIfMissingAutoFixWritesRepaired(t *testing.T) {
+	var written []byte
+	c := &autofixCleanConfig{}
+	err := Load("new.yaml", c,
+		WithCreateIfMissing(),
+		WithAutoFix(),
+		WithReader(staticReader(nil, os.ErrNotExist)),
+		WithWriter(func(_ string, d []byte, _ os.FileMode) error {
+			written = d
+			return nil
+		}),
+	)
+	require.NoError(t, err)
+	assert.Equal(t, 8080, c.Port)
+	assert.Contains(t, string(written), "port: 8080")
+}
+
+func TestSave_MarshalFailure(t *testing.T) {
+	tests := []struct {
+		name   string
+		path   string
+		format Format
+		src    any
+	}{
+		{name: "json", path: "out.json", format: FormatJSON, src: map[string]any{"fn": func() {}}},
+		{name: "yaml", path: "out.yaml", format: FormatYAML, src: map[string]any{"fn": func() {}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := Save(tt.path, tt.src,
+				WithFormat(tt.format),
+				WithWriter(func(string, []byte, os.FileMode) error {
+					t.Fatal("writer must not run when marshal fails")
+					return nil
+				}),
+			)
+			require.ErrorIs(t, err, ErrWriteFailed)
+		})
+	}
+}
+
+func TestSave_FormatOverrideUnknownExtension(t *testing.T) {
+	var got []byte
+	cfg := testConfig{Port: 7, Host: "h"}
+	err := Save("out.conf", &cfg,
+		WithFormat(FormatYAML),
+		WithWriter(func(_ string, d []byte, _ os.FileMode) error {
+			got = d
+			return nil
+		}),
+	)
+	require.NoError(t, err)
+	assert.Contains(t, string(got), "port: 7")
+}
+
+func TestSave_AcceptsValueType(t *testing.T) {
+	var got []byte
+	cfg := testConfig{Port: 3}
+	err := Save("out.yaml", cfg, WithWriter(func(_ string, d []byte, _ os.FileMode) error {
+		got = d
+		return nil
+	}))
+	require.NoError(t, err)
+	assert.Contains(t, string(got), "port: 3")
+}
+
+func TestMarshal_TrailingNewline(t *testing.T) {
+	cfg := testConfig{Port: 1, Host: "h"}
+	for _, format := range []Format{FormatYAML, FormatJSON, FormatTOML} {
+		t.Run(format.String(), func(t *testing.T) {
+			data, err := Marshal(&cfg, format)
+			require.NoError(t, err)
+			require.NotEmpty(t, data)
+			assert.Equal(t, byte('\n'), data[len(data)-1])
+		})
+	}
+}
+
+func TestOptions_Defaults(t *testing.T) {
+	cfg := defaultConfig()
+	assert.Equal(t, FormatAuto, cfg.format)
+	assert.False(t, cfg.autoFix)
+	assert.False(t, cfg.createOK)
+	assert.Equal(t, defaultFileMode, cfg.fileMode)
+	assert.NotNil(t, cfg.reader)
+	assert.NotNil(t, cfg.writer)
+}
+
+func TestWithFormat_AppliesToAllOperations(t *testing.T) {
+	t.Run("parse", func(t *testing.T) {
+		var cfg testConfig
+		err := Parse([]byte(`{"port":2}`), &cfg, WithFormat(FormatJSON))
+		require.NoError(t, err)
+		assert.Equal(t, 2, cfg.Port)
+	})
+	t.Run("save", func(t *testing.T) {
+		var got []byte
+		cfg := testConfig{Port: 4}
+		err := Save("x.conf", &cfg,
+			WithFormat(FormatJSON),
+			WithWriter(func(_ string, d []byte, _ os.FileMode) error { got = d; return nil }),
+		)
+		require.NoError(t, err)
+		assert.Contains(t, string(got), `"port": 4`)
+	})
+}
+
+func TestUnmarshal_UnresolvedFormatPanics(t *testing.T) {
+	require.Panics(t, func() {
+		_ = unmarshal([]byte("port: 1"), &testConfig{}, FormatAuto)
+	})
+}
+
+func TestMarshal_UnresolvedFormatPanics(t *testing.T) {
+	require.Panics(t, func() {
+		_, _ = marshal(&testConfig{}, FormatAuto)
+	})
 }

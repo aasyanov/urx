@@ -2,6 +2,7 @@ package hedgex
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 )
@@ -93,6 +94,65 @@ func FuzzDelays(f *testing.F) {
 			if ds[i] < ds[i-1] {
 				t.Fatalf("delays not monotonic at %d: %v < %v", i, ds[i], ds[i-1])
 			}
+		}
+	})
+}
+
+// FuzzExecuteMulti drives ExecuteMulti with fuzzed configuration and a mix of
+// nil and non-nil backends. The oracle matches [FuzzExecute]: no panic, always
+// terminates, and success/failure matches the succeed flag.
+func FuzzExecuteMulti(f *testing.F) {
+	f.Add(3, int64(time.Millisecond), int64(time.Second), true, byte(0))
+	f.Add(2, int64(0), int64(0), false, byte(1))
+	f.Add(4, int64(time.Microsecond), int64(time.Millisecond), true, byte(2))
+
+	f.Fuzz(func(t *testing.T, parallel int, delayNs, maxDelayNs int64, succeed bool, nilPattern byte) {
+		if parallel > 8 {
+			parallel = 8
+		}
+		delay := time.Duration(delayNs % int64(5*time.Millisecond))
+		maxDelay := time.Duration(maxDelayNs % int64(10*time.Millisecond))
+
+		h := New(
+			WithMaxParallel(parallel),
+			WithDelay(delay),
+			WithMaxDelay(maxDelay),
+		)
+
+		fns := make([]HedgeFunc[int], parallel)
+		for i := range fns {
+			if nilPattern&(1<<uint(i%8)) != 0 {
+				continue
+			}
+			fns[i] = func(context.Context, HedgeController) (int, error) {
+				if succeed {
+					return 42, nil
+				}
+				return 0, errSentinel
+			}
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+
+		got, err := ExecuteMulti(h, ctx, fns)
+		if !anyNonNil(fns) {
+			if err == nil || !errors.Is(err, ErrNilFunc) {
+				t.Fatalf("expected ErrNilFunc for all-nil slice, got %v", err)
+			}
+			return
+		}
+		if succeed {
+			if err != nil {
+				t.Fatalf("expected success, got error: %v", err)
+			}
+			if got != 42 {
+				t.Fatalf("expected value 42, got %d", got)
+			}
+			return
+		}
+		if err == nil {
+			t.Fatalf("expected failure, got success with value %d", got)
 		}
 	})
 }

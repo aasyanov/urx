@@ -54,6 +54,28 @@ func BenchmarkLoad_InjectedReader(b *testing.B) {
 	}
 }
 
+func BenchmarkParse_JSON_Parallel(b *testing.B) {
+	data := []byte(`{"port":9090,"host":"db.local"}`)
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			var cfg testConfig
+			_ = Parse(data, &cfg, WithFormat(FormatJSON))
+		}
+	})
+}
+
+func BenchmarkLoad_InjectedReader_Parallel(b *testing.B) {
+	reader := staticReader([]byte("port: 9090\nhost: db.local\n"), nil)
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			var cfg testConfig
+			_ = Load("config.yaml", &cfg, WithReader(reader))
+		}
+	})
+}
+
 func BenchmarkResolveFormat(b *testing.B) {
 	b.ResetTimer()
 	for b.Loop() {

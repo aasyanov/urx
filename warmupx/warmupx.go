@@ -65,6 +65,7 @@ type Warmer struct {
 	mu       sync.RWMutex
 	start    time.Time
 	capacity float64
+	progress float64
 	warming  bool
 	complete bool
 
@@ -115,6 +116,7 @@ func (w *Warmer) StartAt(capacity float64) {
 	gen := w.gen
 	w.start = time.Now()
 	w.capacity = capacity
+	w.progress = 0
 	w.warming = true
 	w.complete = false
 	w.stopCh = make(chan struct{})
@@ -125,12 +127,13 @@ func (w *Warmer) StartAt(capacity float64) {
 	go w.loop(gen, stopCh)
 }
 
-// Stop halts the warmup. The current capacity is retained; subsequent
-// admission decisions use it unchanged until the next [Warmer.Start]. Stop is
-// idempotent.
+// Stop halts the warmup. The current capacity and progress are retained;
+// subsequent admission decisions use the frozen capacity unchanged until the
+// next [Warmer.Start]. Stop is idempotent.
 func (w *Warmer) Stop() {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	w.freezeProgressLocked()
 	w.stopLocked()
 	w.warming = false
 }
@@ -177,7 +180,9 @@ func (w *Warmer) IsComplete() bool {
 }
 
 // Progress returns the warmup progress in [0, 1], where 1 means the warmup has
-// completed.
+// completed. While a ramp is active, progress tracks elapsed time. After
+// [Warmer.Stop] before completion, progress is frozen at the value observed
+// when Stop was called.
 func (w *Warmer) Progress() float64 {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
@@ -414,19 +419,35 @@ func (w *Warmer) ResetStats() {
 
 // --- Internal ---
 
+// freezeProgressLocked snapshots elapsed progress for a halted ramp. The caller
+// must hold w.mu.
+func (w *Warmer) freezeProgressLocked() {
+	if !w.warming || w.start.IsZero() {
+		return
+	}
+	p := float64(time.Since(w.start)) / float64(w.cfg.duration)
+	if p > 1.0 {
+		p = 1.0
+	}
+	w.progress = p
+}
+
 // progressLocked returns warmup progress in [0, 1]. The caller must hold w.mu.
 func (w *Warmer) progressLocked() float64 {
 	if w.complete {
 		return 1.0
 	}
-	if !w.warming || w.start.IsZero() {
+	if w.start.IsZero() {
 		return 0.0
 	}
-	p := float64(time.Since(w.start)) / float64(w.cfg.duration)
-	if p > 1.0 {
-		return 1.0
+	if w.warming {
+		p := float64(time.Since(w.start)) / float64(w.cfg.duration)
+		if p > 1.0 {
+			return 1.0
+		}
+		return p
 	}
-	return p
+	return w.progress
 }
 
 // loop drives periodic capacity updates for the run identified by gen until

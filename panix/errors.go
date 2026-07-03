@@ -3,6 +3,8 @@ package panix
 import "fmt"
 
 // PanicError represents a recovered panic with a captured stack trace.
+// It is safe for concurrent read access from multiple goroutines once
+// constructed; instances are not mutated after recovery.
 //
 // Op identifies the call site using the "package.Function" convention.
 // Value is the original value passed to panic(). Stack is the raw

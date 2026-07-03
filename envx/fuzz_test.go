@@ -27,6 +27,7 @@ func FuzzParse(f *testing.F) {
 		_, _ = parse[uint](raw)
 		_, _ = parse[float64](raw)
 		_, _ = parse[time.Duration](raw)
+		_, _ = parse[time.Time](raw)
 		_, _ = parse[[]string](raw)
 	})
 }

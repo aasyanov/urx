@@ -19,10 +19,11 @@
 // [ObjectPool] is a generic, type-safe pool backed by [sync.Pool], with an
 // optional reset hook:
 //
-//	pool := poolx.NewObjectPool(
+//	pool, err := poolx.NewObjectPool(
 //	    func() *bytes.Buffer { return new(bytes.Buffer) },
 //	    poolx.WithReset(func(b *bytes.Buffer) { b.Reset() }),
 //	)
+//	if err != nil { return err }
 //	buf := pool.Get()
 //	defer pool.Put(buf)
 //
@@ -31,9 +32,10 @@
 // [Batch] buffers items and flushes them through a context-aware function
 // when the buffer fills or the interval elapses:
 //
-//	b := poolx.NewBatch(func(ctx context.Context, items []Event) error {
+//	b, err := poolx.NewBatch(func(ctx context.Context, items []Event) error {
 //	    return db.Insert(ctx, items)
 //	}, poolx.WithBatchSize(500))
+//	if err != nil { return err }
 //	defer b.Close()
 //	b.Add(evt)
 //

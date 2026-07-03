@@ -43,6 +43,30 @@ func ExampleLazy_error() {
 	// is ErrInitFailed: true
 }
 
+// ExampleLazy_panic shows that a panicking init is recovered as a
+// panix.PanicError and retried on the next Get.
+func ExampleLazy_panic() {
+	var calls int
+	lazy, _ := syncx.NewLazy(func() (int, error) {
+		calls++
+		if calls == 1 {
+			panic("not ready")
+		}
+		return 1, nil
+	})
+
+	_, err := lazy.Get()
+	var pe interface{ Error() string }
+	_ = errors.As(err, &pe)
+	fmt.Println("first call panicked:", err != nil)
+
+	v, err := lazy.Get()
+	fmt.Println("second call:", v, err)
+	// Output:
+	// first call panicked: true
+	// second call: 1 <nil>
+}
+
 // ExampleGroup demonstrates running tasks concurrently with a bounded worker
 // count and collecting the first error.
 func ExampleGroup() {

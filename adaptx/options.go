@@ -66,6 +66,9 @@ const (
 	// is the default operation name when [WithOp] is not supplied.
 	opExecute = "adaptx.Execute"
 
+	// opTryExecute labels panics recovered while running a [TryExecute] callback.
+	opTryExecute = "adaptx.TryExecute"
+
 	// minLimitFloor is the absolute floor [New] enforces on the resolved
 	// minimum limit: a non-positive minimum would let the limiter stall.
 	minLimitFloor = 1
@@ -152,6 +155,15 @@ func (c config) opOrDefault() string {
 		return c.op
 	}
 	return opExecute
+}
+
+// opOrDefaultTry returns the configured operation name, or [opTryExecute] when
+// none was set.
+func (c config) opOrDefaultTry() string {
+	if c.op != "" {
+		return c.op
+	}
+	return opTryExecute
 }
 
 // ringCapacity derives the ring-buffer size from the sample window, clamped to
@@ -307,8 +319,8 @@ func WithJitter(f float64) Option {
 }
 
 // WithOp sets the logical operation name attached to panic reports raised by
-// the callback (e.g. "db.query", "api.search"). Default: "adaptx.Execute".
-// Empty values are ignored.
+// the callback (e.g. "db.query", "api.search"). Default: [opExecute] for
+// [Execute] and [opTryExecute] for [TryExecute]. Empty values are ignored.
 func WithOp(op string) Option {
 	return func(c *config) {
 		if op != "" {

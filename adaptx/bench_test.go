@@ -70,6 +70,28 @@ func BenchmarkTryAcquire(b *testing.B) {
 	}
 }
 
+func BenchmarkTryExecute(b *testing.B) {
+	l := New(WithInitialLimit(1000), WithMaxLimit(1000), WithWarmupSamples(0))
+	defer l.Close()
+	ctx := context.Background()
+	fn := func(context.Context, AdaptController) (int, error) { return 0, nil }
+
+	b.ResetTimer()
+	for b.Loop() {
+		_, _, _ = TryExecute(l, ctx, fn)
+	}
+}
+
+func BenchmarkAllow(b *testing.B) {
+	l := New(WithInitialLimit(1000), WithMaxLimit(1000))
+	defer l.Close()
+
+	b.ResetTimer()
+	for b.Loop() {
+		_ = l.Allow()
+	}
+}
+
 func BenchmarkLimit(b *testing.B) {
 	l := New()
 	defer l.Close()

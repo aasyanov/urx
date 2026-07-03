@@ -24,10 +24,17 @@ func collectingFlush[T any](dst *[][]T, mu *sync.Mutex) func(context.Context, []
 	}
 }
 
-func TestNewBatch_NilFlushPanics(t *testing.T) {
-	assert.Panics(t, func() {
-		NewBatch[int](nil)
-	})
+func newTestBatch[T any](t *testing.T, flush func(context.Context, []T) error, opts ...BatchOption) *Batch[T] {
+	t.Helper()
+	b, err := NewBatch(flush, opts...)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = b.Close() })
+	return b
+}
+
+func TestNewBatch_NilFlushReturnsErrNilFlush(t *testing.T) {
+	_, err := NewBatch[int](nil)
+	require.ErrorIs(t, err, ErrNilFlush)
 }
 
 func TestBatchOptions(t *testing.T) {
@@ -37,15 +44,14 @@ func TestBatchOptions(t *testing.T) {
 		wantSize  int
 		wantFlush time.Duration
 	}{
-		{name: "defaults", opts: nil, wantSize: defaultBatchSize, wantFlush: defaultFlushInterval},
+		{name: "defaults", opts: nil, wantSize: DefaultBatchSize, wantFlush: DefaultFlushInterval},
 		{name: "custom", opts: []BatchOption{WithBatchSize(10), WithFlushInterval(2 * time.Second)}, wantSize: 10, wantFlush: 2 * time.Second},
-		{name: "zero size ignored", opts: []BatchOption{WithBatchSize(0)}, wantSize: defaultBatchSize, wantFlush: defaultFlushInterval},
-		{name: "negative interval ignored", opts: []BatchOption{WithFlushInterval(-time.Second)}, wantSize: defaultBatchSize, wantFlush: defaultFlushInterval},
+		{name: "zero size ignored", opts: []BatchOption{WithBatchSize(0)}, wantSize: DefaultBatchSize, wantFlush: DefaultFlushInterval},
+		{name: "negative interval ignored", opts: []BatchOption{WithFlushInterval(-time.Second)}, wantSize: DefaultBatchSize, wantFlush: DefaultFlushInterval},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			b := NewBatch(func(context.Context, []int) error { return nil }, tt.opts...)
-			defer b.Close()
+			b := newTestBatch(t, func(context.Context, []int) error { return nil }, tt.opts...)
 			st := b.Stats()
 			assert.Equal(t, tt.wantSize, st.BatchSize)
 			assert.Equal(t, tt.wantFlush.String(), st.FlushInterval)
@@ -53,11 +59,16 @@ func TestBatchOptions(t *testing.T) {
 	}
 }
 
+func TestWithBatchOp_OverridesDefault(t *testing.T) {
+	assert.Equal(t, opBatchFlush, newBatchConfig(nil).opOrDefault())
+	assert.Equal(t, "db.insert", newBatchConfig([]BatchOption{WithBatchOp("db.insert")}).opOrDefault())
+	assert.Equal(t, opBatchFlush, newBatchConfig([]BatchOption{WithBatchOp("")}).opOrDefault())
+}
+
 func TestBatch_FlushOnSizeThreshold(t *testing.T) {
 	var got [][]int
 	var mu sync.Mutex
-	b := NewBatch(collectingFlush(&got, &mu), WithBatchSize(3), WithFlushInterval(time.Hour))
-	defer b.Close()
+	b := newTestBatch(t, collectingFlush(&got, &mu), WithBatchSize(3), WithFlushInterval(time.Hour))
 
 	for i := range 3 {
 		require.NoError(t, b.Add(i))
@@ -72,8 +83,7 @@ func TestBatch_FlushOnSizeThreshold(t *testing.T) {
 func TestBatch_ManualFlush(t *testing.T) {
 	var got [][]int
 	var mu sync.Mutex
-	b := NewBatch(collectingFlush(&got, &mu), WithBatchSize(100), WithFlushInterval(time.Hour))
-	defer b.Close()
+	b := newTestBatch(t, collectingFlush(&got, &mu), WithBatchSize(100), WithFlushInterval(time.Hour))
 
 	require.NoError(t, b.Add(1))
 	require.NoError(t, b.Add(2))
@@ -86,11 +96,10 @@ func TestBatch_ManualFlush(t *testing.T) {
 
 func TestBatch_FlushEmptyIsNoop(t *testing.T) {
 	var flushes atomic.Int64
-	b := NewBatch(func(context.Context, []int) error {
+	b := newTestBatch(t, func(context.Context, []int) error {
 		flushes.Add(1)
 		return nil
 	}, WithFlushInterval(time.Hour))
-	defer b.Close()
 
 	require.NoError(t, b.Flush(context.Background()))
 	assert.Equal(t, int64(0), flushes.Load())
@@ -99,8 +108,7 @@ func TestBatch_FlushEmptyIsNoop(t *testing.T) {
 func TestBatch_PeriodicFlush(t *testing.T) {
 	var got [][]int
 	var mu sync.Mutex
-	b := NewBatch(collectingFlush(&got, &mu), WithBatchSize(1000), WithFlushInterval(20*time.Millisecond))
-	defer b.Close()
+	b := newTestBatch(t, collectingFlush(&got, &mu), WithBatchSize(1000), WithFlushInterval(20*time.Millisecond))
 
 	require.NoError(t, b.Add(42))
 
@@ -113,34 +121,58 @@ func TestBatch_PeriodicFlush(t *testing.T) {
 
 func TestBatch_FlushErrorJoinsErrFlushFailed(t *testing.T) {
 	sentinel := errors.New("db down")
-	b := NewBatch(func(context.Context, []int) error { return sentinel }, WithBatchSize(1), WithFlushInterval(time.Hour))
-	defer b.Close()
+	b, err := NewBatch(func(context.Context, []int) error { return sentinel }, WithBatchSize(1), WithFlushInterval(time.Hour))
+	require.NoError(t, err)
+	defer func() { _ = b.Close() }()
 
-	err := b.Add(1)
+	err = b.Add(1)
 	require.ErrorIs(t, err, ErrFlushFailed)
 	require.ErrorIs(t, err, sentinel)
 	assert.Equal(t, uint64(1), b.Stats().Errors)
+	assert.Equal(t, 1, b.Stats().Buffered, "failed flush must restore items")
+}
+
+func TestBatch_FlushErrorRequeuesForRetry(t *testing.T) {
+	var attempts atomic.Int64
+	b, err := NewBatch(func(context.Context, []int) error {
+		if attempts.Add(1) == 1 {
+			return errors.New("temporary")
+		}
+		return nil
+	}, WithBatchSize(1), WithFlushInterval(time.Hour))
+	require.NoError(t, err)
+	defer func() { _ = b.Close() }()
+
+	require.Error(t, b.Add(42))
+	assert.Equal(t, int64(1), attempts.Load())
+	assert.Equal(t, uint64(0), b.Stats().Flushed)
+
+	require.NoError(t, b.Flush(context.Background()))
+	assert.Equal(t, int64(2), attempts.Load())
+	assert.Equal(t, uint64(1), b.Stats().Flushed)
+	assert.Equal(t, uint64(1), b.Stats().Items)
 }
 
 func TestBatch_FlushPanicRecovered(t *testing.T) {
-	b := NewBatch(func(context.Context, []int) error { panic("flush boom") }, WithBatchSize(1), WithFlushInterval(time.Hour))
-	defer b.Close()
+	b, err := NewBatch(func(context.Context, []int) error { panic("flush boom") }, WithBatchSize(1), WithFlushInterval(time.Hour))
+	require.NoError(t, err)
+	defer func() { _ = b.Close() }()
 
-	err := b.Add(1)
+	err = b.Add(1)
 	require.ErrorIs(t, err, ErrFlushFailed)
 	assert.Equal(t, uint64(1), b.Stats().Errors)
+	assert.Equal(t, 1, b.Stats().Buffered)
 }
 
 func TestBatch_WithErrorHandlerReceivesTickerErrors(t *testing.T) {
 	sentinel := errors.New("periodic fail")
 	var captured atomic.Pointer[error]
-	b := NewBatch(
+	b := newTestBatch(t,
 		func(context.Context, []int) error { return sentinel },
 		WithBatchSize(1000),
 		WithFlushInterval(20*time.Millisecond),
 		WithErrorHandler(func(err error) { captured.Store(&err) }),
 	)
-	defer b.Close()
 
 	require.NoError(t, b.Add(1))
 
@@ -152,12 +184,11 @@ func TestBatch_WithErrorHandlerReceivesTickerErrors(t *testing.T) {
 
 func TestBatch_FlushReceivesContext(t *testing.T) {
 	var sawDeadline atomic.Bool
-	b := NewBatch(func(ctx context.Context, _ []int) error {
+	b := newTestBatch(t, func(ctx context.Context, _ []int) error {
 		_, ok := ctx.Deadline()
 		sawDeadline.Store(ok)
 		return nil
 	}, WithBatchSize(1000), WithFlushInterval(time.Hour))
-	defer b.Close()
 
 	require.NoError(t, b.Add(1))
 
@@ -167,8 +198,36 @@ func TestBatch_FlushReceivesContext(t *testing.T) {
 	assert.True(t, sawDeadline.Load())
 }
 
+func TestBatch_LifecycleContextCancelledOnClose(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	b, err := NewBatch(func(ctx context.Context, _ []int) error {
+		close(started)
+		<-ctx.Done()
+		<-release
+		return ctx.Err()
+	}, WithBatchSize(1000), WithFlushInterval(time.Hour))
+	require.NoError(t, err)
+
+	require.NoError(t, b.Add(1))
+	go func() {
+		_ = b.Flush(b.lifecycleCtx())
+	}()
+	<-started
+
+	go func() { _ = b.Close() }()
+
+	select {
+	case <-b.lifecycleCtx().Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("lifecycle context not cancelled on Close")
+	}
+	close(release)
+}
+
 func TestBatch_AddAfterCloseReturnsErrClosed(t *testing.T) {
-	b := NewBatch(func(context.Context, []int) error { return nil })
+	b, err := NewBatch(func(context.Context, []int) error { return nil })
+	require.NoError(t, err)
 	require.NoError(t, b.Close())
 
 	testx.AssertOpAfterClose(t, func() error { return b.Add(1) }, ErrClosed, "Add")
@@ -178,7 +237,8 @@ func TestBatch_AddAfterCloseReturnsErrClosed(t *testing.T) {
 func TestBatch_CloseFlushesRemaining(t *testing.T) {
 	var got [][]int
 	var mu sync.Mutex
-	b := NewBatch(collectingFlush(&got, &mu), WithBatchSize(1000), WithFlushInterval(time.Hour))
+	b, err := NewBatch(collectingFlush(&got, &mu), WithBatchSize(1000), WithFlushInterval(time.Hour))
+	require.NoError(t, err)
 
 	require.NoError(t, b.Add(1))
 	require.NoError(t, b.Add(2))
@@ -189,14 +249,25 @@ func TestBatch_CloseFlushesRemaining(t *testing.T) {
 	assert.Equal(t, [][]int{{1, 2}}, got)
 }
 
+func TestBatch_CloseReturnsFlushError(t *testing.T) {
+	sentinel := errors.New("close flush failed")
+	b, err := NewBatch(func(context.Context, []int) error { return sentinel })
+	require.NoError(t, err)
+
+	require.NoError(t, b.Add(1))
+	err = b.Close()
+	require.ErrorIs(t, err, ErrFlushFailed)
+	require.ErrorIs(t, err, sentinel)
+}
+
 func TestBatch_CloseIdempotent(t *testing.T) {
-	b := NewBatch(func(context.Context, []int) error { return nil })
+	b, err := NewBatch(func(context.Context, []int) error { return nil })
+	require.NoError(t, err)
 	testx.AssertCloseIdempotent(t, b)
 }
 
 func TestBatch_ResetStats(t *testing.T) {
-	b := NewBatch(func(context.Context, []int) error { return nil }, WithBatchSize(1), WithFlushInterval(time.Hour))
-	defer b.Close()
+	b := newTestBatch(t, func(context.Context, []int) error { return nil }, WithBatchSize(1), WithFlushInterval(time.Hour))
 
 	require.NoError(t, b.Add(1))
 	require.Positive(t, b.Stats().Flushed)
@@ -210,10 +281,11 @@ func TestBatch_ResetStats(t *testing.T) {
 
 func TestBatch_ConcurrentAdd(t *testing.T) {
 	var total atomic.Int64
-	b := NewBatch(func(_ context.Context, items []int) error {
+	b, err := NewBatch(func(_ context.Context, items []int) error {
 		total.Add(int64(len(items)))
 		return nil
 	}, WithBatchSize(10), WithFlushInterval(time.Hour))
+	require.NoError(t, err)
 
 	testx.HammerVoid(20, 100, func() {
 		_ = b.Add(1)

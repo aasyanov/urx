@@ -12,7 +12,7 @@ import (
 // ---------------------------------------------------------------------------
 
 // Closer is the interface that wraps the Close method.
-// Matches bulkx.Bulkhead, shedx.Shedder, quotax.Quota, lrux.LRU, etc.
+// Matches bulkx.Bulkhead, shedx.Shedder, quotax.Quota, lrux.Cache, etc.
 type Closer interface {
 	Close() error
 }

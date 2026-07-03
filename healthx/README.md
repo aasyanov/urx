@@ -105,21 +105,24 @@ Readiness(ctx)
     │                 └── error / cancel / panic    → StatusDown, ErrUnhealthy
     ├── collect results, bounded by (checkTimeout + 100ms grace):
     │     ├── result arrives        → record it
-    │     └── collection deadline   → force-mark unreported checks ErrTimeout, return
+    │     └── collection deadline   → drain buffered results, then force-mark
+    │                                 unreported checks ErrTimeout, return
     └── any StatusDown ⇒ overall StatusDown (else StatusUp)
 ```
 
 Checks run **concurrently** — total readiness latency is the slowest check, not the sum. Each check gets its own derived context with the configured per-check timeout, so one hung dependency cannot stall the probe. The registry snapshot is copied under a read lock and the lock is released *before* any check runs, so a slow check never blocks `Register`.
 
-**Bounded collection.** A well-behaved check honours its context and returns at or before its per-check deadline. A *misbehaving* check that ignores the context and blocks anyway cannot wedge the probe: result collection is itself bounded by `checkTimeout + 100ms`. When that bound elapses, any component that has not reported is force-marked `StatusDown` with `ErrTimeout` and `Readiness` returns. The orphaned goroutine keeps running until its blocking call finally returns, then sends into the buffered result channel (sized to the check count) and exits — it never leaks on the channel.
+**Bounded collection.** A well-behaved check honours its context and returns at or before its per-check deadline. A *misbehaving* check that ignores the context and blocks anyway cannot wedge the probe: result collection is itself bounded by `checkTimeout + 100ms`. When that bound elapses, any already-finished results still in the channel are drained first; only then are unreported components force-marked `StatusDown` with `ErrTimeout` and `Readiness` returns. The orphaned goroutine keeps running until its blocking call finally returns, then sends into the buffered result channel (sized to the check count) and exits — it never leaks on the channel.
 
 ### Failure classification
 
-A failing check is reported with a non-empty `ComponentStatus.Error`. The message is built from one of two sentinels so callers can classify failures with `errors.Is` on the component error when they construct one, and humans can read the JSON:
+A failing check is reported with a non-empty `ComponentStatus.Error` string in the JSON probe response. Internally, messages are built from one of two sentinels (`fmt.Errorf` with `%w`):
 
-- **Per-check deadline exceeded** (`context.DeadlineExceeded`) → message joins [`ErrTimeout`] with the component name.
-- **Check ignored its context and outran the collection deadline** → message joins [`ErrTimeout`] with the component name (see [How It Works → Bounded collection](#readiness)).
-- **Any other error, a cancelled parent context, or a recovered panic** → message joins [`ErrUnhealthy`] with the name and cause.
+- **Per-check deadline exceeded** (`context.DeadlineExceeded`) → joins [`ErrTimeout`] with the component name.
+- **Check ignored its context and outran the collection deadline** → joins [`ErrTimeout`] with the component name (see [How It Works → Bounded collection](#readiness)).
+- **Any other error, a cancelled parent context, or a recovered panic** → joins [`ErrUnhealthy`] with the name and cause.
+
+`ComponentStatus.Error` is a **plain string** in JSON — it does not preserve Go's error chain. Classify probe failures with `strings.Contains(msg, healthx.ErrTimeout.Error())` or `strings.Contains(msg, healthx.ErrUnhealthy.Error())`. Use [`errors.Is`] only when handling the unexported wrappers at compile time (see `errors_test.go`) or when a check returns an `error` value directly in application code.
 
 A cancelled *parent* context (the probe request was dropped by the client) is classified as `ErrUnhealthy`, not `ErrTimeout` — only a check that overran its own deadline is a timeout.
 
@@ -136,7 +139,7 @@ On `SIGTERM`, call `MarkDown()` before draining. Readiness immediately returns `
 | Readiness is concurrent              | All registered checks run in parallel; latency ≈ slowest check                                                                          |
 | Every check is timeout-bounded       | Each check runs under `context.WithTimeout(ctx, checkTimeout)`                                                                          |
 | A check never crashes the probe      | Every check runs under `panix.SafeVoid`; a panic becomes `StatusDown`                                                                   |
-| A check never wedges the probe       | Result collection is bounded by `checkTimeout + 100ms`; a context-ignoring check is force-reported as timed out and `Readiness` returns |
+| A check never wedges the probe       | Result collection is bounded by `checkTimeout + 100ms`; buffered results are drained before force-timeout; a context-ignoring check is reported timed out and `Readiness` returns |
 | A slow check never blocks `Register` | Checks run after the registry snapshot is copied and the lock released                                                                  |
 | MarkDown short-circuits readiness    | While marked down, readiness returns `StatusDown` without running checks                                                                |
 | Down ⇒ 503, Up ⇒ 200                 | HTTP handlers map `StatusDown` to 503 and `StatusUp` to 200                                                                             |
@@ -228,7 +231,7 @@ metrics.Gauge("health.readiness.failures", float64(st.ReadinessFailures))
 | Symbol                     | Signature                                                                          | Description                                               |
 | -------------------------- | ---------------------------------------------------------------------------------- | --------------------------------------------------------- |
 | `New`                      | `func New(opts ...Option) *Checker`                                                | Create a checker (default 5s per-check timeout)           |
-| `Checker.Register`         | `func (c *Checker) Register(name string, check func(ctx) error)`                   | Register a named check (panics if check is nil)           |
+| `Checker.Register`         | `func (c *Checker) Register(name string, check func(ctx) error)`                   | Register a named check (panics if name is empty or check is nil) |
 | `Checker.Liveness`         | `func (c *Checker) Liveness(ctx) Report`                                           | Cheap up/down report; runs no checks                      |
 | `Checker.Readiness`        | `func (c *Checker) Readiness(ctx) Report`                                          | Run all checks concurrently, aggregate                    |
 | `Checker.MarkDown`         | `func (c *Checker) MarkDown()`                                                     | Force down (for graceful shutdown)                        |
@@ -263,7 +266,7 @@ metrics.Gauge("health.readiness.failures", float64(st.ReadinessFailures))
 | `ErrTimeout`   | Joined into a component's error message when its check exceeds the per-check timeout |
 
 
-Both are sentinel errors created with `errors.New`; the messages stored in `ComponentStatus.Error` are built from them and can be matched textually or reconstructed. A panicking check is recovered via `panix.SafeVoid` (op `"healthx.Checker.check"`) and reported as `ErrUnhealthy`, never propagated.
+Both are sentinel errors created with `errors.New` and joined via `%w` into internal wrappers (`errTimeout`, `errUnhealthy`). The string stored in `ComponentStatus.Error` is the wrapper's `.Error()` output — classify it with `strings.Contains` on `ErrTimeout.Error()` or `ErrUnhealthy.Error()`. Wrapper chains are tested with [`errors.Is`] in `errors_test.go`. A panicking check is recovered via `panix.SafeVoid` (op `"healthx.Checker.check"`) and reported as `ErrUnhealthy`, never propagated.
 
 ## Pitfalls
 
@@ -272,6 +275,9 @@ Both are sentinel errors created with `errors.New`; the messages stored in `Comp
 
 > [!WARNING]
 > **Registering the same name twice keeps both checks.** Both run on every readiness probe, but they share the `Report.Components` map key, so the last result to arrive wins non-deterministically. Use distinct names per component.
+
+> [!WARNING]
+> **Empty component names panic.** `Register("", check)` is a programmer error, like a nil check function.
 
 > [!WARNING]
 > **Check functions should respect their context.** Each check receives a context with the per-check timeout. A check that ignores `ctx` and blocks anyway is still reported `StatusDown` (via the bounded-collection backstop, after `checkTimeout + 100ms`), and `Readiness` returns on time — but the underlying goroutine keeps running until its blocking call finally returns, pinning that goroutine and its resources. Always thread the context into your I/O (`db.PingContext(ctx)`, not `db.Ping()`) so the goroutine is released promptly.
@@ -283,7 +289,7 @@ Both are sentinel errors created with `errors.New`; the messages stored in `Comp
 
 **Thread safety.** `Checker` is safe for concurrent use. The check registry is guarded by a `sync.RWMutex`; the down flag and readiness counters use `sync/atomic`. `Register`, `Liveness`, `Readiness`, `MarkDown`/`MarkUp`, and `Stats` may all be called concurrently.
 
-**Goroutine model.** `Liveness` spawns nothing. `Readiness` spawns one goroutine per registered check; results are collected through a buffered channel sized to the check count, so no goroutine blocks on send even if collection has already returned. A context-respecting check's goroutine exits when its check returns or its derived context fires. Collection is bounded by `checkTimeout + 100ms`, so `Readiness` never blocks indefinitely on a context-ignoring check; that check's goroutine outlives the call but exits once its blocking operation completes. The registry snapshot is taken under a read lock that is released before any check runs.
+**Goroutine model.** `Liveness` spawns nothing. `Readiness` spawns one goroutine per registered check; results are collected through a buffered channel sized to the check count, so no goroutine blocks on send even if collection has already returned. A context-respecting check's goroutine exits when its check returns or its derived context fires. Collection is bounded by `checkTimeout + 100ms`; when the deadline fires, buffered results are drained before any component is force-marked timed out, so `Readiness` never misclassifies a finished check. A context-ignoring check's goroutine outlives the call but exits once its blocking operation completes. The registry snapshot is taken under a read lock that is released before any check runs.
 
 **Race detector.** The suite hammers `Readiness` from dozens of goroutines while a concurrent goroutine mutates the registry via `Register`, under `-race`.
 
@@ -315,9 +321,9 @@ Both are sentinel errors created with `errors.New`; the messages stored in `Comp
 
 | Metric         | Value                                           |
 | -------------- | ----------------------------------------------- |
-| Test functions | 26                                              |
+| Test functions | 33                                              |
 | Benchmarks     | 5                                               |
-| Fuzz targets   | 2                                               |
+| Fuzz targets   | 3                                               |
 | Examples       | 2                                               |
 | Coverage       | 100.0%                                          |
 | Race detector  | All pass                                        |
@@ -333,9 +339,10 @@ healthx/
 ├── types.go            # Status, ComponentStatus, Report, CheckerStats
 ├── options.go          # Option, WithTimeout, config, defaults
 ├── errors.go           # ErrUnhealthy, ErrTimeout + wrappers
+├── errors_test.go      # errors.Is tests for error wrappers
 ├── healthx_test.go     # Unit + table-driven + HTTP + concurrency tests
 ├── bench_test.go       # 5 benchmarks: liveness + readiness sizes + parallel
-├── fuzz_test.go        # FuzzReadiness, FuzzReadinessWithFailingCheck
+├── fuzz_test.go        # FuzzReadiness, FuzzReadinessWithFailingCheck, FuzzReadinessMarkDown
 ├── example_test.go     # 2 runnable GoDoc examples
 ├── footprint_test.go   # Struct size guards
 └── README.md           # This file

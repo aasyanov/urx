@@ -8,6 +8,6 @@ import (
 
 func TestFootprint(t *testing.T) {
 	testx.AssertFootprint(t, []testx.SizeEntry{
-		{Name: "config", Size: testx.Sizeof[config](), Max: 48},
+		{Name: "config", Size: testx.Sizeof[config](), Max: 8},
 	})
 }

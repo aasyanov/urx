@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestClosed_AllReadPathsNoOp covers the closed guards on every read and
@@ -26,7 +27,7 @@ func TestClosed_AllReadPathsNoOp(t *testing.T) {
 	assert.NotPanics(t, func() { c.SetMulti(map[string]int{"x": 1}) })
 	assert.Equal(t, 0, c.DeleteMulti([]string{"a"}))
 	assert.NotPanics(t, func() { c.Range(func(string, int) bool { return true }) })
-	_, err := c.GetOrComputeCtx(context.Background(), "a", func(context.Context) (int, error) {
+	_, err := c.GetOrCompute(context.Background(), "a", func(context.Context) (int, error) {
 		return 1, nil
 	})
 	assert.ErrorIs(t, err, ErrClosed)
@@ -76,9 +77,9 @@ func TestIteration_SweepsExpiredWithCallback(t *testing.T) {
 	})
 }
 
-// TestCompute_CapacityEvictionDuringInsert covers the capacity branch inside
+// TestGetOrCompute_CapacityEvictionDuringInsert covers the capacity branch inside
 // insertLocked and removeTailLocked reached via GetOrCompute.
-func TestCompute_CapacityEvictionDuringInsert(t *testing.T) {
+func TestGetOrCompute_CapacityEvictionDuringInsert(t *testing.T) {
 	var evicted int
 	c := New[int, int](
 		WithCapacity[int, int](2),
@@ -86,27 +87,15 @@ func TestCompute_CapacityEvictionDuringInsert(t *testing.T) {
 	)
 	defer c.Close()
 
-	c.GetOrCompute(1, func() int { return 1 })
-	c.GetOrCompute(2, func() int { return 2 })
-	c.GetOrCompute(3, func() int { return 3 }) // evicts key 1
+	for i := range 3 {
+		_, err := c.GetOrCompute(context.Background(), i, func(context.Context) (int, error) {
+			return i, nil
+		})
+		require.NoError(t, err)
+	}
 
 	assert.Equal(t, 2, c.Len())
 	assert.Equal(t, 1, evicted)
-}
-
-// TestComputeCtx_CapacityEvictionDuringInsert covers the same path on the
-// context-aware compute.
-func TestComputeCtx_CapacityEvictionDuringInsert(t *testing.T) {
-	c := New[int, int](WithCapacity[int, int](2))
-	defer c.Close()
-
-	for i := range 5 {
-		_, err := c.GetOrComputeCtx(context.Background(), i, func(context.Context) (int, error) {
-			return i, nil
-		})
-		assert.NoError(t, err)
-	}
-	assert.Equal(t, 2, c.Len())
 }
 
 // TestResize_EvictsWithCallback covers Resize shrinking with an eviction

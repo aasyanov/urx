@@ -53,6 +53,15 @@ func (c config) opOrDefault() string {
 	return opExecute
 }
 
+// opOrDefaultTry returns the configured operation name, or [opTryExecute] when
+// none was set.
+func (c config) opOrDefaultTry() string {
+	if c.op != "" {
+		return c.op
+	}
+	return opTryExecute
+}
+
 // WithMaxConcurrent sets the maximum number of operations that may execute
 // simultaneously. Default: [DefaultMaxConcurrent]. Values <= 0 are ignored
 // (the default is kept), and a final value below [minConcurrent] is floored
@@ -79,7 +88,8 @@ func WithTimeout(d time.Duration) Option {
 }
 
 // WithOp sets the logical operation name attached to panic reports raised by
-// the callback (e.g. "api.search", "db.query"). Default: "bulkx.Execute".
+// the callback (e.g. "api.search", "db.query"). Default: [opExecute] for
+// [Execute] and [opTryExecute] for [TryExecute]. An empty name is ignored.
 func WithOp(op string) Option {
 	return func(c *config) {
 		if op != "" {

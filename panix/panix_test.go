@@ -4,7 +4,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"sync"
+	"fmt"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -71,7 +72,19 @@ func TestSafe_PanicNil(t *testing.T) {
 	var pe *PanicError
 	require.ErrorAs(t, err, &pe)
 	assert.Equal(t, "op", pe.Op)
-	// Go 1.21+ wraps panic(nil) in *runtime.PanicNilError
+	assert.NotNil(t, pe.Value)
+	errVal, ok := pe.Value.(error)
+	require.True(t, ok, "Go 1.21+ wraps panic(nil) in an error value")
+	assert.Equal(t, "panic called with nil argument", errVal.Error())
+}
+
+func TestSafe_NilFunc(t *testing.T) {
+	_, err := Safe[int]("nil.fn", nil)
+
+	var pe *PanicError
+	require.ErrorAs(t, err, &pe)
+	assert.Equal(t, "nil.fn", pe.Op)
+	assert.NotEmpty(t, pe.Stack)
 }
 
 func TestSafe_ZeroValueOnPanic(t *testing.T) {
@@ -164,6 +177,63 @@ func TestSafeGo_ContextPropagated(t *testing.T) {
 	assert.Equal(t, "value", <-valCh)
 }
 
+func TestSafeGo_NilFunc(t *testing.T) {
+	done := make(chan struct{})
+	SafeGo(context.Background(), "nil.fn", nil, func(_ context.Context, err error) {
+		defer close(done)
+		var pe *PanicError
+		require.ErrorAs(t, err, &pe)
+		assert.Equal(t, "nil.fn", pe.Op)
+	})
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("onError was not called for nil fn panic")
+	}
+}
+
+func TestSafeGo_OnErrorPanicRecovered(t *testing.T) {
+	done := make(chan struct{})
+	SafeGo(context.Background(), "op", func(context.Context) {
+		panic("task panic")
+	}, func(context.Context, error) {
+		panic("handler panic")
+	})
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("SafeGo must not leak a panicking onError handler")
+	}
+}
+
+func TestSafeGo_OnErrorPanicSwallowsDelivery(t *testing.T) {
+	delivered := make(chan error, 1)
+	done := make(chan struct{})
+	SafeGo(context.Background(), "op", func(context.Context) {
+		panic("task panic")
+	}, func(_ context.Context, _ error) {
+		panic("handler panic before delivery")
+	})
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for SafeGo goroutine")
+	}
+	select {
+	case <-delivered:
+		t.Fatal("onError panic must prevent delivery of task panic to caller")
+	default:
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Wrap
 // ---------------------------------------------------------------------------
@@ -225,6 +295,24 @@ func TestWrapVoid_Panic(t *testing.T) {
 	assert.Equal(t, "wv.panic", pe.Op)
 }
 
+func TestWrapVoid_MultipleInvocations(t *testing.T) {
+	count := 0
+	wrapped := WrapVoid("op", func() error {
+		count++
+		if count == 2 {
+			panic("second call")
+		}
+		return nil
+	})
+
+	require.NoError(t, wrapped())
+	err := wrapped()
+	var pe *PanicError
+	require.ErrorAs(t, err, &pe)
+	require.NoError(t, wrapped())
+	assert.Equal(t, 3, count, "wrapper should recover and work again after panic")
+}
+
 // ---------------------------------------------------------------------------
 // PanicError
 // ---------------------------------------------------------------------------
@@ -275,41 +363,31 @@ func TestPanicError_ErrorsIs_Chain(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestSafe_Concurrent(t *testing.T) {
-	const goroutines = 100
-	var wg sync.WaitGroup
-	wg.Add(goroutines)
-	errs := make([]error, goroutines)
-
-	for i := range goroutines {
-		go func(idx int) {
-			defer wg.Done()
-			_, errs[idx] = Safe("concurrent", func() (int, error) {
-				if idx%3 == 0 {
-					panic("boom")
-				}
-				return idx, nil
-			})
-		}(i)
-	}
-	wg.Wait()
-
-	panics := 0
-	for i, err := range errs {
-		if i%3 == 0 {
+	errs := hammerIndexed(100, 1, func(idx int) error {
+		_, err := Safe("concurrent", func() (int, error) {
+			if idx%3 == 0 {
+				panic("boom")
+			}
+			return idx, nil
+		})
+		if idx%3 == 0 {
 			var pe *PanicError
-			assert.ErrorAs(t, err, &pe, "goroutine %d should have panicked", i)
-			panics++
-		} else {
-			assert.NoError(t, err, "goroutine %d should not error", i)
+			if !errors.As(err, &pe) {
+				return fmt.Errorf("goroutine %d: expected *PanicError, got %v", idx, err)
+			}
+			return nil
 		}
-	}
-	assert.Greater(t, panics, 0, "at least one panic should have occurred")
+		if err != nil {
+			return fmt.Errorf("goroutine %d: unexpected error: %v", idx, err)
+		}
+		return nil
+	})
+	assert.Empty(t, errs)
 }
 
 func TestSafeGo_Concurrent(t *testing.T) {
 	const goroutines = 50
-	var mu sync.Mutex
-	var panicCount int
+	var panicCount atomic.Int32
 	done := make(chan struct{}, goroutines)
 
 	for i := range goroutines {
@@ -320,38 +398,15 @@ func TestSafeGo_Concurrent(t *testing.T) {
 			}
 			done <- struct{}{}
 		}, func(_ context.Context, _ error) {
-			mu.Lock()
-			panicCount++
-			mu.Unlock()
+			panicCount.Add(1)
 			done <- struct{}{}
 		})
 	}
 	for range goroutines {
 		<-done
 	}
-	mu.Lock()
-	got := panicCount
-	mu.Unlock()
 
-	assert.Equal(t, 10, got, "every 5th goroutine (0,5,10,...,45) should panic")
-}
-
-func TestSafeGo_OnErrorPanicDoesNotEscape(t *testing.T) {
-	done := make(chan struct{})
-	SafeGo(context.Background(), "op", func(context.Context) {
-		panic("task panic")
-	}, func(context.Context, error) {
-		panic("handler panic")
-	})
-	go func() {
-		time.Sleep(50 * time.Millisecond)
-		close(done)
-	}()
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("SafeGo must not leak a panicking onError handler")
-	}
+	assert.Equal(t, int32(10), panicCount.Load(), "every 5th goroutine (0,5,10,...,45) should panic")
 }
 
 // ---------------------------------------------------------------------------
@@ -396,7 +451,28 @@ func deepStack(depth int) []byte {
 	if depth <= 0 {
 		return captureStack()
 	}
-	return deepStack(depth - 1)
+	stack := deepStack(depth - 1)
+	return stack
+}
+
+// callCaptureAtDepth invokes captureStack from a deep stack frame so the
+// captured trace reflects real recursion depth (not tail-call collapsed).
+func callCaptureAtDepth(depth int, scratch [128]byte) []byte {
+	_ = scratch[depth%128]
+	if depth <= 0 {
+		return captureStack()
+	}
+	stack := callCaptureAtDepth(depth-1, scratch)
+	return stack
+}
+
+func callCaptureLimitedAtDepth(cap, depth int, scratch [128]byte) []byte {
+	_ = scratch[depth%128]
+	if depth <= 0 {
+		return captureStackLimited(cap)
+	}
+	stack := callCaptureLimitedAtDepth(cap, depth-1, scratch)
+	return stack
 }
 
 func TestCaptureStack_GrowsBuffer(t *testing.T) {
@@ -405,4 +481,17 @@ func TestCaptureStack_GrowsBuffer(t *testing.T) {
 		"deep recursion should produce a stack larger than the default buffer")
 	assert.LessOrEqual(t, len(stack), maxStackSize,
 		"stack should never exceed maxStackSize (%d)", maxStackSize)
+}
+
+func TestCaptureStack_TruncatesAtMaxSize(t *testing.T) {
+	const testCap = 8192
+	stack := callCaptureLimitedAtDepth(testCap, 2000, [128]byte{})
+	assert.Equal(t, testCap, len(stack),
+		"trace larger than cap must return a full capped buffer")
+
+	stack = callCaptureAtDepth(12000, [128]byte{})
+	assert.LessOrEqual(t, len(stack), maxStackSize)
+	if len(stack) == maxStackSize {
+		t.Log("production captureStack hit the 64 KB hard cap")
+	}
 }

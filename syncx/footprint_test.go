@@ -8,6 +8,7 @@ import (
 
 func TestFootprint(t *testing.T) {
 	testx.AssertFootprint(t, []testx.SizeEntry{
+		{Name: "Group", Size: testx.Sizeof[Group](), Max: 120},
 		{Name: "GroupStats", Size: testx.Sizeof[GroupStats](), Max: 32},
 		{Name: "groupConfig", Size: testx.Sizeof[groupConfig](), Max: 8},
 		{Name: "Lazy[int]", Size: testx.Sizeof[Lazy[int]](), Max: 48},

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/aasyanov/urx/internal/testx"
+	"github.com/aasyanov/urx/panix"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -89,7 +90,28 @@ func TestDo_NonRetryableStopsImmediately(t *testing.T) {
 	)...)
 	require.ErrorIs(t, err, ErrExhausted)
 	require.ErrorIs(t, err, permanent)
+	assert.ErrorContains(t, err, "attempts=1")
 	assert.Equal(t, int64(1), calls.Load(), "non-retryable error must stop after one attempt")
+}
+
+func TestDo_NonRetryableReportsStoppingAttempt(t *testing.T) {
+	transient := errors.New("transient")
+	permanent := errors.New("permanent")
+	var calls atomic.Int64
+	_, err := Do(context.Background(), func(context.Context, RetryController) (int, error) {
+		n := calls.Add(1)
+		if n <= 2 {
+			return 0, transient
+		}
+		return 0, permanent
+	}, fastOpts(
+		WithMaxAttempts(5),
+		WithRetryIf(func(err error) bool { return !errors.Is(err, permanent) }),
+	)...)
+	require.ErrorIs(t, err, ErrExhausted)
+	require.ErrorIs(t, err, permanent)
+	assert.ErrorContains(t, err, "attempts=3")
+	assert.Equal(t, int64(3), calls.Load())
 }
 
 func TestDo_CancelledBeforeFirstAttempt(t *testing.T) {
@@ -100,6 +122,17 @@ func TestDo_CancelledBeforeFirstAttempt(t *testing.T) {
 	}, fastOpts()...)
 	require.ErrorIs(t, err, ErrCancelled)
 	require.ErrorIs(t, err, context.Canceled)
+	assert.Zero(t, calls.Load())
+}
+
+func TestDo_CancelledWithExpiredContext(t *testing.T) {
+	var calls atomic.Int64
+	_, err := Do(testx.ExpiredCtx(), func(context.Context, RetryController) (int, error) {
+		calls.Add(1)
+		return 0, nil
+	}, fastOpts()...)
+	require.ErrorIs(t, err, ErrCancelled)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
 	assert.Zero(t, calls.Load())
 }
 
@@ -138,6 +171,31 @@ func TestDo_PanicExhaustedReportsPanicError(t *testing.T) {
 	testx.RequirePanicError(t, err, opDo)
 }
 
+func TestDo_PanicNonRetryableStopsImmediately(t *testing.T) {
+	_, err := Do(context.Background(), func(context.Context, RetryController) (int, error) {
+		panic("non-retryable boom")
+	}, fastOpts(
+		WithMaxAttempts(5),
+		WithRetryIf(func(err error) bool {
+			var pe *panix.PanicError
+			return !errors.As(err, &pe)
+		}),
+	)...)
+	require.ErrorIs(t, err, ErrExhausted)
+	assert.ErrorContains(t, err, "attempts=1")
+	testx.RequirePanicError(t, err, opDo)
+}
+
+func TestDo_AbortAfterPanicReturnsAborted(t *testing.T) {
+	_, err := Do(context.Background(), func(_ context.Context, rc RetryController) (int, error) {
+		rc.Abort()
+		panic("boom after abort")
+	}, fastOpts(WithMaxAttempts(5))...)
+	require.ErrorIs(t, err, ErrAborted)
+	assert.ErrorContains(t, err, "attempt=1")
+	testx.RequirePanicError(t, err, opDo)
+}
+
 func TestDo_CustomOpInPanic(t *testing.T) {
 	_, err := Do(context.Background(), func(context.Context, RetryController) (int, error) {
 		panic("boom")
@@ -160,6 +218,22 @@ func TestDo_SingleAttemptNoRetry(t *testing.T) {
 	assert.Equal(t, int64(1), sim.Calls(), "must execute exactly once")
 	assert.Zero(t, retries.Load(), "no onRetry without a retry")
 	assert.Less(t, time.Since(start), time.Second, "must not sleep when there is no retry")
+}
+
+func TestDo_CustomBackoffDelaysBetweenAttempts(t *testing.T) {
+	sim := testx.FailUntil(1)
+	start := time.Now()
+	_, err := Do(context.Background(), func(context.Context, RetryController) (int, error) {
+		return 1, sim.Call()
+	},
+		WithMaxAttempts(3),
+		WithBackoff(40*time.Millisecond),
+		WithMaxBackoff(time.Hour),
+		WithJitter(false),
+	)
+	require.NoError(t, err)
+	assert.GreaterOrEqual(t, time.Since(start), 40*time.Millisecond)
+	assert.Equal(t, int64(2), sim.Calls())
 }
 
 // --- RetryController ---
@@ -264,6 +338,78 @@ func TestOptions_IgnoreNonPositive(t *testing.T) {
 	assert.Equal(t, DefaultMaxBackoff, cfg.maxBackoff)
 }
 
+func TestNewConfig_SkipsNilOption(t *testing.T) {
+	cfg := newConfig([]Option{
+		WithMaxAttempts(5),
+		nil,
+		WithJitter(false),
+	})
+	assert.Equal(t, 5, cfg.maxAttempts)
+	assert.False(t, cfg.jitter)
+}
+
+func TestOptions_ApplyCustomValues(t *testing.T) {
+	retryIf := func(error) bool { return true }
+	onRetry := func(int, error) {}
+
+	tests := []struct {
+		name string
+		opts []Option
+		want config
+	}{
+		{
+			name: "custom backoff",
+			opts: []Option{WithBackoff(500 * time.Millisecond)},
+			want: config{maxAttempts: DefaultMaxAttempts, backoff: 500 * time.Millisecond, maxBackoff: DefaultMaxBackoff, jitter: true},
+		},
+		{
+			name: "custom max backoff",
+			opts: []Option{WithMaxBackoff(30 * time.Second)},
+			want: config{maxAttempts: DefaultMaxAttempts, backoff: DefaultBackoff, maxBackoff: 30 * time.Second, jitter: true},
+		},
+		{
+			name: "jitter disabled",
+			opts: []Option{WithJitter(false)},
+			want: config{maxAttempts: DefaultMaxAttempts, backoff: DefaultBackoff, maxBackoff: DefaultMaxBackoff, jitter: false},
+		},
+		{
+			name: "custom max attempts",
+			opts: []Option{WithMaxAttempts(9)},
+			want: config{maxAttempts: 9, backoff: DefaultBackoff, maxBackoff: DefaultMaxBackoff, jitter: true},
+		},
+		{
+			name: "custom op",
+			opts: []Option{WithOp("api.fetch")},
+			want: config{maxAttempts: DefaultMaxAttempts, backoff: DefaultBackoff, maxBackoff: DefaultMaxBackoff, jitter: true, op: "api.fetch"},
+		},
+		{
+			name: "retryIf and onRetry wired",
+			opts: []Option{WithRetryIf(retryIf), WithOnRetry(onRetry)},
+			want: config{maxAttempts: DefaultMaxAttempts, backoff: DefaultBackoff, maxBackoff: DefaultMaxBackoff, jitter: true, retryIf: retryIf, onRetry: onRetry},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := newConfig(tt.opts)
+			assert.Equal(t, tt.want.maxAttempts, got.maxAttempts)
+			assert.Equal(t, tt.want.backoff, got.backoff)
+			assert.Equal(t, tt.want.maxBackoff, got.maxBackoff)
+			assert.Equal(t, tt.want.jitter, got.jitter)
+			assert.Equal(t, tt.want.op, got.op)
+			if tt.want.retryIf != nil {
+				assert.NotNil(t, got.retryIf)
+			} else {
+				assert.Nil(t, got.retryIf)
+			}
+			if tt.want.onRetry != nil {
+				assert.NotNil(t, got.onRetry)
+			} else {
+				assert.Nil(t, got.onRetry)
+			}
+		})
+	}
+}
+
 func TestNewConfig_OpOrDefault(t *testing.T) {
 	assert.Equal(t, opDo, newConfig(nil).opOrDefault())
 	assert.Equal(t, "api.fetch", newConfig([]Option{WithOp("api.fetch")}).opOrDefault())
@@ -298,6 +444,7 @@ func TestBackoff_JitterWithinWindow(t *testing.T) {
 
 func TestSleep_ZeroReturnsContextErr(t *testing.T) {
 	assert.NoError(t, sleep(context.Background(), 0))
+	assert.NoError(t, sleep(context.Background(), -time.Nanosecond))
 	assert.ErrorIs(t, sleep(testx.CancelledCtx(), 0), context.Canceled)
 }
 
@@ -315,6 +462,18 @@ func TestSleep_CancelledStopsTimer(t *testing.T) {
 	err := sleep(ctx, time.Hour)
 	require.ErrorIs(t, err, context.DeadlineExceeded)
 	assert.Less(t, time.Since(start), time.Second, "cancel must not wait out the full delay")
+}
+
+func TestStopTimer_StopsPendingTimer(t *testing.T) {
+	timer := time.NewTimer(time.Hour)
+	stopTimer(timer)
+	assert.False(t, timer.Stop(), "already stopped")
+}
+
+func TestStopTimer_DrainsAlreadyFiredTimer(t *testing.T) {
+	timer := time.NewTimer(time.Millisecond)
+	<-timer.C
+	stopTimer(timer) // Stop returns false with an empty channel; exercises default branch
 }
 
 // --- isRetryable ---

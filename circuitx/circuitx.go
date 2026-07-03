@@ -114,10 +114,13 @@ func (b *Breaker) Failures() int {
 }
 
 // Reset forces the circuit back to [Closed] and clears the consecutive failure
-// counter. It does not affect the cumulative [Stats] counters. Use it to clear a
-// tripped breaker after an out-of-band recovery signal. Reset fires the
-// [WithOnStateChange] hook when it changes the state. It runs under the
-// transition mutex so it never races a concurrent trip or probe settlement.
+// counter and the half-open probe budget. It does not affect the cumulative
+// [Stats] counters. In-flight probes are allowed to finish; their deferred slot
+// release is a no-op once [Reset] has cleared the budget, so the counter never
+// goes negative. Use it to clear a tripped breaker after an out-of-band recovery
+// signal. Reset fires the [WithOnStateChange] hook when it changes the state.
+// It runs under the transition mutex so it never races a concurrent trip or
+// probe settlement.
 func (b *Breaker) Reset() {
 	b.mu.Lock()
 	b.failures.Store(0)
@@ -129,12 +132,14 @@ func (b *Breaker) Reset() {
 	}
 }
 
-// Stats returns a snapshot of breaker statistics. It is safe to call
-// concurrently with [Execute] and [TryExecute]; counters are read independently and may reflect a
-// call in progress.
+// Stats returns a read-only snapshot of breaker statistics. Unlike [Breaker.State],
+// Stats does not promote [Open] to [HalfOpen] and never fires the
+// [WithOnStateChange] hook. It is safe to call concurrently with [Execute] and
+// [TryExecute]; counters are read independently and may reflect a call in
+// progress.
 func (b *Breaker) Stats() Stats {
 	return Stats{
-		State:       b.State(),
+		State:       b.snapshotState(),
 		Failures:    int(b.failures.Load()),
 		MaxFailures: b.cfg.maxFailures,
 		Successes:   b.successes.Load(),
@@ -183,8 +188,9 @@ func (b *Breaker) IsClosed() bool {
 // or carrying failures in [Closed], resets to a clean [Closed]. On failure it
 // records the failure and may trip to [Open] once the consecutive-failure
 // threshold is reached, or immediately if the failure occurred in [HalfOpen] or
-// the callback called [CircuitController.Trip]. A failure marked with
-// [CircuitController.SkipFailure] is returned to the caller but not counted.
+// the callback called [CircuitController.Trip]. The callback's return value is
+// always passed through to the caller together with any error. A failure marked
+// with [CircuitController.SkipFailure] is returned to the caller but not counted.
 //
 // The callback receives a [CircuitController] exposing the state and failure
 // count at admission time.
@@ -255,12 +261,33 @@ func (b *Breaker) tryAdmit() (state State, ok bool) {
 	return state, true
 }
 
+// snapshotState returns the live circuit state without lazy Open→HalfOpen
+// promotion. Read-only introspection paths such as [Breaker.Stats] use this so
+// metrics polling never drives state transitions.
+func (b *Breaker) snapshotState() State {
+	return State(b.state.Load())
+}
+
+// releaseProbe frees one half-open probe slot. It never drives the in-flight
+// count below zero, so a concurrent [Breaker.Reset] that cleared the budget
+// cannot be clobbered by a finishing probe's deferred release.
+func (b *Breaker) releaseProbe() {
+	for {
+		cur := b.halfOpenInflight.Load()
+		if cur <= 0 {
+			return
+		}
+		if b.halfOpenInflight.CompareAndSwap(cur, cur-1) {
+			return
+		}
+	}
+}
+
 // executeRun runs fn after admission and settles the outcome on the breaker.
 // The caller must have already passed guard checks and won admission via tryAdmit.
 func executeRun[T any](b *Breaker, ctx context.Context, op string, state State, fn CircuitFunc[T]) (T, error) {
-	var zero T
 	if state == HalfOpen {
-		defer b.halfOpenInflight.Add(-1)
+		defer b.releaseProbe()
 	}
 
 	cc := &execution{
@@ -276,7 +303,7 @@ func executeRun[T any](b *Breaker, ctx context.Context, op string, state State, 
 	if err != nil && !cc.skipFailure {
 		b.totalFail.Add(1)
 		b.recordFailure(cc.tripped)
-		return zero, err
+		return val, err
 	}
 
 	if cc.tripped {

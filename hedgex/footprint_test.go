@@ -12,5 +12,6 @@ func TestFootprint(t *testing.T) {
 		{Name: "Hedger", Size: testx.Sizeof[Hedger](), Max: 96},
 		{Name: "execution", Size: testx.Sizeof[execution](), Max: 48},
 		{Name: "Stats", Size: testx.Sizeof[Stats](), Max: 32},
+		{Name: "result[int]", Size: testx.Sizeof[result[int]](), Max: 32},
 	})
 }

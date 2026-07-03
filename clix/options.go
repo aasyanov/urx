@@ -9,10 +9,13 @@ import (
 // optional deeper subcommands. The child inherits all parent flags via the
 // resolution chain (see package-level documentation on flag inheritance).
 //
-// Panics if a subcommand with the same name is already registered on the
-// same parent.
+// Panics if name is empty, or if a subcommand with the same name is already
+// registered on the same parent.
 func SubCommand(name, desc string, opts ...Option) Option {
 	return func(parent *Command) {
+		if name == "" {
+			panic("clix: empty subcommand name")
+		}
 		if _, dup := parent.subcommands[name]; dup {
 			panic(fmt.Sprintf("clix: duplicate subcommand %q", name))
 		}
@@ -53,6 +56,11 @@ func Run(fn Action) Option {
 //	)
 func Alias(names ...string) Option {
 	return func(c *Command) {
+		for _, name := range names {
+			if name == "" {
+				panic("clix: empty subcommand alias")
+			}
+		}
 		c.aliases = append(c.aliases, names...)
 	}
 }
@@ -74,16 +82,20 @@ func Version(v string) Option {
 //
 // The optional extras modify the flag metadata. Built-in extras are
 // [Required] (makes the flag mandatory) and [Enum] (restricts the value
-// to a closed set).
+// to a closed set). Custom extras may implement [FlagOption].
 //
 // AddFlag panics at construction time if:
 //   - T is not one of the supported types;
-//   - a flag with the same long name already exists on this command;
-//   - a flag with the same short alias already exists on this command;
+//   - name is empty;
+//   - a flag with the same long or short name already exists on this command;
+//   - a flag with the same long or short name is already defined on an ancestor;
 //   - an [Enum] value has a different type than T.
-func AddFlag[T any](target *T, name, short string, def T, usage string, extras ...func(*flagMeta)) Option {
+func AddFlag[T any](target *T, name, short string, def T, usage string, extras ...FlagOption) Option {
 	assertSupportedType(def)
 	return func(c *Command) {
+		if name == "" {
+			panic("clix: empty flag name")
+		}
 		if target == nil {
 			panic(fmt.Sprintf("clix: nil target for --%s", name))
 		}
@@ -95,6 +107,7 @@ func AddFlag[T any](target *T, name, short string, def T, usage string, extras .
 				panic(fmt.Sprintf("clix: duplicate short flag -%s", short))
 			}
 		}
+		assertNoShadowFlag(c, name, short)
 
 		_, isBool := any(def).(bool)
 		meta := &flagMeta{
@@ -138,18 +151,34 @@ func AddFlag[T any](target *T, name, short string, def T, usage string, extras .
 }
 
 // Required marks a flag as mandatory. When the flag is not provided by the
-// user, parsing fails with an [ErrRequired] error. Pass as an extra to
-// [AddFlag]:
+// user, parsing fails with an [ErrRequired] error. Returns a [FlagOption]
+// for use as an extra to [AddFlag]:
 //
 //	clix.AddFlag(&host, "host", "", "localhost", "server host", clix.Required())
-func Required() func(*flagMeta) { return func(f *flagMeta) { f.required = true } }
+func Required() FlagOption { return func(f *flagMeta) { f.required = true } }
 
 // Enum restricts a flag's accepted values to the given set. Values that
 // fall outside the set produce an [ErrEnumViolated] error. Each value must
 // have the same type as the flag's T; a type mismatch causes a construction-
-// time panic. Pass as an extra to [AddFlag]:
+// time panic. Returns a [FlagOption] for use as an extra to [AddFlag]:
 //
 //	clix.AddFlag(&level, "level", "l", "info", "log level",
 //	    clix.Enum("debug", "info", "warn", "error"),
 //	)
-func Enum(vals ...any) func(*flagMeta) { return func(f *flagMeta) { f.enumValues = vals } }
+func Enum(vals ...any) FlagOption { return func(f *flagMeta) { f.enumValues = vals } }
+
+// assertNoShadowFlag panics when name or short would hide an inherited flag
+// from an ancestor command. Shadowing would make help ambiguous and split
+// binding across two targets for the same flag token.
+func assertNoShadowFlag(c *Command, name, short string) {
+	for p := c.parent; p != nil; p = p.parent {
+		if _, exists := p.flagMap[name]; exists {
+			panic(fmt.Sprintf("clix: flag --%s on %q shadows inherited flag from %q", name, c.name, p.name))
+		}
+		if short != "" {
+			if _, exists := p.shortMap[short]; exists {
+				panic(fmt.Sprintf("clix: short flag -%s on %q shadows inherited flag from %q", short, c.name, p.name))
+			}
+		}
+	}
+}

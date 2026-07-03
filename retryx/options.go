@@ -57,7 +57,9 @@ func newConfig(opts []Option) config {
 		jitter:      true,
 	}
 	for _, opt := range opts {
-		opt(&cfg)
+		if opt != nil {
+			opt(&cfg)
+		}
 	}
 	if cfg.maxAttempts < minAttempts {
 		cfg.maxAttempts = minAttempts

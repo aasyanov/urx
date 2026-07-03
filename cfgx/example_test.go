@@ -23,6 +23,23 @@ func (c *appConfig) Validate(fix bool) []error {
 	return nil
 }
 
+// ExampleLoad reads a config file into a struct via an injected reader.
+func ExampleLoad() {
+	cfg := appConfig{Port: 8080, Host: "localhost"}
+
+	err := cfgx.Load("config.yaml", &cfg,
+		cfgx.WithReader(func(string) ([]byte, error) {
+			return []byte("port: 9090\n"), nil
+		}),
+	)
+	if err != nil {
+		fmt.Println("error:", err)
+		return
+	}
+	fmt.Printf("%d@%s\n", cfg.Port, cfg.Host)
+	// Output: 9090@localhost
+}
+
 // ExampleParse decodes an in-memory byte slice — the filesystem-free
 // counterpart of Load, ideal for embedded defaults and tests.
 func ExampleParse() {

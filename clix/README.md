@@ -109,7 +109,7 @@ Each flag carries a generic setter captured at [`AddFlag`] time. The setter pars
 | Run after error        | [`Parser.Run`] returns nil (no-op) when [`Parser.Err`] is non-nil.                                       |
 | IsSet semantics        | True only when the flag appeared on the command line, even for zero values.                              |
 | Reset idempotence      | [`Parser.Reset`] restores bound targets to defaults and clears positionals before re-parsing.            |
-| Fail-fast construction | Misconfiguration (duplicate names, bad types, enum mismatch) panics inside [`New`], never at parse time. |
+| Fail-fast construction | Misconfiguration (empty names, duplicates, shadow flags, bad types, enum mismatch) panics inside [`New`], never at parse time. |
 | Structured errors      | Every parse error wraps a sentinel; compare with [`errors.Is`].                                          |
 
 
@@ -225,13 +225,14 @@ for _, tc := range cases {
 | Symbol                | Signature                                                                                              | Description                                                  |
 | --------------------- | ------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------ |
 | `New`                 | `New(osArgs []string, name, desc string, opts ...Option) *Parser`                                      | Build the command tree and parse arguments.                  |
-| `AddFlag`             | `AddFlag[T any](target *T, name, short string, def T, usage string, extras ...func(*flagMeta)) Option` | Register a typed flag bound to a pointer.                    |
+| `AddFlag`             | `AddFlag[T any](target *T, name, short string, def T, usage string, extras ...FlagOption) Option` | Register a typed flag bound to a pointer.                    |
+| `FlagOption`          | `type FlagOption func(*flagMeta)`                                                                  | Modifier for [`AddFlag`] (e.g. [`Required`], [`Enum`]).    |
 | `SubCommand`          | `SubCommand(name, desc string, opts ...Option) Option`                                                 | Register a nested subcommand.                                |
 | `Run`                 | `Run(fn Action) Option`                                                                                | Set the action executed when the command matches.            |
 | `Alias`               | `Alias(names ...string) Option`                                                                        | Register alternative names for a subcommand.                 |
 | `Version`             | `Version(v string) Option`                                                                             | Enable `--version` / `-V` handling.                          |
-| `Required`            | `Required() func(*flagMeta)`                                                                           | Mark a flag mandatory (extra for `AddFlag`).                 |
-| `Enum`                | `Enum(vals ...any) func(*flagMeta)`                                                                    | Restrict a flag to a closed value set (extra for `AddFlag`). |
+| `Required`            | `Required() FlagOption`                                                                            | Mark a flag mandatory (extra for `AddFlag`).                 |
+| `Enum`                | `Enum(vals ...any) FlagOption`                                                                     | Restrict a flag to a closed value set (extra for `AddFlag`). |
 | `Parser.Err`          | `Err() error`                                                                                          | First parse error, or `ErrHelp`/`ErrVersion`.                |
 | `Parser.Run`          | `Run() error`                                                                                          | Execute the matched action (no-op on parse error).           |
 | `Parser.Help`         | `Help() string`                                                                                        | Formatted help for the matched command.                      |
@@ -284,10 +285,20 @@ Any other type panics inside [`New`] at construction time.
 > `New` does not run actions. Forgetting to call `Parser.Run` after a successful parse means your handler never executes. Always: check `Err`, then call `Run`.
 
 > [!WARNING]
-> Construction-time mistakes panic. Duplicate flag/short names, duplicate subcommands, duplicate `Run`, unsupported flag types, and enum/type mismatches panic inside `New`. This is intentional — these are programming errors that must never ship. Do not wrap `New` in `recover` to mask them.
+> Construction-time mistakes panic. Empty command/flag/alias names, duplicate flag/short names, shadowing an inherited flag on a subcommand, duplicate subcommands, duplicate `Run`, unsupported flag types, and enum/type mismatches panic inside `New`. This is intentional — these are programming errors that must never ship. Do not wrap `New` in `recover` to mask them.
+
+> [!WARNING]
+> Parse errors are not transactional. When parsing fails midway (`--port 9090 --bad`), flags parsed before the error remain written to their bound pointers. Always check [`Parser.Err`] before acting on flag values.
 
 > [!WARNING]
 > String flags consume exactly one token. `--msg hello world` sets `msg=hello` and leaves `world` as a positional. Quote multi-word values: `--msg "hello world"`.
+
+## Known Limitations
+
+- **POSIX grouped short ambiguity.** A token like `-vp` without a space binds `port` to `"v"` when `p` is the trailing non-bool in the group. Use `-v -p 3000` or `-p 3000` when both flags need distinct values.
+- **cfgx/envx type subset.** CLI flags support `string`, `int`, `bool`, `float64`, `time.Duration`, and `time.Time`. Environment-only types (`[]string`, `int64`, `uint`) must be mapped before sharing a struct field with [`AddFlag`].
+- **Version is root-scoped.** Pass [`Version`] to the root [`New`] call. A [`Version`] option on a subcommand is ignored by the parser.
+- **No shell completion generation.** Help text is for human `--help` only.
 
 ## Safety and Concurrency
 
@@ -295,17 +306,17 @@ A `Parser` and its `Command` tree are **not** safe for concurrent use. The inten
 
 ## Benchmarks
 
-> CPU: Intel i7-10510U · OS: Windows 10 · Go 1.24 · `-benchmem -count=1`
+> CPU: Intel i7-10510U · OS: Windows 10 · Go 1.24 · `-benchmem -count=3`
 
 
 | Benchmark         | ns/op | B/op | allocs/op |
 | ----------------- | ----- | ---- | --------- |
-| New_SingleFlag    | 1012  | 1216 | 15        |
-| New_ManyFlags (5) | 3858  | 2560 | 34        |
-| New_Subcommand    | 2234  | 1776 | 21        |
-| Parser_Reset      | 117   | 0    | 0         |
-| Parser_Help       | 1553  | 528  | 10        |
-| New_Parallel      | 1310  | 1544 | 20        |
+| New_SingleFlag    | 1171  | 1216 | 15        |
+| New_ManyFlags (5) | 5476  | 2560 | 34        |
+| New_Subcommand    | 1990  | 1776 | 21        |
+| Parser_Reset      | 84    | 0    | 0         |
+| Parser_Help       | 1211  | 528  | 10        |
+| New_Parallel      | 1365  | 1544 | 20        |
 
 
 ### Analysis
@@ -322,11 +333,11 @@ A `Parser` and its `Command` tree are **not** safe for concurrent use. The inten
 
 | Metric         | Value                   |
 | -------------- | ----------------------- |
-| Test functions | 23                      |
+| Test functions | 31                      |
 | Benchmarks     | 6                       |
 | Fuzz targets   | 1                       |
 | Examples       | 3                       |
-| Coverage       | 98.1%                   |
+| Coverage       | ≥98%                    |
 | Race detector  | All pass                |
 | External deps  | 0 (testify in dev only) |
 

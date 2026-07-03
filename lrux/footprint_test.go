@@ -8,6 +8,8 @@ import (
 
 func TestFootprint(t *testing.T) {
 	testx.AssertFootprint(t, []testx.SizeEntry{
+		{Name: "Cache[string,int]", Size: testx.Sizeof[Cache[string, int]](), Max: 152},
+		{Name: "ShardedCache[string,int]", Size: testx.Sizeof[ShardedCache[string, int]](), Max: 48},
 		{Name: "node[string,int]", Size: testx.Sizeof[node[string, int]](), Max: 120},
 		{Name: "Entry[string,int]", Size: testx.Sizeof[Entry[string, int]](), Max: 96},
 		{Name: "Stats", Size: testx.Sizeof[Stats](), Max: 64},

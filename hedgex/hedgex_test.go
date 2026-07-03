@@ -3,6 +3,7 @@ package hedgex
 import (
 	"context"
 	"errors"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -30,6 +31,86 @@ func TestNew_Defaults(t *testing.T) {
 	assert.Equal(t, DefaultMaxParallel, h.MaxParallel())
 	assert.Equal(t, DefaultDelay, h.Delay())
 	assert.Equal(t, DefaultMaxDelay, h.MaxDelay())
+}
+
+func TestWithMaxParallel(t *testing.T) {
+	tests := []struct {
+		name string
+		opt  Option
+		want int
+	}{
+		{"default", nil, DefaultMaxParallel},
+		{"custom", WithMaxParallel(5), 5},
+		{"zero ignored", WithMaxParallel(0), DefaultMaxParallel},
+		{"negative ignored", WithMaxParallel(-1), DefaultMaxParallel},
+		{"one disables hedging", WithMaxParallel(1), 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var opts []Option
+			if tt.opt != nil {
+				opts = append(opts, tt.opt)
+			}
+			cfg := newConfig(opts)
+			assert.Equal(t, tt.want, cfg.maxParallel)
+		})
+	}
+}
+
+func TestWithDelay(t *testing.T) {
+	tests := []struct {
+		name string
+		opt  Option
+		want time.Duration
+	}{
+		{"default", nil, DefaultDelay},
+		{"custom", WithDelay(50 * time.Millisecond), 50 * time.Millisecond},
+		{"zero ignored", WithDelay(0), DefaultDelay},
+		{"negative ignored", WithDelay(-time.Second), DefaultDelay},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var opts []Option
+			if tt.opt != nil {
+				opts = append(opts, tt.opt)
+			}
+			cfg := newConfig(opts)
+			assert.Equal(t, tt.want, cfg.delay)
+		})
+	}
+}
+
+func TestWithMaxDelay(t *testing.T) {
+	tests := []struct {
+		name string
+		opts []Option
+		want time.Duration
+	}{
+		{"default", nil, DefaultMaxDelay},
+		{"custom", []Option{WithMaxDelay(2 * time.Second)}, 2 * time.Second},
+		{"zero ignored", []Option{WithMaxDelay(0)}, DefaultMaxDelay},
+		{"raised to delay", []Option{WithDelay(200 * time.Millisecond), WithMaxDelay(50 * time.Millisecond)}, 200 * time.Millisecond},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := newConfig(tt.opts)
+			assert.Equal(t, tt.want, cfg.maxDelay)
+		})
+	}
+}
+
+func TestWithOp(t *testing.T) {
+	assert.Equal(t, "db.read", newConfig([]Option{WithOp("db.read")}).opOrDefault())
+	assert.Equal(t, opExecute, newConfig([]Option{WithOp("")}).opOrDefault())
+	assert.Equal(t, opExecute, newConfig(nil).opOrDefault())
+}
+
+func TestWithOnHedge(t *testing.T) {
+	var n int
+	cfg := newConfig([]Option{WithOnHedge(func(int) { n++ })})
+	require.NotNil(t, cfg.onHedge)
+	cfg.onHedge(2)
+	assert.Equal(t, 1, n)
 }
 
 func TestExecute_ImmediateSuccess(t *testing.T) {
@@ -246,6 +327,170 @@ func TestExecuteMulti_AllNil(t *testing.T) {
 	h := New()
 	_, err := ExecuteMulti(h, context.Background(), []HedgeFunc[int]{nil, nil})
 	require.ErrorIs(t, err, ErrNilFunc)
+}
+
+func TestExecuteMulti_AlreadyCancelled(t *testing.T) {
+	h := New()
+	_, err := ExecuteMulti(h, testx.CancelledCtx(), []HedgeFunc[int]{okFn(1)})
+	require.ErrorIs(t, err, ErrCancelled)
+	require.ErrorIs(t, err, context.Canceled)
+	assert.Equal(t, int64(1), h.Stats().Failures)
+}
+
+func TestExecute_HedgeFailsWhilePrimaryInFlight(t *testing.T) {
+	// Hedge fails while the primary is still in flight; dispatch must wait for
+	// the primary (pending > 0 continue) rather than launching copy 3 early.
+	var primaryRunning atomic.Bool
+	fn := func(ctx context.Context, hc HedgeController) (string, error) {
+		if hc.IsHedge() {
+			return "", errSentinel
+		}
+		primaryRunning.Store(true)
+		time.Sleep(80 * time.Millisecond)
+		return "primary", nil
+	}
+	h := New(WithDelay(15*time.Millisecond), WithMaxParallel(2))
+	got, err := Execute(h, context.Background(), fn)
+	require.NoError(t, err)
+	assert.Equal(t, "primary", got)
+	assert.True(t, primaryRunning.Load())
+	assert.Equal(t, int64(1), h.Stats().Hedges)
+}
+
+func TestExecuteMulti_BackendsCountsLaunchable(t *testing.T) {
+	var backends atomic.Int32
+	var attempt atomic.Int32
+	primary := func(ctx context.Context, hc HedgeController) (int, error) {
+		backends.Store(int32(hc.Backends()))
+		<-ctx.Done()
+		return 0, ctx.Err()
+	}
+	hedge := func(_ context.Context, hc HedgeController) (int, error) {
+		attempt.Store(int32(hc.Attempt()))
+		return 42, nil
+	}
+	fns := []HedgeFunc[int]{primary, nil, hedge}
+	h := New(WithDelay(10*time.Millisecond), WithMaxParallel(3))
+	got, err := ExecuteMulti(h, context.Background(), fns)
+	require.NoError(t, err)
+	assert.Equal(t, 42, got)
+	assert.Equal(t, int32(2), backends.Load())
+	assert.Equal(t, int32(2), attempt.Load())
+}
+
+func TestLaunchableCount(t *testing.T) {
+	assert.Equal(t, 0, launchableCount([]HedgeFunc[int]{nil, nil}))
+	assert.Equal(t, 2, launchableCount([]HedgeFunc[int]{okFn(1), nil, okFn(2)}))
+}
+
+func TestDelayFor(t *testing.T) {
+	delays := []time.Duration{100 * time.Millisecond, 200 * time.Millisecond}
+	d, ok := delayFor(delays, 1)
+	assert.True(t, ok)
+	assert.Equal(t, 100*time.Millisecond, d)
+	d, ok = delayFor(delays, 2)
+	assert.True(t, ok)
+	assert.Equal(t, 200*time.Millisecond, d)
+	_, ok = delayFor(delays, 0)
+	assert.False(t, ok)
+	_, ok = delayFor(delays, 3)
+	assert.False(t, ok)
+}
+
+func TestResetTimer_RearmAfterFired(t *testing.T) {
+	timer := time.NewTimer(time.Nanosecond)
+	time.Sleep(2 * time.Millisecond)
+	select {
+	case <-timer.C:
+	default:
+	}
+	start := time.Now()
+	resetTimer(timer, 50*time.Millisecond, start)
+	select {
+	case <-timer.C:
+		t.Fatal("timer must not fire immediately after rearm")
+	default:
+	}
+	timer.Stop()
+}
+
+func TestResetTimer_DrainDefaultWhenAlreadyExpired(t *testing.T) {
+	timer := time.NewTimer(time.Nanosecond)
+	time.Sleep(2 * time.Millisecond)
+	select {
+	case <-timer.C:
+	default:
+	}
+	resetTimer(timer, 10*time.Millisecond, time.Now())
+	timer.Stop()
+}
+
+func TestDispatch_PendingContinueWhenHedgeFailsFirst(t *testing.T) {
+	var (
+		mu    sync.Mutex
+		order []string
+	)
+	record := func(s string) {
+		mu.Lock()
+		order = append(order, s)
+		mu.Unlock()
+	}
+
+	h := New(WithDelay(20*time.Millisecond), WithMaxParallel(2))
+	fns := []HedgeFunc[string]{
+		func(ctx context.Context, _ HedgeController) (string, error) {
+			record("primary-start")
+			select {
+			case <-time.After(100 * time.Millisecond):
+				record("primary-win")
+				return "primary", nil
+			case <-ctx.Done():
+				return "", ctx.Err()
+			}
+		},
+		func(context.Context, HedgeController) (string, error) {
+			record("hedge-fail")
+			return "", errSentinel
+		},
+	}
+	got, err := ExecuteMulti(h, context.Background(), fns)
+	require.NoError(t, err)
+	assert.Equal(t, "primary", got)
+	mu.Lock()
+	defer mu.Unlock()
+	require.Len(t, order, 3)
+	assert.Equal(t, "primary-start", order[0])
+	assert.Equal(t, "hedge-fail", order[1])
+	assert.Equal(t, "primary-win", order[2])
+}
+
+func TestRun_DropsResultWhenContextCancelled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	ch := make(chan result[int])
+	hc := &execution{attempt: 1, backends: 1, start: time.Now()}
+	run(New(), ctx, func(context.Context, HedgeController) (int, error) {
+		return 1, nil
+	}, hc, ch)
+	select {
+	case <-ch:
+		t.Fatal("result must be dropped when hedge context is cancelled before send")
+	default:
+	}
+}
+
+func TestExecuteMulti_LeadingNilSchedulesHedge(t *testing.T) {
+	// A nil leading slot must not skew the delay schedule for the second
+	// launchable backend.
+	primary := func(ctx context.Context, _ HedgeController) (string, error) {
+		<-ctx.Done()
+		return "", ctx.Err()
+	}
+	fns := []HedgeFunc[string]{nil, primary, okFn("replica")}
+	h := New(WithDelay(10*time.Millisecond), WithMaxParallel(3))
+	got, err := ExecuteMulti(h, context.Background(), fns)
+	require.NoError(t, err)
+	assert.Equal(t, "replica", got)
 }
 
 func TestExecuteMulti_SkipsNilGaps(t *testing.T) {

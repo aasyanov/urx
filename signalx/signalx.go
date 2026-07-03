@@ -30,6 +30,7 @@ import (
 	"errors"
 	"os"
 	"os/signal"
+	"strconv"
 	"sync"
 	"time"
 
@@ -51,7 +52,12 @@ var (
 // to that call. Register hooks once during process startup; do not rely on
 // them running exactly once if Wait is invoked concurrently. It is safe for
 // concurrent registration.
+//
+// Panics if fn is nil.
 func OnShutdown(fn func(ctx context.Context)) {
+	if fn == nil {
+		panic("signalx: OnShutdown hook must not be nil")
+	}
 	globalMu.Lock()
 	globalHooks = append(globalHooks, fn)
 	globalMu.Unlock()
@@ -71,6 +77,8 @@ func ResetHooks() {
 // it traps SIGINT and SIGTERM. A nil parent is treated as
 // [context.Background].
 //
+// Panics if any explicit signal argument is nil.
+//
 // The returned [context.CancelFunc] must be called to release the signal
 // watcher goroutine and stop signal delivery, even if a signal arrives
 // first. It is safe for concurrent use and idempotent.
@@ -80,6 +88,12 @@ func Trap(parent context.Context, signals ...os.Signal) (context.Context, contex
 	}
 	if len(signals) == 0 {
 		signals = defaultSignals
+	} else {
+		for _, sig := range signals {
+			if sig == nil {
+				panic("signalx: Trap signal must not be nil")
+			}
+		}
 	}
 
 	ctx, cancel := context.WithCancel(parent)
@@ -111,6 +125,10 @@ func Trap(parent context.Context, signals ...os.Signal) (context.Context, contex
 // Wait returns nil when all hooks complete cleanly. It returns
 // [ErrShutdownTimeout] if the timeout elapses before every hook finishes,
 // and [ErrHookPanic] (joined with the recovered causes) if any hook panics.
+// Both sentinels may appear together when a hook both panics and the drain
+// budget is exhausted.
+//
+// Panics if any per-call hook argument is nil.
 func Wait(ctx context.Context, hooks ...func(ctx context.Context)) error {
 	return WaitWith(ctx, nil, hooks...)
 }
@@ -118,6 +136,8 @@ func Wait(ctx context.Context, hooks ...func(ctx context.Context)) error {
 // WaitWith behaves like [Wait] but accepts functional [Option] values to
 // override the shutdown timeout and related behavior. It is the configurable
 // form of [Wait]; prefer [Wait] when the defaults suffice.
+//
+// Panics if any hook in the combined global + per-call list is nil.
 func WaitWith(ctx context.Context, opts []Option, hooks ...func(ctx context.Context)) error {
 	if ctx == nil {
 		ctx = context.Background()
@@ -130,6 +150,7 @@ func WaitWith(ctx context.Context, opts []Option, hooks ...func(ctx context.Cont
 	defer cancel()
 
 	all := collectHooks(hooks)
+	assertHooks(all)
 
 	var errs []error
 	var timedOut bool
@@ -160,6 +181,16 @@ func shutdownContext(timeout time.Duration) (context.Context, context.CancelFunc
 		return context.WithCancel(context.Background())
 	}
 	return context.WithTimeout(context.Background(), timeout)
+}
+
+// assertHooks panics when any hook in the snapshot is nil. Nil hooks are
+// programmer errors caught before execution, consistent with [OnShutdown].
+func assertHooks(hooks []func(ctx context.Context)) {
+	for i, hook := range hooks {
+		if hook == nil {
+			panic("signalx: shutdown hook at index " + strconv.Itoa(i) + " must not be nil")
+		}
+	}
 }
 
 // collectHooks snapshots the global hooks under lock and appends the

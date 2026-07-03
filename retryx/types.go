@@ -8,7 +8,8 @@ import (
 // RetryController provides per-attempt context and control to the retried
 // function. The implementation is private; callers interact only through this
 // interface. A RetryController is bound to a single [Do] call and must not be
-// retained after Do returns.
+// retained after Do returns. It is accessed only from the goroutine running the
+// callback and is not safe for concurrent use across goroutines.
 type RetryController interface {
 	// Number returns the 1-based number of the current attempt.
 	Number() int

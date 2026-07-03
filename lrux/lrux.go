@@ -18,7 +18,7 @@ import (
 //
 // Create with [New] and configure via [Option] functions. Call [Cache.Close]
 // when the cache is no longer needed to stop the background cleanup goroutine
-// (if one was configured) and release entries.
+// (if one was configured) and release entries. Close is idempotent and returns nil.
 //
 // For high concurrency across many keys, prefer [ShardedCache] via
 // [NewSharded] to reduce lock contention.
@@ -165,7 +165,8 @@ func (c *Cache[K, V]) peekPromote(key K) (V, bool) {
 // GetFast returns the value stored under key without promoting it in the LRU
 // order. It uses a read lock so concurrent GetFast calls proceed in parallel,
 // making it preferable for read-heavy workloads where strict recency is not
-// required. Expired entries are reported as missing but removed lazily.
+// required. Expired entries are reported as missing but not removed; use
+// [Cache.Get], [Cache.ExpireOld], or the background sweeper to reclaim them.
 func (c *Cache[K, V]) GetFast(key K) (V, bool) {
 	var zero V
 	if c.closed.Load() {
@@ -265,9 +266,11 @@ func (c *Cache[K, V]) TTL(key K) time.Duration {
 	return rem
 }
 
-// Touch refreshes key: it promotes the entry to most recently used and, if a
-// global TTL is configured, resets the expiration. It returns false if the key
-// is missing or already expired (an expired entry is removed).
+// Touch refreshes key: it promotes the entry to most recently used and slides
+// the expiration forward. When the entry carries an absolute expiry, the
+// remaining lifetime since the last access is preserved; otherwise a configured
+// global TTL is applied. Entries without any TTL are promoted only. It returns
+// false if the key is missing or already expired (an expired entry is removed).
 func (c *Cache[K, V]) Touch(key K) bool {
 	if c.closed.Load() {
 		return false
@@ -290,10 +293,8 @@ func (c *Cache[K, V]) Touch(key K) bool {
 	}
 
 	now := time.Now()
+	c.slideExpiration(n, now)
 	n.accessedAt = now
-	if c.ttl > 0 {
-		n.expiresAt = now.Add(c.ttl)
-	}
 	c.listMoveToFront(n)
 	c.mu.Unlock()
 	return true
@@ -640,10 +641,11 @@ func (c *Cache[K, V]) ResetStats() {
 
 // Close stops the background cleanup goroutine (if any), removes all entries
 // firing eviction callbacks with reason [EvictionCleared], and marks the
-// cache closed. Subsequent operations are no-ops. Close is idempotent.
-func (c *Cache[K, V]) Close() {
+// cache closed. Subsequent operations are no-ops. Close is idempotent and
+// always returns nil.
+func (c *Cache[K, V]) Close() error {
 	if c.closed.Swap(true) {
-		return
+		return nil
 	}
 	if c.cleanup != nil {
 		c.cleanup.Stop()
@@ -665,6 +667,7 @@ func (c *Cache[K, V]) Close() {
 	c.mu.Unlock()
 
 	c.fireCallbacks(events)
+	return nil
 }
 
 // IsClosed reports whether the cache has been closed.
@@ -745,6 +748,21 @@ func (c *Cache[K, V]) expireTime(now time.Time, ttl time.Duration) time.Time {
 		return now.Add(c.ttl)
 	}
 	return time.Time{}
+}
+
+// slideExpiration extends the entry's lifetime on activity. When the entry has
+// an absolute expiry, the remaining window since the last access is preserved
+// (sliding expiration). Otherwise a configured global TTL is applied.
+func (c *Cache[K, V]) slideExpiration(n *node[K, V], now time.Time) {
+	if !n.expiresAt.IsZero() {
+		if remaining := n.expiresAt.Sub(n.accessedAt); remaining > 0 {
+			n.expiresAt = now.Add(remaining)
+		}
+		return
+	}
+	if c.ttl > 0 {
+		n.expiresAt = now.Add(c.ttl)
+	}
 }
 
 // removeNodeLocked unlinks n and returns an eviction event when a callback is

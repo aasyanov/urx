@@ -119,6 +119,25 @@ func New(opts ...Option) *Limiter {
 
 // --- Admission ---
 
+// Allow reports whether a permit is currently free without acquiring it. It
+// does not track anything or mutate any counter; use [Execute], [TryExecute],
+// or [Limiter.Acquire] for tracked admission. Returns false once the limiter
+// is closed.
+//
+// Allow is a best-effort hint: it compares in-flight work against the live
+// limit without claiming a slot, so a concurrent admission may change the
+// outcome before the caller acts. Only the tracked entry points enforce the
+// concurrency bound.
+func (l *Limiter) Allow() bool {
+	if l.closed.Load() {
+		return false
+	}
+	l.mu.Lock()
+	avail := l.limit - int(l.inFlight.Load())
+	l.mu.Unlock()
+	return avail > 0
+}
+
 // Acquire blocks until a permit is available, the context is cancelled, or the
 // limiter is closed. It returns a release function that MUST be called exactly
 // once with the operation outcome and measured latency; the release function is
@@ -241,7 +260,7 @@ func (l *Limiter) releasePermit() {
 // [panix.Safe], so a panic becomes a [*panix.PanicError]. The call's latency
 // and outcome feed the adaptive algorithm unless the callback invokes
 // [AdaptController.SkipSample].
-func Execute[T any](l *Limiter, ctx context.Context, fn func(ctx context.Context, ac AdaptController) (T, error)) (T, error) {
+func Execute[T any](l *Limiter, ctx context.Context, fn AdaptFunc[T]) (T, error) {
 	var zero T
 	if fn == nil {
 		return zero, ErrNilFunc
@@ -261,24 +280,27 @@ func Execute[T any](l *Limiter, ctx context.Context, fn func(ctx context.Context
 	val, err := panix.Safe(l.cfg.opOrDefault(), func() (T, error) {
 		return fn(ctx, ac)
 	})
-
-	if ac.isSkipped() {
-		release(true, 0)
-	} else {
-		release(err == nil, time.Since(start))
-	}
+	releaseAfterExecute(release, ac, start, err)
 	return val, err
 }
 
 // TryExecute runs fn only if a permit is immediately available, without
 // blocking. It returns (true, val, err) when fn ran and (false, zero, nil) when
 // no permit was free. Returns (false, zero, [ErrClosed]) if the limiter is
-// closed and (false, zero, [ErrNilFunc]) if fn is nil. The permit is released
-// when fn returns or panics.
-func TryExecute[T any](l *Limiter, ctx context.Context, fn func(ctx context.Context, ac AdaptController) (T, error)) (bool, T, error) {
+// closed, (false, zero, [ErrNilFunc]) if fn is nil, and (false, zero,
+// [ErrCancelled] or [ErrTimeout]) when ctx is already cancelled or its deadline
+// has expired (no permit consumed). The permit is released when fn returns or
+// panics.
+func TryExecute[T any](l *Limiter, ctx context.Context, fn AdaptFunc[T]) (bool, T, error) {
 	var zero T
+	if l.closed.Load() {
+		return false, zero, ErrClosed
+	}
 	if fn == nil {
 		return false, zero, ErrNilFunc
+	}
+	if err := ctx.Err(); err != nil {
+		return false, zero, l.ctxErr(err)
 	}
 	release, ok := l.TryAcquire()
 	if !ok {
@@ -295,16 +317,22 @@ func TryExecute[T any](l *Limiter, ctx context.Context, fn func(ctx context.Cont
 	}
 
 	start := time.Now()
-	val, err := panix.Safe(l.cfg.opOrDefault(), func() (T, error) {
+	val, err := panix.Safe(l.cfg.opOrDefaultTry(), func() (T, error) {
 		return fn(ctx, ac)
 	})
-
-	if ac.isSkipped() {
-		release(true, 0)
-	} else {
-		release(err == nil, time.Since(start))
-	}
+	releaseAfterExecute(release, ac, start, err)
 	return true, val, err
+}
+
+// releaseAfterExecute records the operation outcome. Skipped samples still
+// update success/failure totals but omit latency from feedback and history.
+func releaseAfterExecute(release func(success bool, latency time.Duration), ac *execution, start time.Time, err error) {
+	ok := err == nil
+	if ac.isSkipped() {
+		release(ok, 0)
+		return
+	}
+	release(ok, time.Since(start))
 }
 
 // --- Queries ---

@@ -37,8 +37,9 @@ func TestExecute_PropagatesFunctionError(t *testing.T) {
 // --- Execute: error paths ---
 
 func TestExecute_NilFunc(t *testing.T) {
-	_, err := Execute[int](context.Background(), time.Second, nil)
+	_, err := Execute[int](context.Background(), time.Second, nil, WithOp("nil.op"))
 	require.ErrorIs(t, err, ErrNilFunc)
+	assert.ErrorContains(t, err, "op=nil.op")
 }
 
 func TestExecute_DeadlineExceeded(t *testing.T) {
@@ -235,6 +236,35 @@ func TestExecute_WithTimerEndToEnd(t *testing.T) {
 		}, WithTimer(timer))
 	require.ErrorIs(t, err, ErrDeadlineExceeded)
 	assert.ErrorContains(t, err, "timed")
+}
+
+func TestExecute_WithTimeoutOptionOnly(t *testing.T) {
+	sim := testx.SlowCall(50 * time.Millisecond)
+	_, err := Execute(context.Background(), 0,
+		func(ctx context.Context, _ TimeoutController) (int, error) {
+			return 0, sim.Call(ctx)
+		}, WithTimeout(5*time.Millisecond), WithOp("opt.timeout"))
+	require.ErrorIs(t, err, ErrDeadlineExceeded)
+	assert.ErrorContains(t, err, "opt.timeout")
+}
+
+func TestExecute_ParentCancelledWithCauseMidFlight(t *testing.T) {
+	ctx, cancel := context.WithCancelCause(context.Background())
+	cause := errors.New("upstream abort")
+	started := make(chan struct{})
+	go func() {
+		<-started
+		cancel(cause)
+	}()
+
+	_, err := Execute(ctx, time.Minute,
+		func(ctx context.Context, _ TimeoutController) (int, error) {
+			close(started)
+			<-ctx.Done()
+			return 0, ctx.Err()
+		}, WithOp("upstream"))
+	require.ErrorIs(t, err, ErrCancelled)
+	require.ErrorIs(t, err, cause)
 }
 
 // --- Concurrency ---

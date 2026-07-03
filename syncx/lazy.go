@@ -1,11 +1,21 @@
 package syncx
 
-import "sync"
+import (
+	"sync"
+
+	"github.com/aasyanov/urx/panix"
+)
+
+// opLazy labels panics recovered while running a lazy init function.
+const opLazy = "syncx.Lazy"
 
 // Lazy is a generic, thread-safe lazy initializer. The init function runs at
 // most once per successful initialization (until [Lazy.Reset] is called);
 // subsequent [Lazy.Get] calls return the cached value. It is the typed,
 // error-aware analogue of [sync.Once].
+//
+// Init runs under [github.com/aasyanov/urx/panix] recovery: a panicking init
+// is converted into a [*panix.PanicError] instead of crashing the caller.
 //
 // All methods are safe for concurrent use. In particular, [Lazy.Get] and
 // [Lazy.Reset] may be called from different goroutines without external
@@ -31,7 +41,9 @@ func NewLazy[T any](init func() (T, error)) (*Lazy[T], error) {
 
 // Get returns the cached value, running the init function on the first call.
 // If init returns an error, it is wrapped as [ErrInitFailed]; neither the value
-// nor the error is cached, and init runs again on the next Get.
+// nor the error is cached, and init runs again on the next Get. If init
+// panics, the recovered [*panix.PanicError] is returned and init is not
+// latched.
 //
 // Concurrent callers block until init completes. Safe to call concurrently
 // with [Lazy.Reset].
@@ -43,11 +55,16 @@ func (l *Lazy[T]) Get() (T, error) {
 		return l.val, nil
 	}
 
-	val, err := l.init()
+	val, err := panix.Safe(opLazy, func() (T, error) {
+		return l.init()
+	})
 	if err != nil {
+		var zero T
+		if isPanic(err) {
+			return zero, err
+		}
 		// Do not latch failures: a transient init error should be retryable
 		// on the next Get rather than cached forever.
-		var zero T
 		return zero, errInitFailed(err)
 	}
 

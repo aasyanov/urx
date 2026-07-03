@@ -26,7 +26,7 @@ The standard library's `sync` package is a toolbox of correct-but-low-level prim
 ## Architectural Position
 
 ```text
-✅ Lazy[T]  — run-once typed init with error handling and reset (sync.Once + value + error)
+✅ Lazy[T]  — run-once typed init with error handling, panic recovery, and reset
 ✅ Group    — panic-safe error group with optional concurrency limit and task stats
 ✅ Map[K,V] — type-safe sync.Map wrapper with O(1) Len, Swap, LoadAndDelete, Clear
 
@@ -45,12 +45,16 @@ The standard library's `sync` package is a toolbox of correct-but-low-level prim
                          │
 ┌────────────────────────▼───────────────────────────────────┐
 │  syncx   Lazy[T] · Group · Map[K,V]                        │
-└──────────────┬────────────────────────┬────────────────────┘
-               │ (Group only)           │
-┌──────────────▼─────────┐   ┌──────────▼────────────────────┐
-│  panix.SafeVoid        │   │  sync · sync/atomic · context │
-│  (panic → PanicError)  │   │                               │
-└────────────────────────┘   └───────────────────────────────┘
+└──────────────┬─────────────────────────┬────────────────────┘
+               │                         │
+┌──────────────▼─────────────────────────▼────────────────────┐
+│  panix.Safe / SafeVoid  (Lazy init + Group tasks)           │
+│  (panic → PanicError)                                       │
+└─────────────────────────────┬───────────────────────────────┘
+                              │
+               ┌──────────────▼────────────────────┐
+               │  sync · sync/atomic · context     │
+               └───────────────────────────────────┘
 ```
 
 ## Architecture
@@ -63,15 +67,15 @@ The standard library's `sync` package is a toolbox of correct-but-low-level prim
    │                   │                   │
  mu sync.Mutex       ctx (derived)       sync.Map
  init func           cancel CancelFunc   len atomic.Int64
- val T               sem chan struct{}     │
+ val T               sem chan struct{}   mu sync.Mutex (len/Clear)
  done bool           wg / once           Store/Load/Delete
    │                 started/succeeded/  Swap/LoadAndDelete
  Get / Done /        failed/panicked     LoadOrStore/Range
  Reset               (atomic.Int64)      Len/Clear
-                       │
-                     Go / TryGo / Wait / Stats
-                       │
-                     panix.SafeVoid (panic recovery)
+   │                   │
+ panix.Safe          Go / TryGo / Wait / Stats
+ (panic recovery)        │
+                       panix.SafeVoid (panic recovery)
 ```
 
 ## How It Works
@@ -82,12 +86,13 @@ The standard library's `sync` package is a toolbox of correct-but-low-level prim
 Get()
   │ lock mu
   ├── done? ──► return cached val, nil
-  └── run init()
-        ├── err != nil ─► unlock; return zero, ErrInitFailed(err)   (NOT cached)
-        └── ok          ─► val = v; done = true; return val, nil
+  └── panix.Safe("syncx.Lazy", init)
+        ├── panic    ─► return *panix.PanicError (NOT cached)
+        ├── err != nil ─► return zero, ErrInitFailed(err)   (NOT cached)
+        └── ok       ─► val = v; done = true; return val, nil
 ```
 
-`Lazy` holds the result behind a `sync.Mutex`. The first `Get` runs `init`; concurrent callers block until it finishes and then observe the cached value. A successful value is latched (`done = true`) and never recomputed until `Reset`. A **failure is deliberately not latched**: `done` stays false so the next `Get` retries — the right behavior when init dials a flaky dependency. `Reset` clears `done` and the cached value so init runs again.
+`Lazy` holds the result behind a `sync.Mutex`. The first `Get` runs `init` under `panix.Safe`; concurrent callers block until it finishes and then observe the cached value. A successful value is latched (`done = true`) and never recomputed until `Reset`. **Failures and panics are deliberately not latched**: `done` stays false so the next `Get` retries — the right behavior when init dials a flaky dependency or hits transient third-party panics. `Reset` clears `done` and the cached value so init runs again.
 
 ### Group: panic-safe, optionally-bounded errgroup
 
@@ -109,13 +114,15 @@ Every task runs under `panix.SafeVoid`, which converts a panic into a `*panix.Pa
 ### Map: typed sync.Map with a maintained length
 
 ```text
-Store(k,v):  Swap → if !loaded { len++ }
-Delete(k):   LoadAndDelete → if loaded { len-- }
-LoadOrStore: → if !loaded { len++ }
-Len():       atomic.Int64.Load()   (O(1))
+Store/Delete/Swap/LoadOrStore/LoadAndDelete:
+  lock mu → sync.Map op → adjust len when a new key appears or one is removed
+Clear:
+  lock mu → sync.Map.Clear → len = 0
+Load / Range / Len:
+  no mu — reads use sync.Map and atomic len snapshot
 ```
 
-`Map` wraps `sync.Map` and adds compile-time `K`/`V` typing (no `any` casts in caller code). Length is maintained as a single `atomic.Int64`, incremented or decremented based on the **loaded** result of each atomic `sync.Map` operation** — `Swap`, `LoadAndDelete`, and `LoadOrStore` each report definitively whether a prior entry existed, so the counter stays consistent under concurrent mutation without an extra mutex.
+`Map` wraps `sync.Map` and adds compile-time `K`/`V` typing (no `any` casts in caller code). Length is maintained as an `atomic.Int64`, updated only while `mu` is held during mutating operations so `Len` stays consistent with live entries even when `Clear` runs concurrently with `Store` or `Delete`. Reads (`Load`, `Range`, `Len`) stay lock-free aside from the atomic counter load.
 
 ## Normative Contracts
 
@@ -124,12 +131,13 @@ Len():       atomic.Int64.Load()   (O(1))
 | ------------------------ | --------------------------------------------------------------------------------------------- |
 | `Lazy.Get` run-once      | `init` runs at most once per successful initialization; concurrent callers see the same value |
 | `Lazy` failure semantics | A failing `init` is **not** cached — the next `Get` retries                                   |
-| `Lazy` error wrapping    | A non-nil init error is always wrapped as `ErrInitFailed` (joins the cause)                   |
+| `Lazy` panic safety    | A panicking `init` returns `*panix.PanicError`; it is **not** cached — the next `Get` retries |
+| `Lazy` error wrapping  | A non-nil init error is always wrapped as `ErrInitFailed` (joins the cause)                   |
 | `Group.Wait`             | Blocks until every launched task completes, then cancels the derived context                  |
 | `Group` first error      | Returns the **first** non-nil error or `*panix.PanicError`; siblings are cancelled            |
 | `Group` panic safety     | A panicking task never crashes the process; it becomes a `*panix.PanicError`                  |
 | `Group.TryGo`            | Starts a task only if a concurrency slot is free; returns whether it started                  |
-| `Map.Len`                | Equals the number of live entries; O(1); consistent under concurrent mutation                 |
+| `Map.Len`                | Equals the number of live entries; O(1); consistent with mutating ops and `Clear` under concurrency |
 | `Map` typing             | No runtime type assertions are exposed to the caller                                          |
 
 
@@ -250,7 +258,7 @@ _ = evicted
 | Symbol       | Signature                                                       | Description                                                    |
 | ------------ | --------------------------------------------------------------- | -------------------------------------------------------------- |
 | `NewLazy`    | `func NewLazy[T any](init func() (T, error)) (*Lazy[T], error)` | Create a lazy initializer; returns `ErrNilInit` if init is nil |
-| `Lazy.Get`   | `func (l *Lazy[T]) Get() (T, error)`                            | Return cached value, running init once; failures are retried   |
+| `Lazy.Get`   | `func (l *Lazy[T]) Get() (T, error)`                            | Return cached value, running init once; errors and panics are retried |
 | `Lazy.Done`  | `func (l *Lazy[T]) Done() bool`                                 | Report whether the value is initialized                        |
 | `Lazy.Reset` | `func (l *Lazy[T]) Reset()`                                     | Discard the cached value so init runs again                    |
 
@@ -306,10 +314,12 @@ _ = evicted
 
 A nil task function passed to `Group.Go` or `Group.TryGo` is ignored (no error, no goroutine).
 
+A panicking `Lazy` init or `Group` task returns a `*panix.PanicError` (use `errors.As`). Neither is cached; `Lazy.Get` retries on the next call.
+
 ## Pitfalls
 
 > [!WARNING]
-> **Lazy** does not cache failures.** A failing `init` is retried on the next `Get`. This is intentional (transient I/O should be retryable) but means a permanently-broken init will run on every call. Add your own backoff in the init function if needed.
+> **Lazy** does not cache failures or panics.** A failing or panicking `init` is retried on the next `Get`. This is intentional (transient I/O should be retryable) but means a permanently-broken init will run on every call. Add your own backoff in the init function if needed.
 
 > [!WARNING]
 > **A `Group` must not be reused after `Wait`.** The derived context is cancelled by `Wait`, so tasks launched afterward run with an already-cancelled context. Create a fresh `Group` per fan-out.
@@ -318,36 +328,41 @@ A nil task function passed to `Group.Go` or `Group.TryGo` is ignored (no error, 
 > **Map.Range** is not a snapshot.** Like `sync.Map.Range`, it may observe concurrent insertions or deletions mid-iteration. `Len` taken before `Range` may differ from the number of entries visited.
 
 > [!NOTE]
+> **Map** mutating operations take a short mutex for length accounting.** Reads stay on the `sync.Map` fast path; writes and `Clear` serialize only for `Len` consistency, not for the underlying map storage.
+
+> [!NOTE]
 > **Map** is read-optimized.** It inherits `sync.Map`'s trade-offs: excellent for read-mostly or disjoint-key workloads, but a `map` guarded by a `sync.Mutex` can be faster for write-heavy shared keys.
 
 ## Safety and Concurrency
 
-All three types are safe for concurrent use. `Lazy` serializes through a `sync.Mutex`; `Get` and `Reset` may race freely. `Group` uses a `sync.WaitGroup`, a `sync.Once` for first-error capture, an optional buffered-channel semaphore, and `atomic.Int64` counters; the derived context propagates cancellation to all tasks. `Map` delegates storage to `sync.Map` and maintains its length with a single `atomic.Int64`. Every test runs under `-race`.
+All three types are safe for concurrent use. `Lazy` serializes through a `sync.Mutex`; init runs under `panix.Safe`; `Get` and `Reset` may race freely. `Group` uses a `sync.WaitGroup`, a `sync.Once` for first-error capture, an optional buffered-channel semaphore, and `atomic.Int64` counters; the derived context propagates parent cancellation and sibling failures to all tasks. `Map` delegates storage to `sync.Map`, maintains `Len` with an `atomic.Int64`, and serializes length updates (including `Clear`) through a `sync.Mutex` while leaving reads lock-free. Every test runs under `-race`.
 
 ## Benchmarks
 
-> CPU: Intel i7-10510U · OS: Windows 10 · Go 1.24 · `-benchmem -count=1`
+> CPU: Intel i7-10510U · OS: Windows 10 · Go 1.26 · `-benchmem -count=1`
 
 
-| Benchmark         | ns/op | B/op | allocs/op |
-| ----------------- | ----- | ---- | --------- |
-| Lazy_Get          | 15.3  | 0    | 0         |
-| Lazy_Get_Parallel | 56.2  | 0    | 0         |
-| Map_Load_Hit      | 17.1  | 0    | 0         |
-| Map_Load_Miss     | 11.6  | 0    | 0         |
-| Map_Store         | 74.1  | 48   | 1         |
-| Map_LoadOrStore   | 21.1  | 0    | 0         |
-| Map_Load_Parallel | 5.0   | 0    | 0         |
-| Group_Go          | 1267  | 240  | 5         |
-| Group_Go_Limited  | 4106  | 424  | 9         |
+| Benchmark              | ns/op | B/op | allocs/op |
+| ---------------------- | ----- | ---- | --------- |
+| Lazy_Get               | 40.1  | 0    | 0         |
+| Lazy_Get_Parallel      | 138.9 | 0    | 0         |
+| Map_Load_Hit           | 45.3  | 0    | 0         |
+| Map_Load_Miss          | 25.9  | 0    | 0         |
+| Map_Store              | 311.2 | 48   | 1         |
+| Map_Store_Parallel     | 1392  | 73   | 3         |
+| Map_LoadOrStore        | 102.1 | 0    | 0         |
+| Map_Load_Parallel      | 20.5  | 0    | 0         |
+| Group_Go               | 5790  | 240  | 5         |
+| Group_Go_Parallel      | 1443  | 240  | 5         |
+| Group_Go_Limited       | 15519 | 424  | 9         |
 
 
 ### Analysis
 
-- **Lazy_Get**: 0 allocs — the hot path is a `sync.Mutex` lock plus a `done` check; the value is returned by copy from a struct field, with no heap escape. The parallel variant (56 ns) is dominated by mutex contention since every `Get` takes the same lock; for read-heavy singletons after warm-up an `atomic.Pointer` fast path could shave this, but the simple mutex keeps `Get`/`Reset` trivially correct.
-- **Map_Load**: 0 allocs and 5 ns under parallelism — reads hit `sync.Map`'s read-only path with no lock, which is why the parallel benchmark is *faster* than serial (per-CPU cache locality, no shared counter touched on reads).
-- **Map_Store**: 1 alloc / 48 B is the architectural floor. `sync.Map.Swap` boxes the value into an `any` interface; for a non-pointer `V` this is an unavoidable heap allocation in the standard library's design. Storing pointer values (`*T`) removes the per-store box. The atomic length counter adds no allocations.
-- **Group_Go**: 5 allocs covers `context.WithCancel` (the derived context + cancel closure), the goroutine, and the `panix.SafeVoid` deferred-recover frame. This is per-*group*, not per-request, so it is a warm-path cost. The limited variant adds the semaphore channel and per-task slot bookkeeping (9 allocs for 4 tasks).
+- **Lazy_Get**: 0 allocs — the hot path is a `sync.Mutex` lock plus a `done` check; the value is returned by copy from a struct field, with no heap escape. The parallel variant (139 ns) is dominated by mutex contention since every `Get` takes the same lock.
+- **Map_Load**: 0 allocs and 21 ns under parallelism — reads hit `sync.Map`'s read-only path with no mutex, which is why the parallel benchmark is *faster* than serial (per-CPU cache locality, no shared counter touched on reads).
+- **Map_Store**: 1 alloc / 48 B is the architectural floor from `sync.Map` interface boxing. The length mutex adds ~4× serial latency versus an uncounted `sync.Map` but keeps `Len` correct under concurrent `Clear`. **Map_Store_Parallel** (1.4 µs, 3 allocs) reflects mutex contention when every goroutine writes distinct keys.
+- **Group_Go**: 5 allocs covers `context.WithCancel`, the goroutine, and the `panix.SafeVoid` deferred-recover frame. This is per-*group*, not per-request. **Group_Go_Parallel** reuses the same cost per iteration across goroutines. The limited variant adds semaphore channel bookkeeping (9 allocs for 4 tasks).
 - **Allocation floor**: `Lazy` and `Map` reads are genuinely 0-alloc. `Map.Store` and `Group` allocations are dictated by `sync.Map` interface boxing and `context` machinery respectively — neither is reducible without changing semantics.
 
 ## Quality
@@ -355,10 +370,10 @@ All three types are safe for concurrent use. `Lazy` serializes through a `sync.M
 
 | Metric         | Value                          |
 | -------------- | ------------------------------ |
-| Test functions | 30                             |
-| Benchmarks     | 9                              |
-| Fuzz targets   | 1                              |
-| Examples       | 4                              |
+| Test functions | 40                             |
+| Benchmarks     | 11                             |
+| Fuzz targets   | 1 (`FuzzMap`, includes Clear)  |
+| Examples       | 5                              |
 | Coverage       | 100.0%                         |
 | Race detector  | All pass                       |
 | External deps  | 0 (panix; testify in dev only) |
@@ -375,6 +390,7 @@ syncx/
 ├── options.go          # GroupOption, WithLimit, defaults
 ├── types.go            # GroupStats, isPanic helper
 ├── errors.go           # ErrInitFailed, ErrNilInit
+├── errors_test.go      # sentinel and wrapper tests
 ├── syncx_test.go       # unit + table-driven tests
 ├── bench_test.go       # benchmarks
 ├── fuzz_test.go        # FuzzMap — operation-sequence invariant

@@ -90,6 +90,21 @@ func ExampleTryExecute() {
 	// Output: false true
 }
 
+// ExampleWarmer_WaitForCompletion blocks until the ramp reaches full capacity.
+func ExampleWarmer_WaitForCompletion() {
+	w := warmupx.New(
+		warmupx.WithDuration(40*time.Millisecond),
+		warmupx.WithInterval(10*time.Millisecond),
+	)
+	w.Start()
+	defer w.Stop()
+
+	err := w.WaitForCompletion(context.Background())
+	fmt.Println(err == nil, w.IsComplete())
+	// Output:
+	// true true
+}
+
 // ExampleWarmupController_Reject shows a callback using the WarmupController
 // to reject an admitted call when the instance is not ready for heavy work.
 func ExampleWarmupController_Reject() {

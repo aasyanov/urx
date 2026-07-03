@@ -15,11 +15,11 @@ var (
 	// [errors.Is].
 	ErrClosed = errors.New("bulkx: bulkhead closed")
 
-	// ErrCancelled is returned by [Execute] when the supplied context is
-	// cancelled (or its deadline expires) before a slot is acquired, so no slot
-	// is consumed and fn is never invoked. The joined error carries ctx.Err();
-	// reach it with [errors.Unwrap] or test it with [errors.Is]. Safe to
-	// compare with == or [errors.Is].
+	// ErrCancelled is returned by [Execute], [TryExecute], and [Bulkhead.Acquire]
+	// when the supplied context is cancelled (or its deadline expires) before a
+	// slot is acquired, so no slot is consumed and fn is never invoked. The
+	// joined error carries ctx.Err(); reach it with [errors.Unwrap] or test it
+	// with [errors.Is]. Safe to compare with == or [errors.Is].
 	ErrCancelled = errors.New("bulkx: slot wait cancelled")
 
 	// ErrNilFunc is returned by [Execute] and [TryExecute] when the supplied

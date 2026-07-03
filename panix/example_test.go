@@ -67,6 +67,19 @@ func ExampleWrap() {
 	// Output: wrapped panic: oops
 }
 
+func ExampleWrapVoid() {
+	risky := panix.WrapVoid("example.init", func() error {
+		panic("init failed")
+	})
+
+	err := risky()
+	var pe *panix.PanicError
+	if errors.As(err, &pe) {
+		fmt.Printf("wrapped void panic: %s\n", pe.Op)
+	}
+	// Output: wrapped void panic: example.init
+}
+
 func ExamplePanicError_Unwrap() {
 	rootCause := errors.New("database connection lost")
 	_, err := panix.Safe("example.query", func() (int, error) {

@@ -1,6 +1,7 @@
 package lrux
 
 import (
+	"context"
 	"strconv"
 	"sync/atomic"
 	"testing"
@@ -143,7 +144,23 @@ func BenchmarkCache_GetOrCompute_Hit(b *testing.B) {
 	b.ResetTimer()
 	i := 0
 	for b.Loop() {
-		c.GetOrCompute(i&1023, func() int { return 0 })
+		_, _ = c.GetOrCompute(context.Background(), i&1023, func(context.Context) (int, error) {
+			return 0, nil
+		})
+		i++
+	}
+}
+
+func BenchmarkCache_GetOrCompute_Miss(b *testing.B) {
+	c := New[int, int](WithCapacity[int, int](1<<20))
+	defer c.Close()
+
+	b.ResetTimer()
+	i := 0
+	for b.Loop() {
+		_, _ = c.GetOrCompute(context.Background(), i+1<<20, func(context.Context) (int, error) {
+			return i, nil
+		})
 		i++
 	}
 }

@@ -11,7 +11,8 @@ var (
 	// ErrHookPanic is returned by [Wait] when one or more shutdown hooks
 	// panic. The returned error joins every hook failure; use [errors.Is]
 	// to test for it and [errors.As] to extract the underlying
-	// [*panix.PanicError] values. It is safe to compare with == or
-	// [errors.Is].
+	// [*panix.PanicError] values. It may appear together with
+	// [ErrShutdownTimeout] when the drain budget is also exhausted.
+	// It is safe to compare with == or [errors.Is].
 	ErrHookPanic = errors.New("signalx: shutdown hook panicked")
 )

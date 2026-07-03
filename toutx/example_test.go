@@ -49,6 +49,20 @@ func ExampleExecute_controller() {
 	// Output: done
 }
 
+// ExampleExecute_cancelled shows that an upstream cancellation returns
+// ErrCancelled rather than ErrDeadlineExceeded.
+func ExampleExecute_cancelled() {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := toutx.Execute(ctx, time.Second,
+		func(context.Context, toutx.TimeoutController) (int, error) {
+			return 1, nil
+		})
+	fmt.Println(errors.Is(err, toutx.ErrCancelled))
+	// Output: true
+}
+
 // ExampleTimer demonstrates reusing a pre-configured Timer across calls.
 func ExampleTimer() {
 	timer := toutx.New(

@@ -33,7 +33,7 @@ func bindVar[T any](env *Env, name string, defaultVal T, required bool) *Var[T] 
 // reported by [Env.Validate] as [ErrInvalid].
 //
 // Supported types: string, bool, int, int32, int64, uint, float64,
-// [time.Duration], and []string (comma-separated).
+// [time.Duration], [time.Time] (RFC3339), and []string (comma-separated).
 func Bind[T any](env *Env, name string, defaultVal T) *Var[T] {
 	return bindVar(env, name, defaultVal, false)
 }
@@ -46,21 +46,30 @@ func BindRequired[T any](env *Env, name string) *Var[T] {
 	return bindVar(env, name, zero, true)
 }
 
+// attachTarget links the [Var] to the caller's destination so [Var.Value] and
+// [Var.Ptr] read and write through the same memory as the overlaid field.
+func (v *Var[T]) attachTarget(target *T) {
+	v.target = target
+	*target = v.value
+}
+
 // BindTo reads an environment variable and writes the resolved value into
 // *target. When the variable is not set, *target keeps its current value
 // (serving as the default). This is the preferred way to overlay env vars
 // onto a config struct loaded by cfgx:
 //
-//	envx.BindTo(env, "PORT", &cfg.Port)
-//	envx.BindTo(env, "HOST", &cfg.Host)
+//	port := envx.BindTo(env, "PORT", &cfg.Port)
+//	clix.AddFlag(port.Ptr(), "port", "p", cfg.Port, "listen port")
+//
+// [Var.Ptr] returns target, so clix and the struct field stay in sync.
 //
 // Panics if target is nil — a nil destination is a programming error.
 func BindTo[T any](env *Env, name string, target *T) *Var[T] {
 	if target == nil {
 		panic("envx: BindTo target must not be nil")
 	}
-	v := Bind(env, name, *target)
-	*target = v.value
+	v := bindVar(env, name, *target, false)
+	v.attachTarget(target)
 	return v
 }
 
@@ -68,6 +77,7 @@ func BindTo[T any](env *Env, name string, target *T) *Var[T] {
 // resolved value into *target and marks the variable required, so
 // [Env.Validate] reports [ErrMissing] when it is absent. The current value
 // of *target is used as the fallback until the variable is provided.
+// [Var.Ptr] aliases target, same as [BindTo].
 //
 // Panics if target is nil — a nil destination is a programming error.
 func BindRequiredTo[T any](env *Env, name string, target *T) *Var[T] {
@@ -75,6 +85,6 @@ func BindRequiredTo[T any](env *Env, name string, target *T) *Var[T] {
 		panic("envx: BindRequiredTo target must not be nil")
 	}
 	v := bindVar(env, name, *target, true)
-	*target = v.value
+	v.attachTarget(target)
 	return v
 }

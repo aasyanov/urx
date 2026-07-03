@@ -9,18 +9,16 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestNewObjectPool_NilFactoryPanics(t *testing.T) {
-	assert.Panics(t, func() {
-		NewObjectPool[*bytes.Buffer](nil)
-	})
+func TestNewObjectPool_NilFactoryReturnsErrNilFactory(t *testing.T) {
+	_, err := NewObjectPool[*bytes.Buffer](nil)
+	require.ErrorIs(t, err, ErrNilFactory)
 }
 
 func TestObjectPool_GetCreatesWhenEmpty(t *testing.T) {
-	var created int
-	op := NewObjectPool(func() *bytes.Buffer {
-		created++
+	op, err := NewObjectPool(func() *bytes.Buffer {
 		return new(bytes.Buffer)
 	})
+	require.NoError(t, err)
 
 	buf := op.Get()
 	require.NotNil(t, buf)
@@ -29,7 +27,8 @@ func TestObjectPool_GetCreatesWhenEmpty(t *testing.T) {
 }
 
 func TestObjectPool_PutThenGetReuses(t *testing.T) {
-	op := NewObjectPool(func() *bytes.Buffer { return new(bytes.Buffer) })
+	op, err := NewObjectPool(func() *bytes.Buffer { return new(bytes.Buffer) })
+	require.NoError(t, err)
 
 	buf := op.Get()
 	op.Put(buf)
@@ -41,10 +40,11 @@ func TestObjectPool_PutThenGetReuses(t *testing.T) {
 }
 
 func TestObjectPool_WithReset(t *testing.T) {
-	op := NewObjectPool(
+	op, err := NewObjectPool(
 		func() *bytes.Buffer { return new(bytes.Buffer) },
 		WithReset(func(b *bytes.Buffer) { b.Reset() }),
 	)
+	require.NoError(t, err)
 
 	buf := op.Get()
 	buf.WriteString("dirty data")
@@ -55,7 +55,8 @@ func TestObjectPool_WithReset(t *testing.T) {
 }
 
 func TestObjectPool_WithoutResetKeepsState(t *testing.T) {
-	op := NewObjectPool(func() *bytes.Buffer { return new(bytes.Buffer) })
+	op, err := NewObjectPool(func() *bytes.Buffer { return new(bytes.Buffer) })
+	require.NoError(t, err)
 
 	buf := op.Get()
 	buf.WriteString("data")
@@ -64,7 +65,9 @@ func TestObjectPool_WithoutResetKeepsState(t *testing.T) {
 }
 
 func TestObjectPool_ResetStats(t *testing.T) {
-	op := NewObjectPool(func() int { return 0 })
+	op, err := NewObjectPool(func() int { return 0 })
+	require.NoError(t, err)
+
 	_ = op.Get()
 	op.Put(1)
 	require.Positive(t, op.Stats().Gets)
@@ -77,10 +80,11 @@ func TestObjectPool_ResetStats(t *testing.T) {
 }
 
 func TestObjectPool_ConcurrentGetPut(t *testing.T) {
-	op := NewObjectPool(
+	op, err := NewObjectPool(
 		func() *bytes.Buffer { return new(bytes.Buffer) },
 		WithReset(func(b *bytes.Buffer) { b.Reset() }),
 	)
+	require.NoError(t, err)
 
 	testx.HammerVoid(50, 200, func() {
 		buf := op.Get()

@@ -22,7 +22,8 @@
 // # Supported types
 //
 // Bind supports string, bool, int, int32, int64, uint, float64,
-// [time.Duration], and []string (comma-separated, whitespace-trimmed).
+// [time.Duration], [time.Time] (RFC3339), and []string (comma-separated,
+// whitespace-trimmed).
 //
 // # Overlaying onto a config struct (cfgx → envx → clix)
 //
@@ -30,9 +31,9 @@
 // overlay variables onto a struct already populated by cfgx, then let clix
 // flags override on top — all through plain pointer sharing:
 //
-//	cfgx.Load("config.yaml", &cfg)        // file layer
-//	envx.BindTo(env, "PORT", &cfg.Port)   // env overrides file
-//	clix.AddFlag(&cfg.Port, "port", ...)  // flag overrides env
+//	cfgx.Load("config.yaml", &cfg)              // file layer
+//	port := envx.BindTo(env, "PORT", &cfg.Port)  // env overrides file
+//	clix.AddFlag(port.Ptr(), "port", ...)        // flag overrides env
 //
 // envx imports no other urx subpackage; the layers compose via pointers.
 //
@@ -55,8 +56,8 @@ package envx
 
 import "errors"
 
-// New creates an [Env] with the given options. With no options it reads from
-// the real process environment via [os.LookupEnv] and applies no prefix.
+// New creates an [Env] with the given options.
+// Default configuration: no prefix, lookup [os.LookupEnv].
 func New(opts ...Option) *Env {
 	cfg := defaultConfig()
 	for _, o := range opts {

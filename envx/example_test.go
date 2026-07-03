@@ -3,6 +3,7 @@ package envx_test
 import (
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/aasyanov/urx/envx"
 )
@@ -40,7 +41,8 @@ func ExampleBindRequired() {
 }
 
 // ExampleBindTo overlays environment variables onto a config struct — the
-// envx layer of the cfgx → envx → clix pipeline.
+// envx layer of the cfgx → envx → clix pipeline. [Var.Ptr] aliases the
+// struct field so clix can override the same memory location.
 func ExampleBindTo() {
 	type Config struct {
 		Port int
@@ -52,8 +54,11 @@ func ExampleBindTo() {
 	env := envx.New(envx.WithLookup(envx.MapLookup(map[string]string{
 		"PORT": "9090", // HOST not set → keeps "localhost"
 	})))
-	envx.BindTo(env, "PORT", &cfg.Port)
+	port := envx.BindTo(env, "PORT", &cfg.Port)
 	envx.BindTo(env, "HOST", &cfg.Host)
+
+	// port.Ptr() == &cfg.Port — safe for clix.AddFlag(port.Ptr(), ...)
+	_ = port.Ptr()
 
 	if err := env.Validate(); err != nil {
 		fmt.Println("error:", err)
@@ -61,6 +66,17 @@ func ExampleBindTo() {
 	}
 	fmt.Printf("%s:%d\n", cfg.Host, cfg.Port)
 	// Output: localhost:9090
+}
+
+// ExampleBind_time parses an RFC3339 timestamp, matching clix flag semantics.
+func ExampleBind_time() {
+	env := envx.New(envx.WithLookup(envx.MapLookup(map[string]string{
+		"STARTED_AT": "2025-01-02T15:04:05Z",
+	})))
+
+	started := envx.Bind(env, "STARTED_AT", time.Time{})
+	fmt.Println(started.Value().Format(time.RFC3339))
+	// Output: 2025-01-02T15:04:05Z
 }
 
 // ExampleBind_list parses a comma-separated value into a []string.

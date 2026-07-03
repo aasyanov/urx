@@ -87,12 +87,20 @@ Execute(b, ctx, fn)
   │ ctx.Err() ? ────────────────────────► ErrCancelled (no slot consumed)
   │
   ├── phase 2: optimistic non-blocking send to sem
-  │      slot free ? ──► run(waited=false)
+  │      slot free ? ──► commitSlot ──► closed ? ──► ErrClosed
+  │                                    └──► run(waited=false)
   │
   └── phase 3: arm timer, then select:
-        slot frees up ──► run(waited=true)
+        slot frees up ──► commitSlot ──► run(waited=true)
         ctx.Done()    ──► rejected++ ; ErrCancelled
         timer fires   ──► timeouts++ ; ErrTimeout
+        closedCh      ──► rejected++ ; ErrClosed
+
+TryExecute(b, ctx, fn)
+  │ closed / nil fn / ctx.Err() ? ──────► ErrClosed / ErrNilFunc / ErrCancelled
+  ├── sem free ? ──► commitSlot ──► ctx.Err() ? ──► release slot ; ErrCancelled
+  │                              └──► run(opTryExecute)
+  └── sem full  ? ──► rejected++ ; (false, zero, nil)
 
 run(b, ctx, waited, fn)
   active++ ; (defer active-- ; defer release slot) ; executed++
@@ -118,14 +126,14 @@ The `BulkController` handed to the callback carries the occupancy snapshot taken
 | -------------------- | --------------------------------------------------------------------------------------------------------- |
 | Concurrency bound    | The number of in-flight callbacks never exceeds `maxConcurrent`, even under contention (channel-enforced) |
 | Bounded wait         | `Execute` and `Acquire` wait at most `timeout` for a slot, then return `ErrTimeout`                       |
-| Context first        | A pre-cancelled context returns `ErrCancelled` without invoking fn or consuming a slot                    |
+| Context first        | A pre-cancelled context returns `ErrCancelled` without invoking fn or consuming a slot (`Execute`, `TryExecute`, `Acquire`) |
 | Cancel while waiting | A context cancelled during the wait returns `ErrCancelled` and consumes no slot                           |
-| Non-blocking variant | `TryExecute` never blocks: it runs immediately or rejects with `(false, zero, nil)`                       |
+| Non-blocking variant | `TryExecute` never blocks: it runs immediately, rejects with `(false, zero, nil)`, or returns `ErrCancelled`/`ErrClosed` |
 | Slot release         | The slot is released when the callback returns **or panics**                                              |
 | Panic safety         | A panicking callback becomes a `*panix.PanicError`, slot still freed                                      |
 | Admission purity     | `Allow` reports a best-effort decision without mutating any counter or slot                               |
 | Token release        | `Token.Release` is idempotent; a double release never drives active negative or double-frees a slot       |
-| Close semantics      | After `Close`, new admissions return `ErrClosed`; blocked slow-path waiters wake immediately; in-flight work is unaffected |
+| Close semantics      | After `Close`, new admissions return `ErrClosed`; optimistic admissions re-check closed via `commitSlot`; blocked slow-path waiters wake on `closedCh`; in-flight work is unaffected |
 | Idempotent close     | `Close` is safe to call repeatedly and always returns nil                                                 |
 | Controller scope     | A `BulkController` is valid only during its callback; do not retain it                                    |
 
@@ -270,7 +278,7 @@ resp, err := bulkx.Execute(bh, ctx,
 | ---------------------- | --------------------------- | ---------------------------------------------------------------- |
 | `WithMaxConcurrent(n)` | `DefaultMaxConcurrent` (10) | Max concurrent operations; ≤ 0 ignored, final value floored to 1 |
 | `WithTimeout(d)`       | `DefaultTimeout` (30s)      | Max wait for a slot before `ErrTimeout`; ≤ 0 ignored             |
-| `WithOp(s)`            | `"bulkx.Execute"`           | Operation name attached to panic reports                         |
+| `WithOp(s)`            | `[opExecute]` / `[opTryExecute]` | Operation name attached to panic reports (`TryExecute` defaults to `"bulkx.TryExecute"`) |
 
 
 ## Errors
@@ -280,7 +288,7 @@ resp, err := bulkx.Execute(bh, ctx,
 | -------------- | ----------------------------------------------------------------------------------------------------- |
 | `ErrTimeout`   | The wait timeout elapsed before a slot became available                                               |
 | `ErrClosed`    | The bulkhead has been closed                                                                          |
-| `ErrCancelled` | The context was cancelled or expired before a slot was acquired (wraps `ctx.Err()`); no slot consumed |
+| `ErrCancelled` | The context was cancelled or expired before a slot was acquired (wraps `ctx.Err()`); no slot consumed (`Execute`, `TryExecute`, `Acquire`) |
 | `ErrNilFunc`   | `Execute`/`TryExecute` was given a nil function                                                       |
 
 
@@ -335,10 +343,10 @@ A panicking callback surfaces as a `*panix.PanicError` returned by `Execute`/`Tr
 
 | Metric         | Value                          |
 | -------------- | ------------------------------ |
-| Test functions | 36                             |
+| Test functions | 49                             |
 | Benchmarks     | 7                              |
-| Fuzz targets   | 2                              |
-| Examples       | 5                              |
+| Fuzz targets   | 3                              |
+| Examples       | 6                              |
 | Coverage       | 100.0%                         |
 | Race detector  | All pass                       |
 | External deps  | 0 (panix; testify in dev only) |
@@ -354,7 +362,7 @@ bulkx/
 ├── errors.go           # ErrTimeout, ErrClosed, ErrCancelled, ErrNilFunc
 ├── bulkx_test.go       # unit + table-driven tests
 ├── bench_test.go       # benchmarks (sequential + parallel)
-├── fuzz_test.go        # FuzzExecute, FuzzAcquireRelease — admission invariants
+├── fuzz_test.go        # FuzzExecute, FuzzTryExecute, FuzzAcquireRelease — admission invariants
 ├── example_test.go     # runnable GoDoc examples
 ├── footprint_test.go   # struct size guards
 └── README.md           # this file

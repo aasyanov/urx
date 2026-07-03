@@ -46,6 +46,9 @@ import (
 // the default operation name when none is configured via [WithOp].
 const opExecute = "bulkx.Execute"
 
+// opTryExecute labels panics recovered while running a [TryExecute] callback.
+const opTryExecute = "bulkx.TryExecute"
+
 // Bulkhead is a thread-safe concurrency limiter. Create one with [New], run
 // operations with [Execute] or [TryExecute], obtain a manual slot with
 // [Bulkhead.Acquire], inspect counters with [Bulkhead.Stats], and release
@@ -150,7 +153,7 @@ func (b *Bulkhead) reserve(ctx context.Context) (waited bool, err error) {
 
 	select {
 	case b.sem <- struct{}{}:
-		return false, nil
+		return b.commitSlot(false)
 	default:
 	}
 
@@ -159,7 +162,7 @@ func (b *Bulkhead) reserve(ctx context.Context) (waited bool, err error) {
 
 	select {
 	case b.sem <- struct{}{}:
-		return true, nil
+		return b.commitSlot(true)
 	case <-ctx.Done():
 		b.rejected.Add(1)
 		return false, errCancelled(ctx.Err())
@@ -172,9 +175,27 @@ func (b *Bulkhead) reserve(ctx context.Context) (waited bool, err error) {
 	}
 }
 
+// commitSlot validates the bulkhead is still open after a semaphore send.
+// If [Bulkhead.Close] ran concurrently, the slot is released and [ErrClosed]
+// is returned so no operation is admitted after shutdown.
+func (b *Bulkhead) commitSlot(waited bool) (bool, error) {
+	if !b.closed.Load() {
+		return waited, nil
+	}
+	<-b.sem
+	b.rejected.Add(1)
+	return false, ErrClosed
+}
+
+// releaseUncommittedSlot returns a semaphore token that was acquired but not
+// yet handed to a callback or token owner.
+func (b *Bulkhead) releaseUncommittedSlot() {
+	<-b.sem
+}
+
 // run executes fn inside an already-held semaphore slot, maintaining counters
 // and releasing the slot on return — even if fn panics.
-func run[T any](b *Bulkhead, ctx context.Context, waited bool, fn func(ctx context.Context, bc BulkController) (T, error)) (T, error) {
+func run[T any](b *Bulkhead, ctx context.Context, waited bool, op string, fn func(ctx context.Context, bc BulkController) (T, error)) (T, error) {
 	active := b.active.Add(1)
 	defer b.active.Add(-1)
 	defer func() { <-b.sem }()
@@ -185,7 +206,7 @@ func run[T any](b *Bulkhead, ctx context.Context, waited bool, fn func(ctx conte
 		maxConcurrent: b.cfg.maxConcurrent,
 		waitedSlot:    waited,
 	}
-	return panix.Safe(b.cfg.opOrDefault(), func() (T, error) {
+	return panix.Safe(op, func() (T, error) {
 		return fn(ctx, bc)
 	})
 }
@@ -218,7 +239,7 @@ func Execute[T any](b *Bulkhead, ctx context.Context, fn func(ctx context.Contex
 	if err != nil {
 		return zero, err
 	}
-	return run(b, ctx, waited, fn)
+	return run(b, ctx, waited, b.cfg.opOrDefault(), fn)
 }
 
 // TryExecute attempts to run fn without blocking. If a slot is immediately
@@ -226,9 +247,10 @@ func Execute[T any](b *Bulkhead, ctx context.Context, fn func(ctx context.Contex
 // no slot is free it returns (false, zero, nil) without invoking fn and counts
 // a rejection.
 //
-// Returns (false, zero, [ErrClosed]) if the bulkhead is closed and
-// (false, zero, [ErrNilFunc]) if fn is nil. As with [Execute], the callback
-// runs under [panix.Safe] and the slot is released even on panic.
+// Returns (false, zero, [ErrClosed]) if the bulkhead is closed,
+// (false, zero, [ErrNilFunc]) if fn is nil, and (false, zero, [ErrCancelled])
+// when ctx is already cancelled (no slot consumed). As with [Execute], the
+// callback runs under [panix.Safe] and the slot is released even on panic.
 func TryExecute[T any](b *Bulkhead, ctx context.Context, fn func(ctx context.Context, bc BulkController) (T, error)) (bool, T, error) {
 	var zero T
 	if b.closed.Load() {
@@ -237,10 +259,20 @@ func TryExecute[T any](b *Bulkhead, ctx context.Context, fn func(ctx context.Con
 	if fn == nil {
 		return false, zero, ErrNilFunc
 	}
+	if err := ctx.Err(); err != nil {
+		return false, zero, errCancelled(err)
+	}
 
 	select {
 	case b.sem <- struct{}{}:
-		val, err := run(b, ctx, false, fn)
+		if _, err := b.commitSlot(false); err != nil {
+			return false, zero, err
+		}
+		if err := ctx.Err(); err != nil {
+			b.releaseUncommittedSlot()
+			return false, zero, errCancelled(err)
+		}
+		val, err := run(b, ctx, false, b.cfg.opOrDefaultTry(), fn)
 		return true, val, err
 	default:
 		b.rejected.Add(1)

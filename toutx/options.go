@@ -58,15 +58,18 @@ func WithOp(op string) Option {
 	}
 }
 
-// Timer is a reusable, immutable set of pre-configured defaults. Create one
-// with [New] and apply it to [Execute] via [WithTimer]. A Timer is safe for
-// concurrent use because it is never mutated after construction.
+// Timer is a reusable, immutable preset of timeout and operation-label defaults.
+// Create one with [New] and apply it to [Execute] via [WithTimer].
+//
+// A Timer is safe for concurrent use from any number of goroutines: it is never
+// mutated after construction and holds no per-call state.
 type Timer struct {
 	cfg config
 }
 
-// New creates a [Timer] with the given options applied on top of the package
-// defaults ([DefaultTimeout]).
+// New creates an immutable [Timer] with the given options applied on top of the
+// package defaults ([DefaultTimeout]). The returned Timer is safe for concurrent
+// reuse across any number of [Execute] calls.
 func New(opts ...Option) *Timer {
 	return &Timer{cfg: newConfig(0, opts)}
 }

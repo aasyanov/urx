@@ -13,7 +13,7 @@ import (
 func TestFootprint(t *testing.T) {
 	testx.AssertFootprint(t, []testx.SizeEntry{
 		{Name: "Env", Size: testx.Sizeof[Env](), Max: 48},
-		{Name: "Var[int]", Size: testx.Sizeof[Var[int]](), Max: 64},
+		{Name: "Var[int]", Size: testx.Sizeof[Var[int]](), Max: 72},
 		{Name: "config", Size: testx.Sizeof[config](), Max: 24},
 	})
 }

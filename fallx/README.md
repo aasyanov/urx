@@ -256,16 +256,31 @@ cfg, _ := fallx.Execute(fb, ctx,
 | `Execute`              | `func Execute[T any](f *Fallback[T], ctx context.Context, primaryFn PrimaryFunc[T]) (T, error)`                    | Run primary; degrade on failure           |
 | `ExecuteWithKey`       | `func ExecuteWithKey[T any](f *Fallback[T], ctx context.Context, key string, primaryFn PrimaryFunc[T]) (T, error)` | Execute with an explicit cache key        |
 | `Fallback.Strategy`    | `func (f *Fallback[T]) Strategy() Strategy`                                                                        | Configured strategy                       |
-| `Fallback.Seed`        | `func (f *Fallback[T]) Seed(key string, value T)`                                                                  | Warm the cache with a value (default TTL); no-op after `Close` |
-| `Fallback.SeedWithTTL` | `func (f *Fallback[T]) SeedWithTTL(key string, value T, ttl time.Duration)`                                        | Warm the cache with an explicit TTL; no-op after `Close`       |
-| `Fallback.ClearCache`  | `func (f *Fallback[T]) ClearCache()`                                                                               | Remove all cached entries; no-op after `Close`                 |
+| `Fallback.Seed`        | `func (f *Fallback[T]) Seed(key string, value T)`                                                                  | Warm cache (Cached only); no-op after `Close` or on other strategies |
+| `Fallback.SeedWithTTL` | `func (f *Fallback[T]) SeedWithTTL(key string, value T, ttl time.Duration)`                                        | Warm cache with TTL (Cached only); no-op after `Close`                |
+| `Fallback.ClearCache`  | `func (f *Fallback[T]) ClearCache()`                                                                               | Remove cached entries (Cached only); no-op after `Close`              |
 | `Fallback.Stats`       | `func (f *Fallback[T]) Stats() Stats`                                                                              | Counter snapshot                          |
 | `Fallback.ResetStats`  | `func (f *Fallback[T]) ResetStats()`                                                                               | Zero cumulative counters (keeps cache)    |
 | `Fallback.Close`       | `func (f *Fallback[T]) Close() error`                                                                              | Idempotent shutdown; stops cleanup        |
 | `Fallback.IsClosed`    | `func (f *Fallback[T]) IsClosed() bool`                                                                            | Report closed state                       |
-| `Strategy`             | `type Strategy uint8`                                                                                              | Static / Func / Cached                    |
+| `Option[T]`            | `type Option[T any] func(*config[T])`                                                                               | Functional option for [New]               |
+| `StrategyStatic`       | `const StrategyStatic Strategy = iota`                                                                             | Fixed-value fallback strategy             |
+| `StrategyFunc`         | `const StrategyFunc Strategy = iota + 1`                                                                           | Function fallback strategy                |
+| `StrategyCached`       | `const StrategyCached Strategy = iota + 2`                                                                         | Cached replay fallback strategy           |
+| `Stats`                | `type Stats struct { ... }`                                                                                        | Counter snapshot (JSON-tagged fields)     |
+| `DefaultCacheTTL`      | `const DefaultCacheTTL = 5 * time.Minute`                                                                          | Default cached entry lifetime             |
+| `DefaultMaxCacheSize`  | `const DefaultMaxCacheSize = 1000`                                                                                 | Default live cache entry cap              |
+| `DefaultShards`        | `const DefaultShards = 16`                                                                                         | Default cache shard count                 |
+| `DefaultKey`           | `const DefaultKey = "default"`                                                                                     | Shared cache key when none is configured  |
+| `FallController`       | `interface { Strategy(); Key(); OnFallback(); Error() }`                                                           | Execution context for callbacks           |
+| `Strategy`             | `type Strategy uint8`                                                                                              | Static / Func / Cached enum               |
 | `PrimaryFunc[T]`       | `func(context.Context, FallController) (T, error)`                                                                 | Primary unit of work                      |
 | `FallbackFunc[T]`      | `func(context.Context, FallController) (T, error)`                                                                 | Fallback unit of work (WithFunc)          |
+| `ErrNilFunc`           | `var ErrNilFunc error`                                                                                             | Nil primary function                      |
+| `ErrClosed`            | `var ErrClosed error`                                                                                              | Fallback closed                           |
+| `ErrNoFunc`            | `var ErrNoFunc error`                                                                                              | Missing fallback function                 |
+| `ErrNoCached`          | `var ErrNoCached error`                                                                                            | Cache miss on fallback                    |
+| `ErrFallbackFailed`    | `var ErrFallbackFailed error`                                                                                      | Fallback function failed                  |
 
 
 ### FallController
@@ -287,9 +302,9 @@ cfg, _ := fallx.Execute(fb, ctx,
 | `WithStatic(v)`            | strategy + zero value                                | Select `StrategyStatic`; return `v` on failure           |
 | `WithFunc(fn)`             | —                                                    | Select `StrategyFunc`; run `fn` on failure (nil ignored) |
 | `WithCached(ttl, maxSize)` | `DefaultCacheTTL` (5m), `DefaultMaxCacheSize` (1000) | Select `StrategyCached`; non-positive args use defaults  |
-| `WithKeyFunc(fn)`          | `DefaultKey` ("default")                             | Derive the cache key from context (Cached only)          |
-| `WithShards(n)`            | `DefaultShards` (16)                                 | Cache shard count; < 1 ignored, capped at capacity       |
-| `WithOnFallback(fn)`       | —                                                    | Hook fired on every fallback (err, strategy)             |
+| `WithKeyFunc(fn)`          | `DefaultKey` ("default")                             | Derive the cache key from context (Cached only; nil ignored) |
+| `WithShards(n)`            | `DefaultShards` (16)                                 | Cache shard count; < 1 ignored, capped at capacity/4       |
+| `WithOnFallback(fn)`       | —                                                    | Hook fired on every fallback (err, strategy; nil ignored) |
 | `WithOp(s)`                | `"fallx.Execute"` / `"fallx.Fallback"`               | Operation name in panic reports; empty ignored           |
 
 
@@ -323,7 +338,7 @@ A panicking callback surfaces as a `*panix.PanicError`: a primary panic is handl
 
 ## Safety and Concurrency
 
-`Fallback[T]` is safe for concurrent use from any number of goroutines. All counters live in `sync/atomic` values and the hot path takes no lock for `StrategyStatic`/`StrategyFunc`. The `StrategyCached` cache is partitioned into independently-locked shards (FNV-1a key hashing); concurrent callers caching distinct keys contend only when they hash to the same shard. Capacity eviction is serialized by a dedicated mutex so two callers cannot over-evict past the target, and the cache size counter is an atomic kept in step with the shard maps. The `FallController` is touched only by the single goroutine running its callback and needs no synchronization. Both callbacks run under `panix.Safe`. Every test runs under `-race`, including 64-goroutine cached-access and 32-goroutine static-fallback stress tests.
+`Fallback[T]` is safe for concurrent use from any number of goroutines. All counters live in `sync/atomic` values and the hot path takes no lock for `StrategyStatic`/`StrategyFunc`, which also allocate no cache shards or background goroutines. The `StrategyCached` cache is allocated at construction, partitioned into independently-locked shards (FNV-1a key hashing); concurrent callers caching distinct keys contend only when they hash to the same shard. Capacity eviction is serialized by a dedicated mutex so two callers cannot over-evict past the target; if the LRU heap and counter ever diverge, eviction resynchronizes the counter rather than spinning. The cache size counter is an atomic kept in step with the shard maps. The `FallController` is touched only by the single goroutine running its callback and needs no synchronization. Both callbacks run under `panix.Safe`. Every test runs under `-race`, including 64-goroutine cached-access and 32-goroutine static-fallback stress tests.
 
 ## Benchmarks
 
@@ -347,18 +362,18 @@ A panicking callback surfaces as a `*panix.PanicError`: a primary panic is handl
 - **Execute_StaticSuccess (52 ns)**: the floor for the whole package — one `panix.Safe` call, one atomic increment, one controller allocation. The static-fallback variant (61 ns) adds the `WithOnFallback` nil-check and the second atomic path but allocates the same.
 - **Execute_CachedHit (116 ns)**: ~2.2× the static success cost. The extra time is the inline FNV-1a key hash, the shard lock, the map lookup, and the `heap.Fix` that re-orders the LRU on access. The store path (112 ns) is comparable: hash, lock, map insert, and `heap.Push`. Hashing the key inline (rather than via `hash/fnv`) keeps both paths free of interface dispatch and key copies.
 - **Parallel scaling**: cached hits under 8 goroutines run ~215 ns, ~1.9× the serial cost, because all benchmark keys hash to the same shard and serialize on its lock — a worst case. Real workloads spread keys across all 16 shards, so contention drops roughly linearly with shard count. The static path scales far better (61 ns parallel vs 52 ns serial) since it touches no lock, only the shared atomic counters.
-- **No cache, no goroutine**: `StrategyStatic` and `StrategyFunc` start no background goroutine and allocate no shards beyond the (unused) empty slice, so they are appropriate for extremely high call rates where the cache machinery would be pure overhead.
+- **No cache, no goroutine**: `StrategyStatic` and `StrategyFunc` start no background goroutine and allocate no cache shards — only atomics and the resolved config. Use them for extremely high call rates where the cache machinery would be pure overhead. Under `StrategyCached`, [New] allocates the sharded cache up front and starts the TTL sweeper.
 
 ## Quality
 
 
 | Metric         | Value                          |
 | -------------- | ------------------------------ |
-| Test functions | 43                             |
+| Test functions | 54                             |
 | Benchmarks     | 7                              |
-| Fuzz targets   | 3                              |
-| Examples       | 4                              |
-| Coverage       | 98.7%                          |
+| Fuzz targets   | 4                              |
+| Examples       | 5                              |
+| Coverage       | 98.1%                          |
 | Race detector  | All pass                       |
 | External deps  | 0 (panix; testify in dev only) |
 
@@ -374,7 +389,7 @@ fallx/
 ├── errors.go           # ErrNoFunc, ErrNoCached, ErrClosed, ErrNilFunc, ErrFallbackFailed
 ├── fallx_test.go       # unit + table-driven + concurrent tests
 ├── bench_test.go       # benchmarks (sequential + parallel)
-├── fuzz_test.go        # FuzzExecuteCached, FuzzExecuteFunc, FuzzSeed
+├── fuzz_test.go        # FuzzExecuteCached, FuzzExecuteCachedReplay, FuzzExecuteFunc, FuzzSeed
 ├── example_test.go     # runnable GoDoc examples
 ├── footprint_test.go   # struct size guards
 └── README.md           # this file

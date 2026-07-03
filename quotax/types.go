@@ -1,10 +1,6 @@
 package quotax
 
-import (
-	"context"
-
-	"github.com/aasyanov/urx/ratex"
-)
+import "context"
 
 // QuotaController provides per-call, per-key context and control to the
 // [Execute] and [TryExecute] callback. The implementation is private; callers
@@ -40,15 +36,14 @@ type QuotaController interface {
 
 // execution is the private implementation of [QuotaController]. It is created
 // once per call and accessed only from the calling goroutine, so it needs no
-// synchronization. The per-key token refund is delegated to the underlying
-// [ratex.RateController], which owns the key's bucket.
+// synchronization.
 type execution struct {
-	key    string
-	tokens float64
-	rate   float64
-	burst  int
-	waited bool
-	inner  ratex.RateController
+	key       string
+	tokens    float64
+	rate      float64
+	burst     int
+	waited    bool
+	skipToken bool
 }
 
 // Key implements [QuotaController].
@@ -66,13 +61,9 @@ func (e *execution) Burst() int { return e.burst }
 // Waited implements [QuotaController].
 func (e *execution) Waited() bool { return e.waited }
 
-// SkipToken implements [QuotaController] by delegating to the underlying
-// ratex controller, which refunds the token to the key's bucket.
-func (e *execution) SkipToken() {
-	if e.inner != nil {
-		e.inner.SkipToken()
-	}
-}
+// SkipToken implements [QuotaController] by marking the call for a bucket refund
+// after the callback returns.
+func (e *execution) SkipToken() { e.skipToken = true }
 
 // compile-time assertion that execution satisfies the public interface.
 var _ QuotaController = (*execution)(nil)

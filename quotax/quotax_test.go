@@ -13,29 +13,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// cancelAfterCtx returns a context whose [context.Context.Err] becomes
-// non-nil after the n-th call, enabling deterministic tests of the wait-loop
-// re-check points without relying on real timer scheduling.
-type cancelAfterCtx struct {
-	context.Context
-	calls atomic.Int32
-	after int32
-	err   error
-}
-
-func (c *cancelAfterCtx) Err() error {
-	if c.Context == nil {
-		c.Context = context.Background()
-	}
-	if c.err == nil {
-		c.err = context.Canceled
-	}
-	if c.calls.Add(1) >= c.after {
-		return c.err
-	}
-	return c.Context.Err()
-}
-
 func TestNew_Defaults(t *testing.T) {
 	q := New()
 	defer q.Close()
@@ -72,6 +49,136 @@ func TestWithShards(t *testing.T) {
 	}
 }
 
+func TestWithRate(t *testing.T) {
+	tests := []struct {
+		name string
+		opt  Option
+		want float64
+	}{
+		{"default", nil, DefaultRate},
+		{"custom", WithRate(250), 250},
+		{"zero ignored", WithRate(0), DefaultRate},
+		{"negative ignored", WithRate(-5), DefaultRate},
+		{"fractional floored", WithRate(0.5), minRate},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var opts []Option
+			if tt.opt != nil {
+				opts = append(opts, tt.opt)
+			}
+			q := New(opts...)
+			defer q.Close()
+			assert.Equal(t, tt.want, q.cfg.rate)
+		})
+	}
+}
+
+func TestWithBurst(t *testing.T) {
+	tests := []struct {
+		name string
+		opt  Option
+		want int
+	}{
+		{"default", nil, DefaultBurst},
+		{"custom", WithBurst(100), 100},
+		{"zero clamped to floor", WithBurst(0), minBurst},
+		{"negative clamped to floor", WithBurst(-3), minBurst},
+		{"floor explicit", WithBurst(1), 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var opts []Option
+			if tt.opt != nil {
+				opts = append(opts, tt.opt)
+			}
+			q := New(opts...)
+			defer q.Close()
+			assert.Equal(t, tt.want, q.cfg.burst)
+		})
+	}
+}
+
+func TestWithMaxKeys(t *testing.T) {
+	tests := []struct {
+		name string
+		opt  Option
+		want int64
+	}{
+		{"default unlimited", nil, unlimitedKeys},
+		{"custom", WithMaxKeys(100), 100},
+		{"zero means unlimited", WithMaxKeys(0), unlimitedKeys},
+		{"negative ignored", WithMaxKeys(-1), unlimitedKeys},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var opts []Option
+			if tt.opt != nil {
+				opts = append(opts, tt.opt)
+			}
+			q := New(opts...)
+			defer q.Close()
+			assert.Equal(t, tt.want, q.cfg.maxKeys)
+		})
+	}
+}
+
+func TestWithEvictionTTL(t *testing.T) {
+	tests := []struct {
+		name string
+		opt  Option
+		want time.Duration
+	}{
+		{"default", nil, DefaultEvictionTTL},
+		{"custom", WithEvictionTTL(time.Hour), time.Hour},
+		{"zero ignored", WithEvictionTTL(0), DefaultEvictionTTL},
+		{"negative ignored", WithEvictionTTL(-time.Second), DefaultEvictionTTL},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var opts []Option
+			if tt.opt != nil {
+				opts = append(opts, tt.opt)
+			}
+			q := New(opts...)
+			defer q.Close()
+			assert.Equal(t, tt.want, q.cfg.evictionTTL)
+		})
+	}
+}
+
+func TestWithEvictionInterval(t *testing.T) {
+	tests := []struct {
+		name string
+		opt  Option
+		want time.Duration
+	}{
+		{"default", nil, DefaultEvictionInterval},
+		{"custom", WithEvictionInterval(30 * time.Second), 30 * time.Second},
+		{"zero ignored", WithEvictionInterval(0), DefaultEvictionInterval},
+		{"negative ignored", WithEvictionInterval(-time.Minute), DefaultEvictionInterval},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var opts []Option
+			if tt.opt != nil {
+				opts = append(opts, tt.opt)
+			}
+			q := New(opts...)
+			defer q.Close()
+			assert.Equal(t, tt.want, q.cfg.evictionInterval)
+		})
+	}
+}
+
+func TestNewConfig_FloorsRateBelowMin(t *testing.T) {
+	q := New(WithRate(0.5))
+	defer q.Close()
+	assert.Equal(t, minRate, q.cfg.rate)
+	b := q.getOrCreate(q.shardFor("k"), "k")
+	assert.Equal(t, minRate, b.limiter.Rate())
+}
+
 func TestQuota_Allow_PerKeyIsolation(t *testing.T) {
 	q := New(WithRate(1), WithBurst(2))
 	defer q.Close()
@@ -91,6 +198,14 @@ func TestQuota_AllowN(t *testing.T) {
 
 	assert.True(t, q.AllowN("k", 10))
 	assert.False(t, q.AllowN("k", 1))
+}
+
+func TestQuota_AllowN_ExceedsBurst(t *testing.T) {
+	q := New(WithRate(10), WithBurst(3))
+	defer q.Close()
+
+	assert.False(t, q.AllowN("k", 5))
+	assert.Equal(t, int64(1), q.Stats().Limited)
 }
 
 func TestQuota_Allow_AfterClose(t *testing.T) {
@@ -222,6 +337,32 @@ func TestQuota_Wait_AlreadyCancelled(t *testing.T) {
 	defer q.Close()
 	err := q.Wait(testx.CancelledCtx(), "k")
 	require.ErrorIs(t, err, ErrCancelled)
+	assert.Equal(t, int64(1), q.Stats().Limited)
+}
+
+func TestQuota_WaitN_ExceedsBurst(t *testing.T) {
+	q := New(WithRate(1000), WithBurst(2))
+	defer q.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+
+	err := q.WaitN(ctx, "k", 5)
+	require.ErrorIs(t, err, ErrCancelled)
+	assert.Equal(t, int64(1), q.Stats().Limited)
+}
+
+func TestQuota_WaitN_AbortsOnClose(t *testing.T) {
+	q := New(WithRate(0.0001), WithBurst(1))
+
+	q.Allow("k") // drain so Wait must block
+
+	done := make(chan error, 1)
+	go func() { done <- q.Wait(context.Background(), "k") }()
+
+	time.Sleep(10 * time.Millisecond)
+	require.NoError(t, q.Close())
+	require.ErrorIs(t, <-done, ErrClosed)
 }
 
 func TestQuota_Wait_AfterClose(t *testing.T) {
@@ -235,6 +376,38 @@ func TestQuota_Wait_MaxKeys(t *testing.T) {
 	defer q.Close()
 	q.Allow("existing")
 	require.ErrorIs(t, q.Wait(context.Background(), "new"), ErrMaxKeys)
+}
+
+func TestWaitN_NonPositiveNTreatedAsOne(t *testing.T) {
+	q := New(WithRate(1000), WithBurst(5))
+	defer q.Close()
+
+	require.NoError(t, q.WaitN(context.Background(), "k", 0))
+}
+
+func TestWaitN_CancelImmediatelyAfterAcquire(t *testing.T) {
+	q := New(WithRate(1000), WithBurst(5))
+	defer q.Close()
+
+	err := q.WaitN(&cancelAfterCtx{after: 2}, "k", 1)
+	require.ErrorIs(t, err, ErrCancelled)
+	assert.Equal(t, int64(1), q.Stats().Limited)
+}
+
+func TestWaitForOnBucket_RejectsWhenClosed(t *testing.T) {
+	q := New()
+	b := q.getOrCreate(q.shardFor("k"), "k")
+	require.NoError(t, q.Close())
+	_, err := q.waitForOnBucket(context.Background(), b, 1)
+	require.ErrorIs(t, err, ErrClosed)
+}
+
+func TestWaitForOnBucket_RejectsCancelledContextAtEntry(t *testing.T) {
+	q := New()
+	defer q.Close()
+	b := q.getOrCreate(q.shardFor("k"), "k")
+	_, err := q.waitForOnBucket(testx.CancelledCtx(), b, 1)
+	require.ErrorIs(t, err, ErrCancelled)
 }
 
 func TestExecute_RunsAndCounts(t *testing.T) {
@@ -290,6 +463,22 @@ func TestExecute_Cancelled(t *testing.T) {
 		func(context.Context, QuotaController) (int, error) { return 1, nil })
 	require.ErrorIs(t, err, ErrCancelled)
 	assert.Equal(t, int64(1), q.Stats().Limited)
+}
+
+func TestExecute_AbortsOnClose(t *testing.T) {
+	q := New(WithRate(0.0001), WithBurst(1))
+	q.Allow("k") // drain
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := Execute(q, context.Background(), "k",
+			func(context.Context, QuotaController) (int, error) { return 1, nil })
+		done <- err
+	}()
+
+	time.Sleep(10 * time.Millisecond)
+	require.NoError(t, q.Close())
+	require.ErrorIs(t, <-done, ErrClosed)
 }
 
 func TestExecute_PanicBecomesError(t *testing.T) {
@@ -358,6 +547,44 @@ func TestTryExecute_AdmitsThenRejects(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, ok, "no token available, fn not run")
 	assert.Equal(t, int64(1), q.Stats().Limited)
+}
+
+func TestTryExecute_AlreadyCancelled(t *testing.T) {
+	q := New(WithRate(1000), WithBurst(5))
+	defer q.Close()
+
+	ok, _, err := TryExecute(q, testx.CancelledCtx(), "k",
+		func(context.Context, QuotaController) (int, error) { return 1, nil })
+	assert.False(t, ok)
+	require.ErrorIs(t, err, ErrCancelled)
+	assert.Equal(t, int64(0), q.Stats().Limited, "cancelled ctx must not count as limited")
+}
+
+func TestTryExecute_CancelledAfterAllow(t *testing.T) {
+	q := New(WithRate(1000), WithBurst(5))
+	defer q.Close()
+
+	ok, _, err := TryExecute(q, &cancelAfterCtx{after: 2}, "k",
+		func(context.Context, QuotaController) (int, error) { return 1, nil })
+	assert.False(t, ok)
+	require.ErrorIs(t, err, ErrCancelled)
+	assert.Equal(t, int64(1), q.Stats().Limited)
+}
+
+func TestExecute_WaitsThenAdmits(t *testing.T) {
+	q := New(WithRate(1000), WithBurst(1))
+	defer q.Close()
+
+	require.NoError(t, q.Wait(context.Background(), "k")) // drain
+
+	var waited bool
+	_, err := Execute(q, context.Background(), "k",
+		func(_ context.Context, qc QuotaController) (int, error) {
+			waited = qc.Waited()
+			return 1, nil
+		})
+	require.NoError(t, err)
+	assert.True(t, waited)
 }
 
 func TestTryExecute_NilFunc(t *testing.T) {
@@ -496,6 +723,17 @@ func TestQuota_WaitDelay(t *testing.T) {
 	assert.Equal(t, minWaitDelay, fast.waitDelay(fb, 1))
 }
 
+func TestQuota_WaitDelay_UsesLimiterRate(t *testing.T) {
+	q := New(WithRate(0.5), WithBurst(5))
+	defer q.Close()
+
+	b := q.getOrCreate(q.shardFor("k"), "k")
+	require.True(t, b.limiter.AllowN(5))
+	d := q.waitDelay(b, 5)
+	assert.Greater(t, d, minWaitDelay)
+	assert.LessOrEqual(t, d, 6*time.Second)
+}
+
 func TestQuota_GetOrCreate_ReturnsExisting(t *testing.T) {
 	q := New()
 	defer q.Close()
@@ -509,9 +747,20 @@ func TestQuota_GetOrCreate_ReturnsExisting(t *testing.T) {
 
 func TestQuota_Close_Idempotent(t *testing.T) {
 	q := New()
-	require.NoError(t, q.Close())
-	require.NoError(t, q.Close())
+	testx.AssertCloseIdempotent(t, q)
 	assert.True(t, q.IsClosed())
+}
+
+func TestStopTimer_DrainsFiredChannel(t *testing.T) {
+	timer := time.NewTimer(time.Millisecond)
+	time.Sleep(2 * time.Millisecond)
+	stopTimer(timer)
+}
+
+func TestStopTimer_StopsBeforeFire(t *testing.T) {
+	timer := time.NewTimer(time.Hour)
+	require.True(t, timer.Stop())
+	stopTimer(timer)
 }
 
 func TestQuota_ConcurrentAccess(t *testing.T) {

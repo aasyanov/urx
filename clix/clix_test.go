@@ -234,6 +234,13 @@ func TestNew_ErrorPaths(t *testing.T) {
 			},
 			wantErr: ErrVersion,
 		},
+		{
+			name: "version short",
+			build: func() *Parser {
+				return New([]string{"-V"}, "app", "desc", Version("1.0.0"))
+			},
+			wantErr: ErrVersion,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -284,6 +291,18 @@ func TestFlagInheritance_ResolvesFromParent(t *testing.T) {
 	)
 	require.NoError(t, p.Err())
 	assert.True(t, verbose)
+	assert.True(t, p.IsSet("verbose"))
+}
+
+func TestFlagInheritance_FlagsBeforeSubcommand(t *testing.T) {
+	var verbose bool
+	p := New([]string{"--verbose", "serve"}, "app", "desc",
+		AddFlag(&verbose, "verbose", "v", false, "verbose"),
+		SubCommand("serve", "start", Run(noopAction)),
+	)
+	require.NoError(t, p.Err())
+	assert.True(t, verbose)
+	assert.Equal(t, "serve", p.Command().Name())
 }
 
 func TestIsSet_DistinguishesDefaultFromExplicit(t *testing.T) {
@@ -436,6 +455,85 @@ func TestHelp_SubcommandWithAliasInList(t *testing.T) {
 	assert.Contains(t, help, "extract, x")
 }
 
+func TestRun_PropagatesActionError(t *testing.T) {
+	p := New([]string{}, "app", "desc", Run(func(*Context) error {
+		return assert.AnError
+	}))
+	require.NoError(t, p.Err())
+	require.ErrorIs(t, p.Run(), assert.AnError)
+}
+
+func TestSubCommand_NestedDispatch(t *testing.T) {
+	ran := false
+	p := New([]string{"db", "migrate"}, "app", "desc",
+		SubCommand("db", "database",
+			SubCommand("migrate", "run migrations", Run(func(*Context) error {
+				ran = true
+				return nil
+			})),
+		),
+	)
+	require.NoError(t, p.Err())
+	require.NoError(t, p.Run())
+	assert.True(t, ran)
+	assert.Equal(t, "migrate", p.Command().Name())
+	require.NotNil(t, p.Command().Parent())
+	assert.Equal(t, "db", p.Command().Parent().Name())
+}
+
+func TestSubCommand_UnknownPositionalOnLeaf(t *testing.T) {
+	p := New([]string{"db", "bogus"}, "app", "desc",
+		SubCommand("db", "database",
+			SubCommand("migrate", "run migrations", Run(noopAction)),
+		),
+	)
+	require.ErrorIs(t, p.Err(), ErrUnknownCommand)
+}
+
+func TestRequired_InheritedFromParent(t *testing.T) {
+	var host string
+	p := New([]string{"serve"}, "app", "desc",
+		AddFlag(&host, "host", "", "", "server host", Required()),
+		SubCommand("serve", "start", Run(noopAction)),
+	)
+	require.ErrorIs(t, p.Err(), ErrRequired)
+}
+
+func TestNew_PartialParseLeavesEarlierFlags(t *testing.T) {
+	var port int
+	p := New([]string{"--port", "9090", "--nope"}, "app", "desc",
+		AddFlag(&port, "port", "p", 8080, "listen port"),
+	)
+	require.ErrorIs(t, p.Err(), ErrUnknownFlag)
+	assert.Equal(t, 9090, port, "flags parsed before the error must remain set")
+}
+
+func TestHelp_SubcommandGlobalFlags(t *testing.T) {
+	var verbose bool
+	p := New([]string{"serve", "--help"}, "app", "desc",
+		AddFlag(&verbose, "verbose", "v", false, "verbose output"),
+		SubCommand("serve", "start server", Run(noopAction)),
+	)
+	require.ErrorIs(t, p.Err(), ErrHelp)
+	help := p.Help()
+	assert.Contains(t, help, "USAGE: serve")
+	assert.Contains(t, help, "GLOBAL FLAGS:")
+	assert.Contains(t, help, "--verbose, -v")
+}
+
+func TestHelp_MatchedSubcommandLevel(t *testing.T) {
+	var port int
+	p := New([]string{"serve", "--help"}, "app", "desc",
+		SubCommand("serve", "start server",
+			AddFlag(&port, "port", "p", 8080, "listen port"),
+			Run(noopAction),
+		),
+	)
+	require.ErrorIs(t, p.Err(), ErrHelp)
+	assert.Contains(t, p.Help(), "FLAGS:")
+	assert.Contains(t, p.Help(), "--port, -p")
+}
+
 func TestVersionAndHelpAccessors(t *testing.T) {
 	var verbose bool
 	p := New([]string{}, "myapp", "my tool",
@@ -516,6 +614,57 @@ func TestConstructionPanics(t *testing.T) {
 				New(nil, "app", "desc",
 					SubCommand("a", "", Alias("x"), Run(noopAction)),
 					SubCommand("b", "", Alias("x"), Run(noopAction)),
+				)
+			},
+		},
+		{
+			name: "empty command name",
+			build: func() {
+				New(nil, "", "desc")
+			},
+		},
+		{
+			name: "empty subcommand name",
+			build: func() {
+				New(nil, "app", "desc", SubCommand("", "desc", Run(noopAction)))
+			},
+		},
+		{
+			name: "empty flag name",
+			build: func() {
+				var port int
+				New(nil, "app", "desc", AddFlag(&port, "", "p", 0, ""))
+			},
+		},
+		{
+			name: "empty alias",
+			build: func() {
+				New(nil, "app", "desc", SubCommand("serve", "", Alias(""), Run(noopAction)))
+			},
+		},
+		{
+			name: "shadow inherited long flag",
+			build: func() {
+				var rootPort, childPort int
+				New(nil, "app", "desc",
+					AddFlag(&rootPort, "port", "p", 8080, ""),
+					SubCommand("serve", "start",
+						AddFlag(&childPort, "port", "p", 9090, ""),
+						Run(noopAction),
+					),
+				)
+			},
+		},
+		{
+			name: "shadow inherited short flag",
+			build: func() {
+				var verbose, childVerbose bool
+				New(nil, "app", "desc",
+					AddFlag(&verbose, "verbose", "v", false, ""),
+					SubCommand("serve", "start",
+						AddFlag(&childVerbose, "debug", "v", false, ""),
+						Run(noopAction),
+					),
 				)
 			},
 		},

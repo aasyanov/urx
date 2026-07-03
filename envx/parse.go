@@ -14,10 +14,14 @@ const (
 	base10    = 10
 )
 
+// timeLayout is the timestamp format for [time.Time] bindings, matching clix.
+const timeLayout = time.RFC3339
+
 // parse converts raw into type T, returning a non-empty diagnostic string on
 // failure (kept as a string rather than an error so [Var] stays allocation-
 // light and comparable). Supported types: string, bool, int, int32, int64,
-// uint, float64, time.Duration, and []string (comma-separated).
+// uint, float64, time.Duration, time.Time (RFC3339), and []string
+// (comma-separated).
 func parse[T any](raw string) (T, string) {
 	var zero T
 	switch any(zero).(type) {
@@ -63,6 +67,12 @@ func parse[T any](raw string) (T, string) {
 		v, err := time.ParseDuration(raw)
 		if err != nil {
 			return zero, fmt.Sprintf("expected duration: %s", raw)
+		}
+		return any(v).(T), ""
+	case time.Time:
+		v, err := time.Parse(timeLayout, raw)
+		if err != nil {
+			return zero, fmt.Sprintf("expected time (RFC3339): %s", raw)
 		}
 		return any(v).(T), ""
 	case []string:

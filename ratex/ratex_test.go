@@ -75,8 +75,9 @@ func TestWithBurst(t *testing.T) {
 	}{
 		{"default", nil, DefaultBurst},
 		{"custom", WithBurst(100), 100},
-		{"zero ignored", WithBurst(0), DefaultBurst},
-		{"negative ignored", WithBurst(-3), DefaultBurst},
+		{"zero clamped to floor", WithBurst(0), minBurst},
+		{"negative clamped to floor", WithBurst(-3), minBurst},
+		{"floor explicit", WithBurst(1), 1},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -87,6 +88,121 @@ func TestWithBurst(t *testing.T) {
 			assert.Equal(t, tt.want, New(opts...).Burst())
 		})
 	}
+}
+
+func TestNewConfig_FloorsRateBelowMin(t *testing.T) {
+	l := New(WithRate(0.5))
+	assert.Equal(t, minRate, l.Rate())
+}
+
+func TestLimiter_Delay_ReturnsMinWhenTokensAlreadyAvailable(t *testing.T) {
+	l := New(WithRate(100), WithBurst(10))
+	l.mu.Lock()
+	l.tokens = 10
+	l.mu.Unlock()
+	assert.Equal(t, minDelay, l.delay(5))
+}
+
+func TestLimiter_Delay_ReturnsMinWhenComputedSubMillisecond(t *testing.T) {
+	l := New(WithRate(1_000_000), WithBurst(10))
+	l.mu.Lock()
+	l.tokens = 0.999999
+	l.mu.Unlock()
+	assert.Equal(t, minDelay, l.delay(1))
+}
+
+func TestLimiter_Delay_ReturnsComputedDuration(t *testing.T) {
+	l := New(WithRate(2), WithBurst(10))
+	l.mu.Lock()
+	l.tokens = 0
+	l.mu.Unlock()
+	assert.Equal(t, 2500*time.Millisecond, l.delay(5))
+}
+
+func TestWaitFor_SucceedsAfterSleeping(t *testing.T) {
+	l := New(WithRate(1000), WithBurst(1))
+	require.True(t, l.Allow())
+
+	res, err := l.waitFor(context.Background(), 1)
+	require.NoError(t, err)
+	assert.True(t, res.waited)
+	assert.GreaterOrEqual(t, res.remaining, 0.0)
+}
+
+func TestWaitFor_CancelledAfterTimerBeforeTake(t *testing.T) {
+	l := New(WithRate(100_000), WithBurst(1))
+	require.True(t, l.Allow())
+
+	_, err := l.waitFor(&cancelAfterCtx{after: 2}, 1)
+	require.ErrorIs(t, err, ErrCancelled)
+	assert.Equal(t, uint64(1), l.Stats().Limited)
+}
+
+func TestWaitFor_CancelledOnSecondLoopIteration(t *testing.T) {
+	l := New(WithRate(100_000), WithBurst(1))
+	require.True(t, l.Allow())
+
+	_, err := l.waitFor(&cancelAfterCtx{after: 3}, 1)
+	require.ErrorIs(t, err, ErrCancelled)
+}
+
+func TestWaitFor_CancelledViaContextDoneDuringSelect(t *testing.T) {
+	l := New(WithRate(0.0001), WithBurst(1))
+	require.True(t, l.Allow())
+
+	ctx, cancel := testx.TimedCtx(20 * time.Millisecond)
+	defer cancel()
+
+	_, err := l.waitFor(ctx, 1)
+	require.ErrorIs(t, err, ErrCancelled)
+}
+
+func TestStopTimer_DrainsAlreadyFiredTimer(t *testing.T) {
+	timer := time.NewTimer(0)
+	<-timer.C
+	stopTimer(timer) // must not block; covers the drain branch
+}
+
+func TestStopTimer_StopsPendingTimer(t *testing.T) {
+	timer := time.NewTimer(time.Hour)
+	require.True(t, timer.Stop())
+	stopTimer(timer)
+}
+
+// --- Release ---
+
+func TestLimiter_Release_AfterAllowNRefundsTokens(t *testing.T) {
+	l := New(WithRate(1), WithBurst(5))
+	require.True(t, l.AllowN(3))
+	assert.InDelta(t, 2.0, l.Tokens(), 0.01)
+
+	l.Release(3)
+	assert.InDelta(t, 5.0, l.Tokens(), 0.01)
+	assert.Zero(t, l.Stats().Allowed, "Release must roll back the admission count")
+}
+
+func TestLimiter_Release_CapsAtBurst(t *testing.T) {
+	l := New(WithRate(1), WithBurst(2))
+	require.True(t, l.Allow())
+	l.Release(5)
+	assert.InDelta(t, 2.0, l.Tokens(), 0.01)
+}
+
+func TestLimiter_Release_DoesNotDriveAllowedNegative(t *testing.T) {
+	l := New(WithRate(1), WithBurst(1))
+	l.Release(1)
+	assert.Zero(t, l.Stats().Allowed)
+}
+
+func TestWaitN_CancelAfterTakeRefundsMultipleTokens(t *testing.T) {
+	l := New(WithRate(1), WithBurst(5))
+
+	err := l.WaitN(&cancelAfterCtx{after: 2}, 3)
+	require.ErrorIs(t, err, ErrCancelled)
+	assert.InDelta(t, 5.0, l.Tokens(), 0.01, "WaitN must refund all n tokens on cancel-after-take")
+	s := l.Stats()
+	assert.Zero(t, s.Allowed)
+	assert.Equal(t, uint64(1), s.Limited)
 }
 
 // --- Allow / AllowN ---
@@ -446,6 +562,30 @@ func TestTryExecute_NeverWaited(t *testing.T) {
 			assert.False(t, rc.Waited())
 			return 1, nil
 		})
+}
+
+func TestTryExecute_PanicBecomesError(t *testing.T) {
+	l := New()
+	_, _, err := TryExecute(l, context.Background(),
+		func(context.Context, RateController) (int, error) {
+			panic("kaboom")
+		})
+	testx.RequirePanicError(t, err, opTryExecute)
+}
+
+func TestTryExecute_SkipTokenRefunds(t *testing.T) {
+	l := New(WithRate(1), WithBurst(1))
+	before := l.Tokens()
+
+	ok, _, err := TryExecute(l, context.Background(),
+		func(_ context.Context, rc RateController) (int, error) {
+			rc.SkipToken()
+			return 1, nil
+		})
+	require.NoError(t, err)
+	assert.True(t, ok)
+	assert.InDelta(t, before, l.Tokens(), 0.01)
+	assert.Zero(t, l.Stats().Allowed)
 }
 
 // --- Stats & lifecycle ---

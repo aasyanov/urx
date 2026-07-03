@@ -17,10 +17,10 @@ var (
 	// [errors.Is].
 	ErrMaxKeys = errors.New("quotax: maximum tracked keys reached")
 
-	// ErrCancelled is returned by [Quota.Wait] and [Quota.WaitN] when the
-	// context is cancelled or its deadline expires before a token becomes
-	// available. The joined error carries ctx.Err(). Safe to compare with ==
-	// or [errors.Is].
+	// ErrCancelled is returned by [Quota.Wait], [Quota.WaitN], [Execute], and
+	// [TryExecute] when the context is cancelled or its deadline expires before
+	// a token becomes available, or before the admitted callback runs. The
+	// joined error carries ctx.Err(). Safe to compare with == or [errors.Is].
 	ErrCancelled = errors.New("quotax: wait cancelled")
 
 	// ErrClosed is returned by every admission method after [Quota.Close] has

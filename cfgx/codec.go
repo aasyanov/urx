@@ -50,27 +50,51 @@ func unmarshal(data []byte, dst any, format Format) error {
 	}
 }
 
+// yamlMarshal encodes src via gopkg.in/yaml.v3, converting encoder panics
+// (unsupported types such as func()) into errors so [Save] never crashes.
+func yamlMarshal(src any) (data []byte, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("yaml: %v", r)
+		}
+	}()
+	return yaml.Marshal(src)
+}
+
+// ensureTrailingNewline appends a POSIX newline when absent so every on-disk
+// config format ends consistently regardless of codec defaults.
+func ensureTrailingNewline(data []byte) []byte {
+	if len(data) == 0 || data[len(data)-1] != '\n' {
+		return append(data, '\n')
+	}
+	return data
+}
+
 // marshal encodes src using the codec for format. format must be resolved
 // (not [FormatAuto]); an unresolved format panics for the same reason as
-// [unmarshal].
+// [unmarshal]. Every successful encode ends with a trailing newline.
 func marshal(src any, format Format) ([]byte, error) {
+	var (
+		data []byte
+		err  error
+	)
 	switch format {
 	case FormatYAML:
-		return yaml.Marshal(src)
+		data, err = yamlMarshal(src)
 	case FormatJSON:
-		data, err := json.MarshalIndent(src, "", jsonIndent)
-		if err != nil {
-			return nil, err
-		}
-		return append(data, '\n'), nil
+		data, err = json.MarshalIndent(src, "", jsonIndent)
 	case FormatTOML:
 		var buf bytes.Buffer
 		enc := toml.NewEncoder(&buf)
-		if err := enc.Encode(src); err != nil {
-			return nil, err
+		if encErr := enc.Encode(src); encErr != nil {
+			return nil, encErr
 		}
-		return buf.Bytes(), nil
+		data = buf.Bytes()
 	default:
 		panic(fmt.Sprintf("cfgx: marshal called with unresolved format %d", format))
 	}
+	if err != nil {
+		return nil, err
+	}
+	return ensureTrailingNewline(data), nil
 }

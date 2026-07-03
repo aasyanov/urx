@@ -64,9 +64,9 @@ envx **is** the environment layer of a configuration pipeline: string env → ty
                           │                              │
               found?  ── yes ─► parse[T](raw) ─► value / parseErr
                   │                                      │
-                  no ─► value = default          *field = value
-                          │
-              append &Var[T] to env.vars
+                  no ─► value = default          Var.target = &field
+                          │                      *field = value
+              append &Var[T] to env.vars         Ptr() → &field (alias)
                           ▼
               env.Validate() ── walks vars ──► errors.Join(
                                                  ErrMissing  (required & !found)
@@ -81,10 +81,10 @@ Binding is a two-phase design — **bind eagerly, validate lazily**:
 1. **Resolve the key.** The variable name is upper-cased and, if a prefix was set, joined with `_`: `WithPrefix("APP")` + `PORT` → `APP_PORT`.
 2. **Look up.** The injectable lookup (default [os.LookupEnv]) returns `(raw, found)`.
 3. **Parse on presence.** When found, the raw string is parsed into `T`. A parse failure is *recorded on the Var* (not returned), and the resolved value stays at the default — so a bad value never silently becomes a zero.
-4. **Register.** The [`Var`] is appended to the Env's list.
+4. **Register.** The [`Var`] is appended to the Env's list. For [`BindTo`]/[`BindRequiredTo`], the Var also stores a pointer to the caller's field so [`Var.Ptr`] aliases that field.
 5. **Validate once.** [`Env.Validate`] walks every bound Var and joins all problems: required-but-absent → [`ErrMissing`], present-but-unparseable → [`ErrInvalid`].
 
-This is why a service can surface all configuration errors at once. [`BindTo`] adds a write-through step: it binds with the target's current value as the default, then copies the resolved value back into the target — the seam that lets env overlay a `cfgx`-loaded struct.
+This is why a service can surface all configuration errors at once. [`BindTo`] writes the resolved value into the target and links [`Var.Ptr`] to the same memory — the seam that lets env overlay a `cfgx`-loaded struct and hand off cleanly to `clix`.
 
 ## Normative Contracts
 
@@ -96,6 +96,7 @@ This is why a service can surface all configuration errors at once. [`BindTo`] a
 | Absent keeps default    | An unset variable leaves the default (or target) unchanged.                                    |
 | Validate is total       | One call reports every missing/invalid binding via [`errors.Join`].                            |
 | Empty ≠ unset           | An env var set to "" is `Found()` and overrides the default; use [`Var.Found`] to distinguish. |
+| BindTo aliases target   | [`Var.Ptr`] after [`BindTo`]/[`BindRequiredTo`] is the same pointer as the caller's field.     |
 | No urx imports          | envx composes with cfgx/clix through pointers, not imports.                                    |
 
 
@@ -127,11 +128,11 @@ cfg := Config{Port: 8080, Host: "localhost"} // 1. defaults
 _ = cfgx.Load("config.yaml", &cfg)           // 2. file
 
 env := envx.New(envx.WithPrefix("APP"))      // 3. environment
-envx.BindTo(env, "PORT", &cfg.Port)          //    APP_PORT > file
+port := envx.BindTo(env, "PORT", &cfg.Port)  //    APP_PORT > file
 envx.BindTo(env, "HOST", &cfg.Host)
 
 p := clix.New(os.Args[1:], "app", "service", // 4. flags (highest)
-	clix.AddFlag(&cfg.Port, "port", "p", cfg.Port, "listen port"),
+	clix.AddFlag(port.Ptr(), "port", "p", cfg.Port, "listen port"),
 )
 
 if err := errors.Join(env.Validate(), p.Err()); err != nil {
@@ -159,13 +160,24 @@ origins := envx.Bind(env, "CORS_ORIGINS", []string{"localhost"})
 // CORS_ORIGINS="a.com, b.com ,c.com" → []string{"a.com", "b.com", "c.com"}
 ```
 
+### Timestamps (RFC3339, matching clix)
+
+```go
+env := envx.New()
+started := envx.Bind(env, "STARTED_AT", time.Time{})
+// STARTED_AT="2025-01-02T15:04:05Z" → parsed time.Time
+```
+
 ### Deterministic tests
 
 ```go
-env := envx.New(envx.WithLookup(envx.MapLookup(map[string]string{
-	"APP_PORT": "9090",
-})))
-port := envx.Bind(env, "PORT", 8080, /* via WithPrefix("APP") */)
+env := envx.New(
+	envx.WithPrefix("APP"),
+	envx.WithLookup(envx.MapLookup(map[string]string{
+		"APP_PORT": "9090",
+	})),
+)
+port := envx.Bind(env, "PORT", 8080)
 ```
 
 ## API
@@ -190,9 +202,18 @@ port := envx.Bind(env, "PORT", 8080, /* via WithPrefix("APP") */)
 | `MapLookup`      | `MapLookup(m map[string]string) func(string) (string, bool)`      | Static-map lookup for tests.                  |
 
 
+## Configuration
+
+
+| Option       | Default          | Effect                                              |
+| ------------ | ---------------- | --------------------------------------------------- |
+| `WithPrefix` | empty (no prefix) | Upper-cases and prepends `PREFIX_` to every name. Trailing `_` trimmed. |
+| `WithLookup` | `os.LookupEnv`   | Injectable lookup; nil is ignored.                  |
+
+
 ## Supported Types
 
-`string`, `bool`, `int`, `int32`, `int64`, `uint`, `float64`, [`time.Duration`], and `[]string` (comma-separated, whitespace-trimmed, empties dropped). Binding any other type records an [`ErrInvalid`] ("unsupported type") on [`Env.Validate`].
+`string`, `bool`, `int`, `int32`, `int64`, `uint`, `float64`, [`time.Duration`], [`time.Time`] (RFC3339, matching clix), and `[]string` (comma-separated, whitespace-trimmed, empties dropped). Binding any other type records an [`ErrInvalid`] ("unsupported type") on [`Env.Validate`].
 
 ## Errors
 
@@ -218,7 +239,7 @@ Both are reported only by [`Env.Validate`], joined via [`errors.Join`]; use [`er
 
 ## Safety and Concurrency
 
-An `Env` is **not** safe for concurrent `Bind` calls — bindings mutate an internal slice. The intended pattern is to bind everything on one goroutine at startup, call `Validate` once, then read the resulting `Var` values (or the overlaid struct) concurrently, which is safe since binding has stopped. The lookup function may be called concurrently only if it is itself safe; the defaults ([os.LookupEnv], [`MapLookup`]) are.
+An `Env` is **not** safe for concurrent `Bind` calls — bindings mutate an internal slice. The intended pattern is to bind everything on one goroutine at startup, call `Validate` once, then read the resulting `Var` values (or the overlaid struct) concurrently, which is safe since binding has stopped. The lookup function may be called concurrently only if it is itself safe; the defaults ([os.LookupEnv], [`MapLookup`]) are. No `_Parallel` benchmarks apply: binding is a cold startup path, not a concurrent hot path.
 
 ## Benchmarks
 
@@ -227,32 +248,35 @@ An `Env` is **not** safe for concurrent `Bind` calls — bindings mutate an inte
 
 | Benchmark            | ns/op | B/op | allocs/op |
 | -------------------- | ----- | ---- | --------- |
-| Bind_Int             | 326   | 163  | 1         |
-| Bind_String          | 212   | 165  | 1         |
-| Bind_Duration        | 286   | 153  | 1         |
-| Bind_List            | 584   | 339  | 3         |
-| Bind_Absent          | 185   | 146  | 1         |
-| Validate             | 616   | 184  | 6         |
+| Bind_Int             | 520   | 166  | 1         |
+| Bind_String          | 364   | 165  | 1         |
+| Bind_Duration        | 523   | 179  | 1         |
+| Bind_Time            | 1122  | 184  | 1         |
+| Bind_List            | 941   | 338  | 3         |
+| Bind_Absent          | 541   | 160  | 1         |
+| Validate             | 1429  | 184  | 6         |
 | Parse_Int (internal) | 13    | 0    | 0         |
+| Parse_Time (internal)| 71    | 0    | 0         |
 
 
 ### Analysis
 
-- **One allocation per Bind** for scalar types — the heap-allocated `Var[T]` that the Env retains for later validation. This is the architectural floor: deferred validation requires keeping each binding alive. The value parse itself is allocation-free (`Parse_Int`: 0 allocs, ~13 ns).
+- **One allocation per Bind** for scalar types — the heap-allocated `Var[T]` that the Env retains for later validation. This is the architectural floor: deferred validation requires keeping each binding alive. The value parse itself is allocation-free (`Parse_Int`: 0 allocs, ~13 ns; `Parse_Time`: 0 allocs, ~71 ns).
+- **Bind_Time** parses RFC3339 (~1.1 µs) — dominated by `time.Parse`; still one Var allocation.
 - **Bind_List allocates 3** — the `Var`, the backing array for the result slice, and its header. Proportional to element count.
-- **Bind_Absent is the cheapest bind** (185 ns, 1 alloc): the lookup misses, so no parsing happens; only the `Var` is allocated.
+- **Bind_Absent** skips parsing when the lookup misses; only the `Var` is allocated.
 - **Validate scales with binding count** and allocates the joined error slice; it runs once at startup, off any hot path.
-- **Binding cost is a one-time startup expense.** envx is not on the request path — these numbers matter only for process boot, where ~300 ns per variable is irrelevant. The design optimises for *complete* error reporting over raw speed.
+- **No parallel benchmarks** — `Env` is intentionally single-goroutine during bind; concurrent use applies only after startup to the resolved values.
 
 ## Quality
 
 
 | Metric         | Value                   |
 | -------------- | ----------------------- |
-| Test functions | 20                      |
-| Benchmarks     | 7                       |
+| Test functions | 26                      |
+| Benchmarks     | 9                       |
 | Fuzz targets   | 2                       |
-| Examples       | 4                       |
+| Examples       | 5                       |
 | Coverage       | 100.0%                  |
 | Race detector  | All pass                |
 | External deps  | 0 (testify in dev only) |

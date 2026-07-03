@@ -9,53 +9,11 @@ import (
 	"github.com/aasyanov/urx/panix"
 )
 
-const (
-	// defaultWorkers is the worker goroutine count when [WithWorkers] is not
-	// supplied.
-	defaultWorkers = 4
-
-	// defaultQueueSize is the task queue capacity when [WithQueueSize] is not
-	// supplied.
-	defaultQueueSize = 64
-)
-
-// opWorker labels panics recovered while running a worker task.
+// opWorker labels panics recovered while running a worker task when
+// [WithWorkerOp] is not supplied.
 const opWorker = "poolx.WorkerPool"
 
-// componentWorkerPool names the WorkerPool in [ErrClosed] messages.
 const componentWorkerPool = "worker pool"
-
-// WorkerOption configures a [WorkerPool] created with [NewWorkerPool].
-type WorkerOption func(*workerConfig)
-
-type workerConfig struct {
-	workers   int
-	queueSize int
-}
-
-func defaultWorkerConfig() workerConfig {
-	return workerConfig{workers: defaultWorkers, queueSize: defaultQueueSize}
-}
-
-// WithWorkers sets the number of worker goroutines.
-// Default: 4. Non-positive values are ignored and the default is kept.
-func WithWorkers(n int) WorkerOption {
-	return func(c *workerConfig) {
-		if n > 0 {
-			c.workers = n
-		}
-	}
-}
-
-// WithQueueSize sets the task queue capacity.
-// Default: 64. Non-positive values are ignored and the default is kept.
-func WithQueueSize(n int) WorkerOption {
-	return func(c *workerConfig) {
-		if n > 0 {
-			c.queueSize = n
-		}
-	}
-}
 
 // WorkerPool manages a fixed set of goroutines that process submitted tasks
 // from a bounded queue. Tasks run under panic recovery so a panicking task
@@ -78,12 +36,9 @@ type WorkerPool struct {
 }
 
 // NewWorkerPool creates and starts a [WorkerPool].
-// Default configuration: 4 workers, 64-slot queue.
+// Default configuration: [DefaultWorkers] workers, [DefaultQueueSize]-slot queue.
 func NewWorkerPool(opts ...WorkerOption) *WorkerPool {
-	cfg := defaultWorkerConfig()
-	for _, opt := range opts {
-		opt(&cfg)
-	}
+	cfg := newWorkerConfig(opts)
 
 	wp := &WorkerPool{
 		cfg:   cfg,
@@ -98,9 +53,6 @@ func NewWorkerPool(opts ...WorkerOption) *WorkerPool {
 	return wp
 }
 
-// worker processes tasks until the pool is closed and the queue is drained.
-// It prioritizes draining queued work: on shutdown it keeps running tasks
-// until the queue is empty, then exits.
 func (wp *WorkerPool) worker() {
 	defer wp.wg.Done()
 	for {
@@ -108,7 +60,6 @@ func (wp *WorkerPool) worker() {
 		case fn := <-wp.tasks:
 			fn()
 		case <-wp.done:
-			// Drain any tasks enqueued before close, then exit.
 			for {
 				select {
 				case fn := <-wp.tasks:
@@ -121,11 +72,30 @@ func (wp *WorkerPool) worker() {
 	}
 }
 
-// runTask executes fn under panic recovery and records the outcome in the
-// pool counters: a panic increments both failed and panics; a non-nil error
-// increments failed; success increments completed.
-func (wp *WorkerPool) runTask(ctx context.Context, fn func(ctx context.Context) error) error {
-	err := panix.SafeVoid(opWorker, func() error {
+func (wp *WorkerPool) rejectIfClosed() error {
+	if wp.closed.Load() {
+		return errClosed(componentWorkerPool)
+	}
+	select {
+	case <-wp.done:
+		return errClosed(componentWorkerPool)
+	default:
+		return nil
+	}
+}
+
+func (wp *WorkerPool) validateSubmit(ctx context.Context, fn func(context.Context) error) error {
+	if fn == nil {
+		return ErrNilFunc
+	}
+	if err := ctx.Err(); err != nil {
+		return errCancelled(err)
+	}
+	return wp.rejectIfClosed()
+}
+
+func (wp *WorkerPool) runTask(ctx context.Context, fn func(context.Context) error) error {
+	err := panix.SafeVoid(wp.cfg.opOrDefault(), func() error {
 		return fn(ctx)
 	})
 	switch {
@@ -141,16 +111,14 @@ func (wp *WorkerPool) runTask(ctx context.Context, fn func(ctx context.Context) 
 }
 
 // Submit enqueues a task for asynchronous execution. It blocks while the
-// queue is full, releasing as soon as a slot opens, ctx is cancelled, or the
-// pool is closed.
+// queue is full, releasing when a slot opens, ctx is cancelled, or the pool
+// is closed.
 //
-// Returns [ErrClosed] if the pool is closed and [ErrCancelled] (joined with
-// the context cause) if ctx is cancelled before a slot becomes available.
-// The task's own error or panic is recorded in [WorkerPool.Stats], not
-// returned by Submit.
-func (wp *WorkerPool) Submit(ctx context.Context, fn func(ctx context.Context) error) error {
-	if wp.closed.Load() {
-		return errClosed(componentWorkerPool)
+// Returns [ErrNilFunc], [ErrClosed], or [ErrCancelled]. The task's own error
+// or panic is recorded in [WorkerPool.Stats], not returned by Submit.
+func (wp *WorkerPool) Submit(ctx context.Context, fn func(context.Context) error) error {
+	if err := wp.validateSubmit(ctx, fn); err != nil {
+		return err
 	}
 
 	task := func() { _ = wp.runTask(ctx, fn) }
@@ -166,12 +134,12 @@ func (wp *WorkerPool) Submit(ctx context.Context, fn func(ctx context.Context) e
 	}
 }
 
-// TrySubmit enqueues a task without blocking. Returns [ErrQueueFull] if the
-// queue is at capacity, [ErrClosed] if the pool is closed. As with [Submit],
-// the task's own error or panic is recorded in [WorkerPool.Stats].
-func (wp *WorkerPool) TrySubmit(ctx context.Context, fn func(ctx context.Context) error) error {
-	if wp.closed.Load() {
-		return errClosed(componentWorkerPool)
+// TrySubmit enqueues a task without blocking. Returns [ErrQueueFull] when the
+// queue is at capacity, [ErrNilFunc] when fn is nil, [ErrClosed] when the
+// pool is closed, and [ErrCancelled] when ctx is already cancelled.
+func (wp *WorkerPool) TrySubmit(ctx context.Context, fn func(context.Context) error) error {
+	if err := wp.validateSubmit(ctx, fn); err != nil {
+		return err
 	}
 
 	task := func() { _ = wp.runTask(ctx, fn) }
@@ -189,15 +157,18 @@ func (wp *WorkerPool) TrySubmit(ctx context.Context, fn func(ctx context.Context
 
 // SubmitWait enqueues a task and blocks until it has run, returning the
 // task's own result. It blocks while the queue is full, releasing when a
-// slot opens, ctx is cancelled, or the pool is closed.
+// slot opens, ctx is cancelled, or the pool is closed before enqueue.
 //
-// Returns [ErrClosed] if the pool is closed and [ErrCancelled] if ctx is
-// cancelled before the task is enqueued. If the task panics, the returned
-// error is a [*panix.PanicError]; otherwise the task's error is returned
-// verbatim. The outcome is also recorded in [WorkerPool.Stats].
-func (wp *WorkerPool) SubmitWait(ctx context.Context, fn func(ctx context.Context) error) error {
-	if wp.closed.Load() {
-		return errClosed(componentWorkerPool)
+// After the task is queued, SubmitWait waits for the result until ctx is
+// cancelled. [WorkerPool.Close] drains every accepted task before returning,
+// so a queued task always completes and its result is delivered unless the
+// caller's ctx is cancelled first.
+//
+// Returns [ErrNilFunc], [ErrClosed], or [ErrCancelled]. A panicking task
+// yields [*panix.PanicError]; a non-panic error is returned verbatim.
+func (wp *WorkerPool) SubmitWait(ctx context.Context, fn func(context.Context) error) error {
+	if err := wp.validateSubmit(ctx, fn); err != nil {
+		return err
 	}
 
 	resultCh := make(chan error, 1)
@@ -212,21 +183,11 @@ func (wp *WorkerPool) SubmitWait(ctx context.Context, fn func(ctx context.Contex
 		return errCancelled(ctx.Err())
 	}
 
-	// The task is queued. Wait for its result, but do not block forever if
-	// the pool shuts down before a worker picks it up. When shutdown wins the
-	// select race against a completed result, drain the buffered result first.
 	select {
 	case err := <-resultCh:
 		return err
 	case <-ctx.Done():
 		return errCancelled(ctx.Err())
-	case <-wp.done:
-		select {
-		case err := <-resultCh:
-			return err
-		default:
-			return errClosed(componentWorkerPool)
-		}
 	}
 }
 
@@ -244,7 +205,6 @@ func (wp *WorkerPool) Stats() WorkerStats {
 }
 
 // ResetStats zeroes the submitted, completed, failed, and panics counters.
-// It does not affect the live worker or queue configuration.
 func (wp *WorkerPool) ResetStats() {
 	wp.submitted.Store(0)
 	wp.completed.Store(0)
@@ -252,9 +212,6 @@ func (wp *WorkerPool) ResetStats() {
 	wp.panics.Store(0)
 }
 
-// drainOrphanedTasks runs tasks that were enqueued after workers exited but
-// before Close finished. The task channel is never closed, so this final drain
-// guarantees every accepted task executes exactly once.
 func (wp *WorkerPool) drainOrphanedTasks() {
 	for {
 		select {
@@ -267,14 +224,15 @@ func (wp *WorkerPool) drainOrphanedTasks() {
 }
 
 // Close stops accepting new tasks and blocks until all in-flight and queued
-// tasks have completed. It is idempotent: subsequent calls are no-ops.
-func (wp *WorkerPool) Close() {
+// tasks have completed. It is idempotent.
+func (wp *WorkerPool) Close() error {
 	wp.closeOnce.Do(func() {
 		wp.closed.Store(true)
 		close(wp.done)
 		wp.wg.Wait()
 		wp.drainOrphanedTasks()
 	})
+	return nil
 }
 
 // IsClosed reports whether the pool has been closed.
@@ -282,7 +240,6 @@ func (wp *WorkerPool) IsClosed() bool {
 	return wp.closed.Load()
 }
 
-// isPanic reports whether err originates from a recovered panic.
 func isPanic(err error) bool {
 	var pe *panix.PanicError
 	return errors.As(err, &pe)

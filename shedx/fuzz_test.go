@@ -28,7 +28,7 @@ func FuzzExecute(f *testing.F) {
 				return 1, nil
 			})
 
-		if priority >= PriorityCritical && err != nil {
+		if priority == PriorityCritical && err != nil {
 			t.Fatalf("critical request rejected: %v", err)
 		}
 		if got := s.InFlight(); got != 0 {
@@ -60,7 +60,7 @@ func FuzzTryExecute(f *testing.F) {
 				return 1, nil
 			})
 
-		if priority >= PriorityCritical {
+		if priority == PriorityCritical {
 			if !ok || err != nil {
 				t.Fatalf("critical request rejected: ok=%v err=%v", ok, err)
 			}

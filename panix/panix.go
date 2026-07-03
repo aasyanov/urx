@@ -39,8 +39,12 @@ const (
 // with a captured stack trace. If fn returns a non-nil error without panicking,
 // that error is returned as-is.
 //
+// Safe is safe for concurrent use from multiple goroutines; it holds no
+// shared mutable state.
+//
 // The op parameter identifies the call site in error messages and should use
 // the "package.Function" convention (e.g. "retryx.Do", "bulkx.Execute").
+// A nil fn panics at call time and is recovered as a [*PanicError].
 func Safe[T any](op string, fn func() (T, error)) (val T, err error) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -59,6 +63,8 @@ func Safe[T any](op string, fn func() (T, error)) (val T, err error) {
 // SafeVoid executes fn and recovers any panic, converting it into a
 // [*PanicError] with a captured stack trace. Use SafeVoid for functions
 // that return only an error, avoiding the generic type parameter.
+//
+// SafeVoid is safe for concurrent use from multiple goroutines.
 func SafeVoid(op string, fn func() error) error {
 	_, err := Safe(op, func() (struct{}, error) {
 		return struct{}{}, fn()
@@ -68,10 +74,16 @@ func SafeVoid(op string, fn func() error) error {
 
 // SafeGo launches fn in a new goroutine with panic recovery. If fn panics,
 // the recovered [*PanicError] is passed to the onError callback (if non-nil).
-// A nil ctx is treated as [context.Background].
+// A nil ctx is treated as [context.Background]. A nil fn panics at call time
+// and is recovered like any other panic in the goroutine.
 //
-// SafeGo never re-panics. If onError is nil, panics are silently recovered.
-// Panics raised by onError are also recovered.
+// SafeGo never re-panics and never crashes the process. If onError is nil,
+// panics in fn are silently recovered. Panics raised by onError are also
+// recovered via an internal [SafeVoid] wrapper; they are not propagated and
+// any work onError did not complete (for example a channel send) is lost.
+//
+// SafeGo is safe for concurrent use: each call launches an independent
+// goroutine with no shared package-level state.
 func SafeGo(ctx context.Context, op string, fn func(ctx context.Context), onError func(ctx context.Context, err error)) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -92,7 +104,8 @@ func SafeGo(ctx context.Context, op string, fn func(ctx context.Context), onErro
 }
 
 // Wrap returns a panic-safe version of fn. Each call to the returned
-// function runs fn under [Safe] with the given op label.
+// function runs fn under [Safe] with the given op label. The returned
+// closure is safe for concurrent use.
 func Wrap[T any](op string, fn func() (T, error)) func() (T, error) {
 	return func() (T, error) {
 		return Safe(op, fn)
@@ -100,7 +113,8 @@ func Wrap[T any](op string, fn func() (T, error)) func() (T, error) {
 }
 
 // WrapVoid returns a panic-safe version of fn. Each call to the returned
-// function runs fn under [SafeVoid] with the given op label.
+// function runs fn under [SafeVoid] with the given op label. The returned
+// closure is safe for concurrent use.
 func WrapVoid(op string, fn func() error) func() error {
 	return func() error {
 		return SafeVoid(op, fn)
@@ -110,15 +124,19 @@ func WrapVoid(op string, fn func() error) func() error {
 // captureStack collects the current goroutine's stack trace, growing the
 // buffer until the full trace fits or [maxStackSize] is reached.
 func captureStack() []byte {
-	buf := make([]byte, defaultStackSize)
+	return captureStackLimited(maxStackSize)
+}
+
+func captureStackLimited(cap int) []byte {
+	buf := make([]byte, min(defaultStackSize, cap))
 	for {
 		n := runtime.Stack(buf, false)
 		if n < len(buf) {
 			return buf[:n]
 		}
-		if len(buf) >= maxStackSize {
-			return buf[:n]
+		if len(buf) >= cap {
+			return buf
 		}
-		buf = make([]byte, min(len(buf)*2, maxStackSize))
+		buf = make([]byte, min(len(buf)*2, cap))
 	}
 }

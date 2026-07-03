@@ -152,6 +152,20 @@ func TestExecute_SkipSampleExcludesLatency(t *testing.T) {
 	assert.Equal(t, time.Duration(0), l.Stats().AvgLat, "no latency recorded")
 }
 
+func TestExecute_SkipSamplePreservesFailureCount(t *testing.T) {
+	l := New(WithWarmupSamples(0))
+	defer l.Close()
+	sentinel := errors.New("fail")
+	_, err := Execute(l, bg(), func(_ context.Context, ac AdaptController) (int, error) {
+		ac.SkipSample()
+		return 0, sentinel
+	})
+	require.ErrorIs(t, err, sentinel)
+	assert.Equal(t, int64(1), l.Stats().Failures)
+	assert.Equal(t, int64(0), l.Stats().Success)
+	assert.Equal(t, time.Duration(0), l.Stats().AvgLat)
+}
+
 // --- Context handling ---
 
 func TestExecute_CancelledContext(t *testing.T) {
@@ -573,6 +587,13 @@ func TestOptions_IgnoreInvalidValues(t *testing.T) {
 	assert.Equal(t, DefaultMinLatencyDecay, cfg.minLatDecay)
 	assert.Equal(t, DefaultJitter, cfg.jitter)
 	assert.Equal(t, opExecute, cfg.opOrDefault())
+	assert.Equal(t, opTryExecute, cfg.opOrDefaultTry())
+}
+
+func TestOptions_OpOrDefaultTry(t *testing.T) {
+	assert.Equal(t, opTryExecute, newConfig(nil).opOrDefaultTry())
+	assert.Equal(t, "db.query", newConfig([]Option{WithOp("db.query")}).opOrDefaultTry())
+	assert.Equal(t, opTryExecute, newConfig([]Option{WithOp("")}).opOrDefaultTry())
 }
 
 func TestRingCapacity_Clamped(t *testing.T) {
@@ -758,6 +779,58 @@ func TestTryExecute_SkipSample(t *testing.T) {
 	assert.Equal(t, time.Duration(0), l.Stats().AvgLat)
 }
 
+func TestTryExecute_SkipSamplePreservesFailureCount(t *testing.T) {
+	l := New(WithWarmupSamples(0))
+	defer l.Close()
+	sentinel := errors.New("fail")
+	ran, _, err := TryExecute(l, bg(), func(_ context.Context, ac AdaptController) (int, error) {
+		ac.SkipSample()
+		return 0, sentinel
+	})
+	require.ErrorIs(t, err, sentinel)
+	assert.True(t, ran)
+	assert.Equal(t, int64(1), l.Stats().Failures)
+	assert.Equal(t, int64(0), l.Stats().Success)
+}
+
+func TestTryExecute_RecoversPanic(t *testing.T) {
+	l := New()
+	defer l.Close()
+	ran, _, err := TryExecute(l, bg(), func(context.Context, AdaptController) (int, error) {
+		panic("kaboom")
+	})
+	assert.True(t, ran)
+	testx.RequirePanicError(t, err, opTryExecute)
+	assert.Equal(t, 0, l.InFlight())
+}
+
+func TestTryExecute_RecoversPanic_WithCustomOp(t *testing.T) {
+	l := New(WithOp("api.search"))
+	defer l.Close()
+	ran, _, err := TryExecute(l, bg(), func(context.Context, AdaptController) (int, error) {
+		panic("kaboom")
+	})
+	assert.True(t, ran)
+	testx.RequirePanicError(t, err, "api.search")
+}
+
+func TestTryExecute_CancelledContext(t *testing.T) {
+	l := New()
+	defer l.Close()
+	ran, _, err := TryExecute[int](l, testx.CancelledCtx(), noop(0, nil))
+	assert.False(t, ran)
+	require.ErrorIs(t, err, ErrCancelled)
+}
+
+func TestTryExecute_DeadlineExceeded(t *testing.T) {
+	l := New()
+	defer l.Close()
+	ran, _, err := TryExecute[int](l, testx.ExpiredCtx(), noop(0, nil))
+	assert.False(t, ran)
+	require.ErrorIs(t, err, ErrTimeout)
+	assert.ErrorIs(t, err, context.DeadlineExceeded)
+}
+
 func TestOptions_ApplyValidValues(t *testing.T) {
 	cfg := newConfig([]Option{
 		WithTargetLatency(250 * time.Millisecond),
@@ -781,4 +854,156 @@ func TestAcquire_RaceSafe(t *testing.T) {
 		return nil
 	})
 	assert.Equal(t, 0, l.InFlight())
+}
+
+// --- Allow ---
+
+func TestAllow_ReportsAvailability(t *testing.T) {
+	l := New(WithInitialLimit(2), WithMaxLimit(2))
+	defer l.Close()
+	assert.True(t, l.Allow())
+
+	rel, ok := l.TryAcquire()
+	require.True(t, ok)
+	assert.True(t, l.Allow())
+	rel(true, time.Microsecond)
+	assert.True(t, l.Allow())
+
+	rel2, ok := l.TryAcquire()
+	require.True(t, ok)
+	rel3, ok := l.TryAcquire()
+	require.True(t, ok)
+	assert.False(t, l.Allow())
+	rel2(true, time.Microsecond)
+	rel3(true, time.Microsecond)
+}
+
+func TestAllow_ReturnsFalseWhenClosed(t *testing.T) {
+	l := New()
+	require.NoError(t, l.Close())
+	assert.False(t, l.Allow())
+}
+
+// --- Close edge cases ---
+
+func TestCloseWithTimeout_ZeroSkipsDrainWait(t *testing.T) {
+	l := New(WithInitialLimit(1), WithMaxLimit(1))
+	rel, err := l.Acquire(bg())
+	require.NoError(t, err)
+
+	start := time.Now()
+	require.NoError(t, l.CloseWithTimeout(0))
+	assert.Less(t, time.Since(start), 50*time.Millisecond)
+
+	rel(true, time.Millisecond)
+}
+
+func TestAcquire_ReturnsErrClosedWhenClosedAfterPermitTaken(t *testing.T) {
+	l := New(WithInitialLimit(2), WithMaxLimit(2))
+	rel, ok := l.TryAcquire()
+	require.True(t, ok)
+
+	require.NoError(t, l.CloseWithTimeout(0))
+
+	_, err := l.Acquire(bg())
+	require.ErrorIs(t, err, ErrClosed)
+
+	rel(true, time.Millisecond)
+}
+
+func TestTryAcquire_ReturnsFalseWhenClosedAfterPermitTaken(t *testing.T) {
+	l := New(WithInitialLimit(2), WithMaxLimit(2))
+	rel, ok := l.TryAcquire()
+	require.True(t, ok)
+
+	require.NoError(t, l.CloseWithTimeout(0))
+
+	_, ok = l.TryAcquire()
+	assert.False(t, ok)
+
+	rel(true, time.Millisecond)
+}
+
+// --- Internal edge paths ---
+
+func TestReturnPermit_NoOpWhenSemaphoreFull(t *testing.T) {
+	l := New(WithInitialLimit(3), WithMaxLimit(3))
+	defer l.Close()
+	assert.Len(t, l.sem, 3)
+
+	l.mu.Lock()
+	l.returnPermit() // sem already full → default branch
+	l.mu.Unlock()
+	assert.Len(t, l.sem, 3)
+}
+
+func TestResetStats_RaisesLimitWhenInFlightExceedsInitial(t *testing.T) {
+	l := New(WithInitialLimit(2), WithMaxLimit(10))
+	defer l.Close()
+	l.inFlight.Add(3)
+
+	l.ResetStats()
+	assert.Equal(t, 3, l.Limit(), "limit raised to in-flight count")
+	assert.Equal(t, int64(0), l.Stats().Total)
+}
+
+func TestGradient_FastStepWhenWellBelowAverage(t *testing.T) {
+	l := New(WithAlgorithm(Gradient), WithInitialLimit(10), WithMaxLimit(100),
+		WithTolerance(0.1))
+	defer l.Close()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	l.avgLat = float64(10 * time.Millisecond.Nanoseconds())
+	got := l.gradient(true, time.Millisecond) // g << -tolerance
+	assert.Equal(t, 12, got)
+}
+
+func TestGradient_ProportionalBackoffWhenAboveAverage(t *testing.T) {
+	l := New(WithAlgorithm(Gradient), WithInitialLimit(20), WithMaxLimit(100),
+		WithTolerance(0.1), WithDecreaseRatio(0.5))
+	defer l.Close()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	l.avgLat = float64(10 * time.Millisecond.Nanoseconds())
+	got := l.gradient(true, 25*time.Millisecond) // g > tolerance
+	assert.Less(t, got, 20)
+}
+
+func TestAcquire_AbortsWhenClosedAfterTakingPermit(t *testing.T) {
+	l := New(WithInitialLimit(1), WithMaxLimit(1))
+	require.NoError(t, l.CloseWithTimeout(0))
+	select {
+	case l.sem <- struct{}{}:
+	default:
+		t.Fatal("expected room to seed permit")
+	}
+
+	_, err := l.Acquire(bg())
+	require.ErrorIs(t, err, ErrClosed)
+}
+
+func TestTryAcquire_AbortsWhenClosedAfterTakingPermit(t *testing.T) {
+	l := New(WithInitialLimit(1), WithMaxLimit(1))
+	require.NoError(t, l.CloseWithTimeout(0))
+	select {
+	case l.sem <- struct{}{}:
+	default:
+		t.Fatal("expected room to seed permit")
+	}
+
+	_, ok := l.TryAcquire()
+	assert.False(t, ok)
+}
+
+func TestReconcilePermitsLocked_ClampsNegativeWant(t *testing.T) {
+	l := New(WithInitialLimit(2), WithMaxLimit(5))
+	defer l.Close()
+	l.inFlight.Store(5)
+	l.mu.Lock()
+	l.limit = 2
+	l.reconcilePermitsLocked()
+	assert.Empty(t, l.sem)
+	l.mu.Unlock()
 }

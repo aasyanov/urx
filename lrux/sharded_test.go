@@ -214,10 +214,13 @@ func TestShardedCache_Compute(t *testing.T) {
 	c := NewSharded[string, int]()
 	defer c.Close()
 
-	v := c.GetOrCompute("k", func() int { return 5 })
+	v, err := c.GetOrCompute(context.Background(), "k", func(context.Context) (int, error) {
+		return 5, nil
+	})
+	require.NoError(t, err)
 	assert.Equal(t, 5, v)
 
-	v2, err := c.GetOrComputeCtx(context.Background(), "k2", func(context.Context) (int, error) {
+	v2, err := c.GetOrCompute(context.Background(), "k2", func(context.Context) (int, error) {
 		return 6, nil
 	})
 	require.NoError(t, err)
@@ -228,9 +231,8 @@ func TestShardedCache_Close(t *testing.T) {
 	c := NewSharded[string, int]()
 	c.Set("a", 1)
 
-	c.Close()
+	testx.AssertCloseIdempotent(t, c)
 	assert.True(t, c.IsClosed())
-	c.Close() // idempotent
 }
 
 func TestShardedCache_OnEvict(t *testing.T) {

@@ -128,10 +128,14 @@ func WithHalfOpenMax(n int) Option {
 // WithOnStateChange registers a callback invoked on every state transition,
 // receiving the previous and new [State]. Use it for metrics or logging; it
 // runs synchronously on the goroutine that drives the transition and must not
-// block or panic. A nil callback is ignored.
+// block or panic. The hook is not fired by [Breaker.Stats] — only by
+// [Breaker.State], [Execute], [TryExecute], and [Breaker.Reset]. A nil
+// callback is ignored.
 func WithOnStateChange(fn func(from, to State)) Option {
 	return func(c *config) {
-		c.onStateChange = fn
+		if fn != nil {
+			c.onStateChange = fn
+		}
 	}
 }
 

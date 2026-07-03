@@ -7,8 +7,11 @@ import (
 
 var (
 	// ErrExhausted is returned by [Do] when every attempt failed or a
-	// non-retryable error stopped the loop. The joined error carries the last
-	// underlying cause. Safe to compare with == or [errors.Is].
+	// non-retryable error stopped the loop early. The joined error carries
+	// attempts=N and the last underlying cause: N is the 1-based attempt that
+	// stopped the loop when [WithRetryIf] rejects an error; when the full
+	// attempt budget is consumed, N equals maxAttempts. Safe to compare with
+	// == or [errors.Is].
 	ErrExhausted = errors.New("retryx: all retry attempts exhausted")
 
 	// ErrCancelled is returned by [Do] when the context is cancelled or its

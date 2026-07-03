@@ -77,8 +77,11 @@ func New(opts ...Option) *Checker {
 // Register adds a named component check. Registering the same name more than
 // once keeps every registration; the readiness report key is the name, so a
 // later registration's result overwrites an earlier one in the [Report].
-// It is safe for concurrent use. Panics if check is nil.
+// It is safe for concurrent use. Panics if name is empty or check is nil.
 func (c *Checker) Register(name string, check func(ctx context.Context) error) {
+	if name == "" {
+		panic("healthx: Register name must not be empty")
+	}
 	if check == nil {
 		panic("healthx: Register check must not be nil for " + name)
 	}
@@ -168,23 +171,40 @@ func (c *Checker) snapshot() []namedCheck {
 	return out
 }
 
+// checkResult pairs a component name with its collected probe outcome.
+type checkResult struct {
+	name   string
+	status ComponentStatus
+}
+
+// drainCheckResults records every result already waiting in results. It is
+// called when the collection deadline fires so buffered successes are not
+// misclassified as timed out.
+func drainCheckResults(components map[string]ComponentStatus, results <-chan checkResult) {
+	for {
+		select {
+		case r := <-results:
+			components[r.name] = r.status
+		default:
+			return
+		}
+	}
+}
+
 // runChecks executes every check concurrently and collects the results keyed
 // by component name. Collection is bounded by the per-check timeout plus a
 // small grace margin: a check that ignores its context and blocks past the
 // deadline cannot wedge the probe — it is reported as timed out and its
 // goroutine is left to finish on its own (it sends into a buffered channel,
-// so it never leaks on the channel). This is the readiness probe's last line
-// of defense against a misbehaving dependency check.
+// so it never leaks on the channel). When the collection deadline fires,
+// any results already in the channel are drained before force-marking the
+// remainder — this avoids misclassifying buffered successes as timed out.
 func (c *Checker) runChecks(ctx context.Context, checks []namedCheck) map[string]ComponentStatus {
-	type result struct {
-		name   string
-		status ComponentStatus
-	}
-	results := make(chan result, len(checks))
+	results := make(chan checkResult, len(checks))
 
 	for _, nc := range checks {
 		go func(nc namedCheck) {
-			results <- result{name: nc.name, status: c.runOne(ctx, nc)}
+			results <- checkResult{name: nc.name, status: c.runOne(ctx, nc)}
 		}(nc)
 	}
 
@@ -197,6 +217,7 @@ func (c *Checker) runChecks(ctx context.Context, checks []namedCheck) map[string
 		case r := <-results:
 			components[r.name] = r.status
 		case <-deadline.C:
+			drainCheckResults(components, results)
 			c.fillTimedOut(components, checks)
 			return components
 		}

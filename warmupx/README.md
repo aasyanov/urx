@@ -97,7 +97,7 @@ Admission is independent of the loop. `Allow` reads the current capacity under a
 
 ### Generation guard
 
-`Start`, `StartAt`, and `Reset` bump `gen` and install a fresh stop channel. A stale loop goroutine from a previous run sees the newer `gen` on its next tick and exits immediately, so overlapping restarts cannot corrupt state or double-close channels. `Stop` closes the stop channel and clears it; calling it twice is safe.
+`Start`, `StartAt`, and `Reset` bump `gen` and install a fresh stop channel. A stale loop goroutine from a previous run sees the newer `gen` on its next tick and exits immediately, so overlapping restarts cannot corrupt state or double-close channels. `Stop` closes the stop channel, freezes capacity and progress, and clears it; calling it twice is safe.
 
 ### Ramp strategies
 
@@ -123,8 +123,11 @@ For fractional progress `t ∈ [0, 1]` and `delta = maxCap − minCap`, capacity
 | Monotonic ramp          | For all four strategies, capacity is non-decreasing in `t`                                                 |
 | Completion latch        | Once complete, `Capacity() == maxCap`, `Progress() == 1`, `IsComplete()` stays true until the next `Start` |
 | `Stop` retains capacity | `Stop` freezes the current capacity; it is not reset to min                                                |
-| `Execute` rejection     | A rejected `Execute` never invokes the callback                                                            |
+| `Stop` retains progress | `Stop` freezes `Progress()` at the elapsed fraction observed when Stop was called                        |
+| `Execute` admission     | A rejected `Execute` never invokes the callback                                                          |
+| `Execute` counters      | `allowed` increments only on successful fn return; fn errors, panics, and late rejects do not count as allowed |
 | `TryExecute` rejection  | Probabilistic rejection returns `(false, zero, nil)` and never invokes the callback                        |
+| `WaitForCompletion`     | Never-started returns nil immediately; stopped mid-ramp blocks until ctx is cancelled                      |
 | Cancelled ctx           | `Execute`/`TryExecute` return `ErrCancelled` before admission; counters unchanged                         |
 | Panic safety            | A panicking `Execute`/`TryExecute` callback becomes a `*panix.PanicError`; counters stay at pre-panic admission state |
 | Goroutine lifecycle     | Exactly one loop goroutine per active ramp; it exits on `Stop`, completion, or generation change           |
@@ -255,10 +258,10 @@ if err := w.WaitForCompletion(ctx); err != nil {
 | `New`                      | `func New(opts ...Option) *Warmer`                                                                                      | Create a warmer; does not ramp until `Start` |
 | `Warmer.Start`             | `func (w *Warmer) Start()`                                                                                              | Begin/restart ramp from `minCap`             |
 | `Warmer.StartAt`           | `func (w *Warmer) StartAt(capacity float64)`                                                                            | Begin/restart ramp from a clamped capacity   |
-| `Warmer.Stop`              | `func (w *Warmer) Stop()`                                                                                               | Halt ramp, retain capacity (idempotent)      |
+| `Warmer.Stop`              | `func (w *Warmer) Stop()`                                                                                               | Halt ramp, retain capacity and progress (idempotent)      |
 | `Warmer.Reset`             | `func (w *Warmer) Reset()`                                                                                              | Stop and restart from `minCap`               |
 | `Warmer.Capacity`          | `func (w *Warmer) Capacity() float64`                                                                                   | Current capacity in `[0, 1]`                 |
-| `Warmer.Progress`          | `func (w *Warmer) Progress() float64`                                                                                   | Warmup progress in `[0, 1]`                  |
+| `Warmer.Progress`          | `func (w *Warmer) Progress() float64`                                                                                   | Warmup progress in `[0, 1]`; frozen after `Stop`          |
 | `Warmer.Strategy`          | `func (w *Warmer) Strategy() Strategy`                                                                                  | Configured ramp strategy                     |
 | `Warmer.IsWarming`         | `func (w *Warmer) IsWarming() bool`                                                                                     | Whether a ramp is in progress                |
 | `Warmer.IsComplete`        | `func (w *Warmer) IsComplete() bool`                                                                                    | Whether warmup reached full capacity         |
@@ -306,7 +309,7 @@ if err := w.WaitForCompletion(ctx); err != nil {
 | `ErrNilFunc`  | `Execute` / `TryExecute` was called with a nil function                                                         |
 | `ErrCancelled`| `Execute` / `TryExecute` when ctx is already cancelled or its deadline has expired at admission time (no admission attempted) |
 
-`TryExecute` does not return `ErrRejected` for probabilistic rejection — when admission fails it returns `(false, zero, nil)`, leaving the decision to the caller. A panicking callback surfaces as a `*panix.PanicError` returned by `Execute`/`TryExecute` (reach it with `errors.As`); counters reflect the admission outcome.
+`TryExecute` does not return `ErrRejected` for probabilistic rejection — when admission fails it returns `(false, zero, nil)`, leaving the decision to the caller. A panicking callback surfaces as a `*panix.PanicError` returned by `Execute`/`TryExecute` (reach it with `errors.As`); counters reflect the admission outcome. A callback that returns a non-nil error after admission does not increment the `allowed` counter.
 
 
 ## Pitfalls
@@ -315,17 +318,20 @@ if err := w.WaitForCompletion(ctx); err != nil {
 > **Allow is independent per call.** It is a Bernoulli trial, not a counter. Across 100 calls at capacity `0.3` you will see roughly 30 admissions, but any individual window can deviate. Do not rely on it for exact quotas — use `ratex`/`bulkx`.
 
 > [!WARNING]
-> **Stop does not reset capacity.** After `Stop`, the warmer keeps admitting at the frozen capacity. Call `Reset` (or `Start`) to ramp again from the minimum.
+> **Stop does not reset capacity or progress.** After `Stop`, the warmer keeps admitting at the frozen capacity and reports the frozen progress fraction. Call `Reset` (or `Start`) to ramp again from the minimum.
 
 > [!WARNING]
-> **Callbacks run in their own goroutines and may arrive out of order.** `WithOnCapacityChange` fires asynchronously; do not assume strictly increasing `newCap` values across deliveries, and keep callbacks fast and panic-free.
+> **WaitForCompletion after Stop blocks until the context ends.** A ramp halted before completion never closes its completion channel; use a deadline or cancel the context.
+
+> [!WARNING]
+> **Callbacks run in their own goroutines and may arrive out of order.** `WithOnCapacityChange` fires asynchronously; do not assume strictly increasing `newCap` values across deliveries. Keep callbacks fast — panics are not recovered and will crash the process.
 
 > [!NOTE]
 > **WithMaxCapacity below WithMinCapacity is corrected at construction.** `maxCap` is raised to `minCap`, yielding a flat (already-warm) ramp rather than an error.
 
 ## Safety and Concurrency
 
-The `Warmer` is safe for concurrent use. State (`capacity`, `start`, `warming`, `complete`, `gen`) is protected by a `sync.RWMutex`; admission counters use `sync/atomic`. Reads (`Allow`, `Capacity`, `Progress`, `Stats`) take the read lock and never block on the ramp loop. A single background goroutine drives capacity updates while warming and exits on `Stop`, completion, or a generation change — no goroutine leaks across restarts. The `Execute`/`TryExecute` callback runs on the caller's goroutine under `panix.Safe`; its `WarmupController` is single-call scoped and must not be retained.
+The `Warmer` is safe for concurrent use. State (`capacity`, `progress`, `start`, `warming`, `complete`, `gen`) is protected by a `sync.RWMutex`; admission counters use `sync/atomic`. Reads (`Allow`, `Capacity`, `Progress`, `Stats`) take the read lock and never block on the ramp loop. A single background goroutine drives capacity updates while warming and exits on `Stop`, completion, or a generation change — no goroutine leaks across restarts. The `Execute`/`TryExecute` callback runs on the caller's goroutine under `panix.Safe`; its `WarmupController` is single-call scoped and must not be retained.
 
 ## Benchmarks
 
@@ -360,11 +366,11 @@ The `Warmer` is safe for concurrent use. State (`capacity`, `start`, `warming`, 
 
 | Metric         | Value                          |
 | -------------- | ------------------------------ |
-| Test functions | 67                             |
+| Test functions | 77                             |
 | Benchmarks     | 10                             |
 | Fuzz targets   | 4                              |
-| Examples       | 6                              |
-| Coverage       | 98.7%                          |
+| Examples       | 7                              |
+| Coverage       | 99.2%                          |
 | Race detector  | All pass                       |
 | External deps  | 0 (panix; testify in dev only) |
 
@@ -376,11 +382,12 @@ warmupx/
 ├── warmupx.go         # Warmer, New, lifecycle, admission, Execute/TryExecute, ramp loop
 ├── options.go         # Option, config, defaults, WithXxx
 ├── types.go           # Strategy enum, WarmupController + private execution
-├── errors.go          # ErrRejected, ErrNilFunc sentinels
+├── errors.go          # ErrRejected, ErrNilFunc, ErrCancelled sentinels
+├── errors_test.go     # Sentinel and wrapper error contract tests
 ├── warmupx_test.go    # Unit + table-driven + concurrent tests
 ├── bench_test.go      # Sequential + parallel benchmarks
 ├── fuzz_test.go       # FuzzCalculate, FuzzMaxRequests, FuzzExecute, FuzzTryExecute
-├── footprint_test.go  # Struct size regression guards
+├── footprint_test.go  # Struct size regression guards (config, Warmer, execution, Stats)
 ├── example_test.go    # Runnable GoDoc examples
 └── README.md          # This file
 ```

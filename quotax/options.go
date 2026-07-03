@@ -28,6 +28,13 @@ const (
 	// unlimitedKeys is the sentinel for [WithMaxKeys]: zero means the number of
 	// tracked keys is unbounded.
 	unlimitedKeys = 0
+
+	// minRate is the floor [newConfig] enforces so per-key buckets always refill.
+	minRate = 1.0
+
+	// minBurst is the floor [newConfig] enforces so every per-key bucket holds
+	// at least one token.
+	minBurst = 1
 )
 
 // Option configures a [Quota] created by [New].
@@ -47,8 +54,8 @@ type config struct {
 }
 
 // newConfig resolves the effective configuration: defaults first, then each
-// option applied in order. Every WithXxx ignores out-of-range values, so the
-// resolved config is always usable without a post-pass.
+// option applied in order, with the per-key rate and burst floors applied last
+// so every created bucket matches [ratex.Limiter] semantics.
 func newConfig(opts []Option) config {
 	cfg := config{
 		rate:             DefaultRate,
@@ -61,11 +68,19 @@ func newConfig(opts []Option) config {
 	for _, opt := range opts {
 		opt(&cfg)
 	}
+	if cfg.rate < minRate {
+		cfg.rate = minRate
+	}
+	if cfg.burst < minBurst {
+		cfg.burst = minBurst
+	}
 	return cfg
 }
 
 // WithRate sets the sustained rate in requests per second applied to each key's
-// token bucket. Default: [DefaultRate]. Values <= 0 are ignored.
+// token bucket. Default: [DefaultRate]. Values <= 0 are ignored; values below
+// the [minRate] floor are raised to [minRate] when [New] resolves the final
+// configuration.
 func WithRate(r float64) Option {
 	return func(c *config) {
 		if r > 0 {
@@ -76,12 +91,11 @@ func WithRate(r float64) Option {
 
 // WithBurst sets the token-bucket capacity (burst size) for each key: the
 // largest momentary spike a single key may make above its sustained rate.
-// Default: [DefaultBurst]. Values <= 0 are ignored.
+// Default: [DefaultBurst]. Values below the [minBurst] floor are raised to
+// [minBurst] when [New] resolves the final configuration.
 func WithBurst(n int) Option {
 	return func(c *config) {
-		if n > 0 {
-			c.burst = n
-		}
+		c.burst = n
 	}
 }
 

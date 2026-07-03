@@ -134,7 +134,7 @@ When a call has exactly one launchable backend (`MaxParallel == 1`, or an `Execu
 | Withdrawal neutrality | A copy that calls `Cancel` is neither winner nor failure; its result is discarded                                                             |
 | Panic safety          | A panicking copy becomes a `*panix.PanicError`, handled like an ordinary copy failure — never a crash                                         |
 | Monotonic schedule    | Hedge launch times are non-decreasing; copies past `maxDelay` are spread, not bunched                                                         |
-| Parallelism cap       | At most `MaxParallel` copies run; `ExecuteMulti` truncates a longer slice                                                                     |
+| Parallelism cap       | At most [WithMaxParallel] slice entries; [Backends] counts only non-nil launchables |
 | Controller scope      | A `HedgeController` is valid only during its copy's callback; do not retain it                                                                |
 | Construction safety   | `New` floors a non-positive `MaxParallel` to 1 and raises a too-small `MaxDelay` to `Delay`; it never returns an unusable hedger              |
 
@@ -252,9 +252,13 @@ s := h.Stats() // {Calls, Wins, Hedges, Failures}
 | Symbol               | Signature                                                                                 | Description                                  |
 | -------------------- | ----------------------------------------------------------------------------------------- | -------------------------------------------- |
 | `New`                | `func New(opts ...Option) *Hedger`                                                        | Create a hedger with defaults + options      |
+| `Option`             | `type Option func(*config)`                                                               | Functional option for [New]                    |
 | `Execute`            | `func Execute[T any](h *Hedger, ctx context.Context, fn HedgeFunc[T]) (T, error)`         | Hedge one function across N staggered copies |
 | `ExecuteMulti`       | `func ExecuteMulti[T any](h *Hedger, ctx context.Context, fns []HedgeFunc[T]) (T, error)` | Hedge across distinct backends               |
 | `HedgeFunc[T]`       | `type HedgeFunc[T any] func(context.Context, HedgeController) (T, error)`                 | The hedged unit of work                      |
+| `DefaultMaxParallel` | `const DefaultMaxParallel = 3`                                                            | Default max concurrent copies                |
+| `DefaultDelay`       | `const DefaultDelay = 100ms`                                                              | Default stagger between copies               |
+| `DefaultMaxDelay`    | `const DefaultMaxDelay = 1s`                                                              | Default cap on the stagger window            |
 | `Hedger.MaxParallel` | `func (h *Hedger) MaxParallel() int`                                                      | Configured max concurrent copies             |
 | `Hedger.Delay`       | `func (h *Hedger) Delay() time.Duration`                                                  | Configured stagger between copies            |
 | `Hedger.MaxDelay`    | `func (h *Hedger) MaxDelay() time.Duration`                                               | Configured cap on the stagger window         |
@@ -268,9 +272,9 @@ s := h.Stats() // {Calls, Wins, Hedges, Failures}
 
 | Method     | Signature                 | Description                                    |
 | ---------- | ------------------------- | ---------------------------------------------- |
-| `Attempt`  | `Attempt() int`           | 1-based copy number (1 = original, 2+ = hedge) |
+| `Attempt`  | `Attempt() int`           | 1-based launch ordinal (1 = original, 2+ = hedge; nil slots skipped) |
 | `IsHedge`  | `IsHedge() bool`          | Whether this copy is a speculative hedge       |
-| `Backends` | `Backends() int`          | Total copies scheduled for this call           |
+| `Backends` | `Backends() int`          | Launchable copies scheduled (non-nil entries after cap) |
 | `Elapsed`  | `Elapsed() time.Duration` | Time since the first copy launched             |
 | `Cancel`   | `Cancel()`                | Withdraw this copy from the race (idempotent)  |
 
@@ -281,7 +285,7 @@ s := h.Stats() // {Calls, Wins, Hedges, Failures}
 | Option               | Default                  | Description                                                                       |
 | -------------------- | ------------------------ | --------------------------------------------------------------------------------- |
 | `WithMaxParallel(n)` | `DefaultMaxParallel` (3) | Max concurrent copies; ≤ 0 ignored, final value floored to 1 (1 disables hedging) |
-| `WithDelay(d)`       | `DefaultDelay` (100ms)   | Stagger before launching the next copy; ≤ 0 ignored                               |
+| `WithDelay(d)`       | `DefaultDelay` (100ms)   | Stagger before the next copy; fast failures launch the next copy immediately; ≤ 0 ignored |
 | `WithMaxDelay(d)`    | `DefaultMaxDelay` (1s)   | Cap on the stagger window; copies past it are spread `delay/4` apart; ≤ 0 ignored |
 | `WithOnHedge(fn)`    | none                     | Async, panic-safe callback fired with the attempt number when a hedge launches    |
 | `WithOp(s)`          | `"hedgex.Execute"`       | Operation name attached to panic reports                                          |
@@ -327,6 +331,7 @@ A panicking copy surfaces as a `*panix.PanicError` joined under `ErrAllFailed` (
 | Execute_NoHedging            | 57    | 48   | 1         |
 | Execute_PrimaryWins          | 2035  | 792  | 11        |
 | Execute_PrimaryWins_Parallel | 570   | 792  | 11        |
+| Execute_HedgeWins            | 5390000 | 897  | 13        |
 | ExecuteMulti_PrimaryWins     | 2060  | 792  | 11        |
 | Delays                       | 37    | 64   | 1         |
 
@@ -336,6 +341,7 @@ A panicking copy surfaces as a `*panix.PanicError` joined under `ErrAllFailed` (
 - **Execute_NoHedging**: 57 ns / 1 alloc is the synchronous fast path (`MaxParallel == 1`), taken directly by `Execute` without even building a fan-out slice. The single allocation is the `HedgeController` handed to the callback — the same architectural floor as `shedx`'s admit path. No goroutine, channel, cancel context, or timer is created, so a `Hedger` guarding an un-hedged call site costs almost nothing. This is the dominant case for "hedging available but disabled here".
 - **Execute_PrimaryWins**: ~2.1 µs / 11 allocs is the hedged path when the original wins before any hedge fires (the common good case). The allocations are inherent to speculative concurrency: `context.WithCancel` (2), the buffered result channel (1), the `delays` slice (1), the spawned goroutine and its `execution` controller, and the timer. CPU is dominated by `context.WithCancel` and goroutine scheduling, not by `hedgex` logic. This is the price of being *able* to race; it is paid once per hedged call regardless of how many copies ultimately launch.
 - **Execute_PrimaryWins_Parallel**: ~600 ns/op — *faster* per-op than serial because `b.RunParallel` spreads the goroutine-creation and context cost across 8 cores; the atomic counter contention is negligible (four independent `Add`s on separate cache lines). Throughput scales near-linearly with cores.
+- **Execute_HedgeWins**: ~5.4 ms / 13 allocs — the hedged path when a hedge copy actually fires and wins while the primary is cancelled. The extra allocs versus `Execute_PrimaryWins` come from the losing primary goroutine completing after cancellation; latency is dominated by the deliberate `WithDelay` wait plus goroutine scheduling.
 - **ExecuteMulti_PrimaryWins**: matches `Execute` — the dispatch machinery is identical; only the function source differs.
 - **Delays**: ~37 ns / 1 alloc — the schedule slice (`count-1` durations) is the only allocation; the computation is integer arithmetic. It runs once per hedged call.
 - **Allocation floor**: the hedged path's 11 allocs are architectural — racing N copies *requires* a cancel context, a goroutine, and a result channel. The fast path proves the non-racing case reaches the 1-alloc controller floor. There is no allocation-free way to hedge.
@@ -345,9 +351,9 @@ A panicking copy surfaces as a `*panix.PanicError` joined under `ErrAllFailed` (
 
 | Metric         | Value                          |
 | -------------- | ------------------------------ |
-| Test functions | 35                             |
-| Benchmarks     | 5                              |
-| Fuzz targets   | 2                              |
+| Test functions | 51                             |
+| Benchmarks     | 6                              |
+| Fuzz targets   | 3                              |
 | Examples       | 4                              |
 | Coverage       | 100.0%                         |
 | Race detector  | All pass                       |
@@ -363,8 +369,8 @@ hedgex/
 ├── types.go            # HedgeController + private execution impl + HedgeFunc + result
 ├── errors.go           # ErrNilFunc, ErrAllFailed, ErrCancelled
 ├── hedgex_test.go      # unit + table-driven + concurrent + panic + withdrawal tests
-├── bench_test.go       # benchmarks (sync, hedged, parallel, multi, delays)
-├── fuzz_test.go        # FuzzExecute, FuzzDelays — termination + schedule invariants
+├── bench_test.go       # benchmarks (sync, hedged, hedge-win, parallel, multi, delays)
+├── fuzz_test.go        # FuzzExecute, FuzzExecuteMulti, FuzzDelays — termination + schedule invariants
 ├── example_test.go     # runnable GoDoc examples
 ├── footprint_test.go   # struct size guards
 └── README.md           # this file

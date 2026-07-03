@@ -59,10 +59,14 @@ const opExecute = "toutx.Execute"
 // [*panix.PanicError]. Note that when the deadline fires, Execute returns
 // immediately while fn may still be running — fn must honour its context to
 // avoid leaking the goroutine.
+//
+// Execute is safe for concurrent use from multiple goroutines: each call owns
+// its resolved configuration, deadline context, goroutine, and result channel;
+// nothing is shared between calls.
 func Execute[T any](
 	ctx context.Context,
 	timeout time.Duration,
-	fn func(ctx context.Context, tc TimeoutController) (T, error),
+	fn TimeoutFunc[T],
 	opts ...Option,
 ) (T, error) {
 	cfg := newConfig(timeout, opts)
@@ -81,16 +85,11 @@ func Execute[T any](
 	tctx, cancel := context.WithTimeout(ctx, cfg.timeout)
 	defer cancel()
 
-	deadline, hasDeadline := tctx.Deadline()
-	if !hasDeadline {
-		deadline = start.Add(cfg.timeout)
-	}
-
 	tc := &execution{
 		op:           op,
 		timeout:      cfg.timeout,
 		startUnix:    start.UnixNano(),
-		deadlineUnix: deadline.UnixNano(),
+		deadlineUnix: resolveDeadline(tctx, start, cfg.timeout).UnixNano(),
 	}
 
 	done := make(chan execResult[T], 1)
@@ -102,6 +101,16 @@ func Execute[T any](
 	}()
 
 	return awaitResult(done, tctx, ctx, op, cfg.timeout)
+}
+
+// resolveDeadline returns the absolute instant at which tctx expires. When the
+// context reports no deadline (defensive — [context.WithTimeout] always sets
+// one), the configured timeout is added to start.
+func resolveDeadline(tctx context.Context, start time.Time, timeout time.Duration) time.Time {
+	if deadline, ok := tctx.Deadline(); ok {
+		return deadline
+	}
+	return start.Add(timeout)
 }
 
 // awaitResult returns fn's outcome when it finishes before the deadline. When

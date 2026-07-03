@@ -202,6 +202,51 @@ func TestCache_Touch(t *testing.T) {
 	assert.True(t, ok)
 }
 
+func TestCache_Touch_PerEntryTTL(t *testing.T) {
+	c := New[string, int]()
+	defer c.Close()
+	c.SetWithTTL("session", 1, time.Hour)
+
+	time.Sleep(30 * time.Millisecond)
+	assert.True(t, c.Touch("session"))
+
+	rem := c.TTL("session")
+	assert.Greater(t, rem, 59*time.Minute)
+}
+
+func TestCache_GetFast_ExpiredNotRemoved(t *testing.T) {
+	c := New[string, int]()
+	defer c.Close()
+	c.SetWithTTL("a", 1, time.Millisecond)
+	time.Sleep(10 * time.Millisecond)
+
+	_, ok := c.GetFast("a")
+	assert.False(t, ok)
+	assert.Equal(t, 1, c.Len())
+	assert.Equal(t, 0, c.LenValid())
+}
+
+func TestCache_ResetStats(t *testing.T) {
+	c := New[string, int]()
+	defer c.Close()
+	c.Get("missing")
+	c.ResetStats()
+	s := c.Stats()
+	assert.Equal(t, uint64(0), s.Hits)
+	assert.Equal(t, uint64(0), s.Misses)
+	assert.Equal(t, uint64(0), s.Evictions)
+}
+
+func TestRemoveTailLocked_EmptyCache(t *testing.T) {
+	c := New[int, int]()
+	defer c.Close()
+
+	c.mu.Lock()
+	ev := c.removeTailLocked()
+	c.mu.Unlock()
+	assert.Nil(t, ev)
+}
+
 func TestCache_GetEntry(t *testing.T) {
 	c := New[string, int]()
 	defer c.Close()
@@ -325,9 +370,7 @@ func TestCache_Close_Idempotent(t *testing.T) {
 	c := New[string, int]()
 	c.Set("a", 1)
 
-	c.Close()
-	assert.True(t, c.IsClosed())
-	c.Close() // second close must not panic
+	testx.AssertCloseIdempotent(t, c)
 	assert.True(t, c.IsClosed())
 }
 
@@ -494,17 +537,19 @@ func TestCache_GetOrCompute_Basic(t *testing.T) {
 	defer c.Close()
 
 	var calls atomic.Int64
-	v := c.GetOrCompute("k", func() int {
+	v, err := c.GetOrCompute(context.Background(), "k", func(context.Context) (int, error) {
 		calls.Add(1)
-		return 42
+		return 42, nil
 	})
+	require.NoError(t, err)
 	assert.Equal(t, 42, v)
 
-	v = c.GetOrCompute("k", func() int {
+	v, err = c.GetOrCompute(context.Background(), "k", func(context.Context) (int, error) {
 		calls.Add(1)
-		return 99
+		return 99, nil
 	})
-	assert.Equal(t, 42, v) // cached
+	require.NoError(t, err)
+	assert.Equal(t, 42, v)
 	assert.Equal(t, int64(1), calls.Load())
 }
 
@@ -512,7 +557,10 @@ func TestCache_GetOrCompute_WithTTL(t *testing.T) {
 	c := New[string, int]()
 	defer c.Close()
 
-	c.GetOrCompute("k", func() int { return 1 }, WithComputeTTL(20*time.Millisecond))
+	_, err := c.GetOrCompute(context.Background(), "k", func(context.Context) (int, error) {
+		return 1, nil
+	}, WithComputeTTL(20*time.Millisecond))
+	require.NoError(t, err)
 	require.Eventually(t, func() bool {
 		_, ok := c.Get("k")
 		return !ok
@@ -525,78 +573,7 @@ func TestCache_GetOrCompute_Singleflight(t *testing.T) {
 
 	var calls atomic.Int64
 	errs := testx.Hammer(20, 1, func() error {
-		c.GetOrCompute("k", func() int {
-			calls.Add(1)
-			time.Sleep(10 * time.Millisecond)
-			return 1
-		}, WithSingleflight())
-		return nil
-	})
-	assert.Empty(t, errs)
-	assert.Equal(t, int64(1), calls.Load())
-}
-
-func TestCache_GetOrCompute_PanicRecovered(t *testing.T) {
-	c := New[string, int]()
-	defer c.Close()
-
-	var v int
-	assert.NotPanics(t, func() {
-		v = c.GetOrCompute("k", func() int { panic("compute boom") })
-	})
-	assert.Equal(t, 0, v) // zero value on panic
-}
-
-func TestCache_GetOrComputeCtx_Success(t *testing.T) {
-	c := New[string, int]()
-	defer c.Close()
-
-	v, err := c.GetOrComputeCtx(context.Background(), "k", func(context.Context) (int, error) {
-		return 7, nil
-	})
-	require.NoError(t, err)
-	assert.Equal(t, 7, v)
-}
-
-func TestCache_GetOrComputeCtx_ComputeError_NotCached(t *testing.T) {
-	c := New[string, int]()
-	defer c.Close()
-
-	wantErr := ErrNotFound
-	_, err := c.GetOrComputeCtx(context.Background(), "k", func(context.Context) (int, error) {
-		return 0, wantErr
-	})
-	require.ErrorIs(t, err, wantErr)
-	assert.False(t, c.Has("k"))
-}
-
-func TestCache_GetOrComputeCtx_CancelledContext(t *testing.T) {
-	c := New[string, int]()
-	defer c.Close()
-
-	_, err := c.GetOrComputeCtx(testx.CancelledCtx(), "k", func(context.Context) (int, error) {
-		return 1, nil
-	})
-	require.ErrorIs(t, err, context.Canceled)
-}
-
-func TestCache_GetOrComputeCtx_ClosedCache(t *testing.T) {
-	c := New[string, int]()
-	c.Close()
-
-	_, err := c.GetOrComputeCtx(context.Background(), "k", func(context.Context) (int, error) {
-		return 1, nil
-	})
-	require.ErrorIs(t, err, ErrClosed)
-}
-
-func TestCache_GetOrComputeCtx_Singleflight(t *testing.T) {
-	c := New[string, int]()
-	defer c.Close()
-
-	var calls atomic.Int64
-	errs := testx.Hammer(20, 1, func() error {
-		_, err := c.GetOrComputeCtx(context.Background(), "k", func(context.Context) (int, error) {
+		_, err := c.GetOrCompute(context.Background(), "k", func(context.Context) (int, error) {
 			calls.Add(1)
 			time.Sleep(10 * time.Millisecond)
 			return 1, nil
@@ -605,4 +582,35 @@ func TestCache_GetOrComputeCtx_Singleflight(t *testing.T) {
 	})
 	assert.Empty(t, errs)
 	assert.Equal(t, int64(1), calls.Load())
+}
+
+func TestCache_GetOrCompute_ComputeError_NotCached(t *testing.T) {
+	c := New[string, int]()
+	defer c.Close()
+
+	_, err := c.GetOrCompute(context.Background(), "k", func(context.Context) (int, error) {
+		return 0, ErrNotFound
+	})
+	require.ErrorIs(t, err, ErrNotFound)
+	assert.False(t, c.Has("k"))
+}
+
+func TestCache_GetOrCompute_CancelledContext(t *testing.T) {
+	c := New[string, int]()
+	defer c.Close()
+
+	_, err := c.GetOrCompute(testx.CancelledCtx(), "k", func(context.Context) (int, error) {
+		return 1, nil
+	})
+	require.ErrorIs(t, err, context.Canceled)
+}
+
+func TestCache_GetOrCompute_ClosedCache(t *testing.T) {
+	c := New[string, int]()
+	c.Close()
+
+	_, err := c.GetOrCompute(context.Background(), "k", func(context.Context) (int, error) {
+		return 1, nil
+	})
+	require.ErrorIs(t, err, ErrClosed)
 }

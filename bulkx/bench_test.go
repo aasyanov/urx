@@ -32,8 +32,7 @@ func BenchmarkExecute_Parallel(b *testing.B) {
 }
 
 func BenchmarkExecute_Reject(b *testing.B) {
-	// Hold the only slot so every Execute falls into the timed wait and is
-	// rejected — measured here with TryExecute to avoid blocking the loop.
+	// Hold the only slot so every TryExecute rejects immediately without blocking.
 	bh := New(WithMaxConcurrent(1))
 	defer func() { _ = bh.Close() }()
 	tok, _ := bh.Acquire(context.Background())

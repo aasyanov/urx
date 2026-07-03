@@ -531,8 +531,10 @@ func TestAdmits_UnknownPriorityTreatedAsHigh(t *testing.T) {
 	s := New(WithCapacity(100), WithThreshold(0.8))
 	defer func() { require.NoError(t, s.Close()) }()
 
-	const inflight int64 = 95
-	assert.Equal(t, s.admits(PriorityHigh, inflight), s.admits(Priority(50), inflight))
+	const inflight int64 = 100 // overload 1.0 — high is shed, critical is not
+	assert.False(t, s.admits(PriorityHigh, inflight))
+	assert.False(t, s.admits(Priority(50), inflight), "unknown priority must use high cutoff, not critical bypass")
+	assert.True(t, s.admits(PriorityCritical, inflight))
 }
 
 func TestAllow_MatchesAdmission(t *testing.T) {
@@ -684,6 +686,59 @@ func TestClose_Idempotent(t *testing.T) {
 	s := New()
 	testx.AssertCloseIdempotent(t, s)
 	assert.True(t, s.IsClosed())
+}
+
+func TestCommitReservation_RejectsAfterClose(t *testing.T) {
+	s := New(WithCapacity(10))
+	s.inflight.Store(3)
+	require.NoError(t, s.Close())
+
+	n, ok, closed := s.commitReservation(3)
+	require.False(t, ok)
+	require.True(t, closed)
+	assert.Equal(t, int64(0), n)
+	assert.Equal(t, int64(2), s.InFlight(), "rolled-back reservation must decrement inflight")
+}
+
+func TestCommitReservation_AdmitsWhenOpen(t *testing.T) {
+	s := New(WithCapacity(10))
+	defer func() { require.NoError(t, s.Close()) }()
+
+	s.inflight.Store(2)
+	n, ok, closed := s.commitReservation(3)
+	require.True(t, ok)
+	require.False(t, closed)
+	assert.Equal(t, int64(3), n)
+	assert.Equal(t, int64(2), s.InFlight())
+}
+
+func TestAcquire_ReturnsErrClosedWhenClosedDuringReserve(t *testing.T) {
+	s := New(WithCapacity(1000), WithThreshold(0.9))
+	defer func() { require.NoError(t, s.Close()) }()
+
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	errs := make(chan error, 64)
+
+	for range 64 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			_, err := s.Acquire(PriorityNormal)
+			errs <- err
+		}()
+	}
+
+	require.NoError(t, s.Close())
+	close(start)
+	wg.Wait()
+	close(errs)
+
+	for err := range errs {
+		require.ErrorIs(t, err, ErrClosed)
+	}
+	assert.Equal(t, int64(0), s.Stats().Shed)
 }
 
 // --- Concurrency ---

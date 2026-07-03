@@ -2,6 +2,8 @@ package lrux
 
 import (
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 // FuzzCache_SetGet asserts that any value stored under a key is retrievable
@@ -18,19 +20,12 @@ func FuzzCache_SetGet(f *testing.F) {
 
 		c.Set(key, value)
 		got, ok := c.Get(key)
-		if !ok {
-			t.Fatalf("key %q absent immediately after Set", key)
-		}
-		if got != value {
-			t.Fatalf("Get(%q) = %d, want %d", key, got, value)
-		}
+		require.True(t, ok, "key %q absent immediately after Set", key)
+		require.Equal(t, value, got)
 
-		if !c.Delete(key) {
-			t.Fatalf("Delete(%q) reported missing key", key)
-		}
-		if _, ok := c.Get(key); ok {
-			t.Fatalf("key %q present after Delete", key)
-		}
+		require.True(t, c.Delete(key), "Delete(%q) reported missing key", key)
+		_, ok = c.Get(key)
+		require.False(t, ok, "key %q present after Delete", key)
 	})
 }
 
@@ -50,9 +45,8 @@ func FuzzShardedCache_Distribution(f *testing.F) {
 			c.Set(k, i)
 		}
 		for _, k := range keys {
-			if _, ok := c.Get(k); !ok {
-				t.Fatalf("key %q absent after Set in sharded cache", k)
-			}
+			_, ok := c.Get(k)
+			require.True(t, ok, "key %q absent after Set in sharded cache", k)
 		}
 	})
 }
@@ -67,11 +61,7 @@ func FuzzKeyString(f *testing.F) {
 	f.Fuzz(func(t *testing.T, s string) {
 		a := keyString(s)
 		b := keyString(s)
-		if a != b {
-			t.Fatalf("keyString(%q) not deterministic: %q != %q", s, a, b)
-		}
-		if a != s {
-			t.Fatalf("keyString(%q) = %q, want identity for strings", s, a)
-		}
+		require.Equal(t, a, b, "keyString(%q) not deterministic", s)
+		require.Equal(t, s, a, "keyString(%q) should be identity for strings", s)
 	})
 }

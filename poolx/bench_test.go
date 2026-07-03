@@ -8,7 +8,10 @@ import (
 )
 
 func BenchmarkObjectPool_GetPut(b *testing.B) {
-	op := NewObjectPool(func() *bytes.Buffer { return new(bytes.Buffer) })
+	op, err := NewObjectPool(func() *bytes.Buffer { return new(bytes.Buffer) })
+	if err != nil {
+		b.Fatal(err)
+	}
 
 	b.ResetTimer()
 	for b.Loop() {
@@ -18,10 +21,13 @@ func BenchmarkObjectPool_GetPut(b *testing.B) {
 }
 
 func BenchmarkObjectPool_GetPut_WithReset(b *testing.B) {
-	op := NewObjectPool(
+	op, err := NewObjectPool(
 		func() *bytes.Buffer { return new(bytes.Buffer) },
 		WithReset(func(buf *bytes.Buffer) { buf.Reset() }),
 	)
+	if err != nil {
+		b.Fatal(err)
+	}
 
 	b.ResetTimer()
 	for b.Loop() {
@@ -31,7 +37,10 @@ func BenchmarkObjectPool_GetPut_WithReset(b *testing.B) {
 }
 
 func BenchmarkObjectPool_GetPut_Parallel(b *testing.B) {
-	op := NewObjectPool(func() *bytes.Buffer { return new(bytes.Buffer) })
+	op, err := NewObjectPool(func() *bytes.Buffer { return new(bytes.Buffer) })
+	if err != nil {
+		b.Fatal(err)
+	}
 
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
@@ -44,7 +53,7 @@ func BenchmarkObjectPool_GetPut_Parallel(b *testing.B) {
 
 func BenchmarkWorkerPool_SubmitWait(b *testing.B) {
 	wp := NewWorkerPool(WithWorkers(4), WithQueueSize(1024))
-	defer wp.Close()
+	defer func() { _ = wp.Close() }()
 	ctx := context.Background()
 	noop := func(context.Context) error { return nil }
 
@@ -56,7 +65,7 @@ func BenchmarkWorkerPool_SubmitWait(b *testing.B) {
 
 func BenchmarkWorkerPool_Submit_Parallel(b *testing.B) {
 	wp := NewWorkerPool(WithWorkers(8), WithQueueSize(4096))
-	defer wp.Close()
+	defer func() { _ = wp.Close() }()
 	ctx := context.Background()
 	noop := func(context.Context) error { return nil }
 
@@ -69,9 +78,12 @@ func BenchmarkWorkerPool_Submit_Parallel(b *testing.B) {
 }
 
 func BenchmarkBatch_Add(b *testing.B) {
-	batch := NewBatch(func(context.Context, []int) error { return nil },
+	batch, err := NewBatch(func(context.Context, []int) error { return nil },
 		WithBatchSize(1024), WithFlushInterval(time.Hour))
-	defer batch.Close()
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer func() { _ = batch.Close() }()
 
 	b.ResetTimer()
 	for b.Loop() {
@@ -80,9 +92,12 @@ func BenchmarkBatch_Add(b *testing.B) {
 }
 
 func BenchmarkBatch_Add_Parallel(b *testing.B) {
-	batch := NewBatch(func(context.Context, []int) error { return nil },
+	batch, err := NewBatch(func(context.Context, []int) error { return nil },
 		WithBatchSize(1024), WithFlushInterval(time.Hour))
-	defer batch.Close()
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer func() { _ = batch.Close() }()
 
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {

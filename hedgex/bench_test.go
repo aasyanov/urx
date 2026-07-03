@@ -60,6 +60,23 @@ func BenchmarkExecuteMulti_PrimaryWins(b *testing.B) {
 	}
 }
 
+func BenchmarkExecute_HedgeWins(b *testing.B) {
+	h := New(WithDelay(5*time.Millisecond), WithMaxParallel(2))
+	ctx := context.Background()
+	fn := func(ctx context.Context, hc HedgeController) (int, error) {
+		if hc.IsHedge() {
+			return 2, nil
+		}
+		<-ctx.Done()
+		return 0, ctx.Err()
+	}
+
+	b.ResetTimer()
+	for b.Loop() {
+		_, _ = Execute(h, ctx, fn)
+	}
+}
+
 func BenchmarkDelays(b *testing.B) {
 	h := New(WithDelay(10*time.Millisecond), WithMaxDelay(time.Second), WithMaxParallel(8))
 	b.ResetTimer()

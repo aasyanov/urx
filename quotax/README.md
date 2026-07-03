@@ -67,10 +67,10 @@ A single token bucket (`ratex`) limits an entire process. But real services must
  Quota               Option (options.go)  QuotaController
  (quotax.go)         cfg config           (types.go)
  []shard / keyCount  rate/burst/shards    execution{key,tokens,
- allowed/limited     maxKeys/ttl/interval   rate,burst,waited,inner}
-   │                 defaults              Key/Tokens/Rate/Burst/
- shardFor(maphash)     │                   Waited/SkipToken→ratex
- Allow/Wait            │                 errors.go
+ allowed/limited     maxKeys/ttl/interval   rate,burst,waited}
+ closedCh/stopEvict  defaults              Key/Tokens/Rate/Burst/
+ shardFor(maphash)     │                   Waited/SkipToken→Release
+ Allow/Wait/waitFor    │                 errors.go
  Execute/TryExecute  evict() sweeper      ErrLimited/ErrMaxKeys/
  getOrCreate/reserve  evictLoop()         ErrCancelled/ErrClosed/ErrNilFunc
 ```
@@ -92,21 +92,21 @@ Allow(key)
 Execute(q, ctx, key, fn)
   │ fn == nil ? ──────────► ErrNilFunc
   │ closed ?    ──────────► ErrClosed
-  ├── bucketForWait(key): create if absent (or ErrMaxKeys)
-  ├── ratex.Execute(bucket.limiter, ctx, adapt(key, fn)):
-  │     ├── blocks for a token (ctx-aware) — ratex owns the wait loop
-  │     ├── qc = {key, tokens, rate, burst, waited, inner: ratex controller}
-  │     ├── panix.Safe(fn(ctx, qc))   [panic → *panix.PanicError]
-  │     └── qc.SkipToken() → delegates to ratex → refund token to key's bucket
-  └── normalizeErr: ratex.ErrCancelled → quotax.ErrCancelled;
-        retag PanicError.Op "ratex.Execute" → "quotax.Execute"
+  ├── waitFor(key, 1): bucketForWait → wait loop with closedCh + ctx
+  │     ├── qc snapshot = {key, tokens, rate, burst, waited}
+  │     ├── panix.Safe(fn(ctx, qc))   [panic → *panix.PanicError, op = quotax.Execute]
+  │     └── qc.SkipToken() → limiter.Release(1) + rollback Allowed
+  └── ErrCancelled / ErrClosed from wait loop propagate unchanged
+
+WaitN(ctx, key, n)
+  └── same wait loop as Execute; selects on ctx.Done(), closedCh, and timer
 
 eviction (background ticker, interval = WithEvictionInterval)
   └── for each shard: RLock-collect keys with lastAccess < now-TTL,
         then Lock-delete each (re-checking lastAccess so freshly-touched keys survive)
 ```
 
-Token accrual is delegated entirely to `ratex`: each key's bucket refills lazily (no per-key goroutine). The only background goroutine is the single eviction sweeper, started in `New` and stopped by `Close`. Blocking `WaitN` computes the time until the key's bucket holds enough tokens and sleeps at least `minWaitDelay` (1 ms) per iteration, re-checking the context each loop.
+Token accrual is delegated entirely to `ratex`: each key's bucket refills lazily (no per-key goroutine). The only background goroutine is the single eviction sweeper, started in `New` and stopped by `Close`. Blocking `WaitN` and `Execute` share one wait loop: it computes the time until the key's bucket holds enough tokens (using the bucket's effective rate), sleeps at least `minWaitDelay` (1 ms) per iteration, and selects on `ctx.Done()`, `closedCh`, and the timer so in-flight waiters abort promptly when `Close` is called.
 
 ## Normative Contracts
 
@@ -117,9 +117,10 @@ Token accrual is delegated entirely to `ratex`: each key's bucket refills lazily
 | Bounded cardinality | With `WithMaxKeys(n)`, the tracked key count never exceeds `n`, even under concurrency (CAS-guarded)                                                                                   |
 | Memory reclaim      | A key idle longer than the eviction TTL is removed by the background sweeper                                                                                                           |
 | Atomic admission    | A failed `AllowN` consumes **zero** tokens from the key's bucket                                                                                                                       |
-| Context honoured    | `Wait`/`WaitN`/`Execute` return `ErrCancelled` (wrapping `ctx.Err()`) on cancellation                                                                                                  |
+| Context honoured    | `Wait`/`WaitN`/`Execute` return `ErrCancelled` (wrapping `ctx.Err()`) on cancellation; a pre-cancelled `TryExecute` returns `ErrCancelled` without incrementing `limited` |
+| Close interrupts    | `Close` closes `closedCh`; any blocked `WaitN` or `Execute` waiting for a token returns `ErrClosed` without admitting the call                                              |
 | No busy-spin        | Each wait iteration sleeps at least `minWaitDelay` (1 ms)                                                                                                                              |
-| Panic safety        | A panicking `fn` becomes a `*panix.PanicError` tagged with the quotax op (`quotax.Execute` / `quotax.TryExecute`); the process never crashes; the key's slot is accounted correctly    |
+| Panic safety        | A panicking `fn` becomes a `*panix.PanicError` tagged with the quotax op (`quotax.Execute` / `quotax.TryExecute`); the process never crashes                                         |
 | Nil guard           | A nil `fn` returns `ErrNilFunc` without consuming a token                                                                                                                              |
 | Token refund        | `QuotaController.SkipToken` returns the token to the *key's* bucket                                                                                                                    |
 | Eviction safety     | A key touched between the collect and delete phases survives the sweep; a key with an active blocked `WaitN` is touched each iteration, so it is never evicted out from under a waiter |
@@ -251,8 +252,8 @@ val, err := quotax.Execute(q, ctx, userID,
 | `Quota.AllowOrError`  | `func (q *Quota) AllowOrError(key string) error`                                               | Like `Allow` but returns `ErrLimited`/`ErrMaxKeys`/`ErrClosed` |
 | `Quota.Wait`          | `func (q *Quota) Wait(ctx, key) error`                                                         | Block until one token for key is available or ctx done         |
 | `Quota.WaitN`         | `func (q *Quota) WaitN(ctx, key, n) error`                                                     | Block until n tokens for key are available or ctx done         |
-| `Execute`             | `func Execute[T any](q *Quota, ctx, key, fn func(ctx, QuotaController) (T, error)) (T, error)` | Block for a token, then run fn panic-safe                      |
-| `TryExecute`          | `func TryExecute[T any](q *Quota, ctx, key, fn) (bool, T, error)`                              | Run fn only if a token is immediately available                |
+| `Execute`             | `func Execute[T any](q *Quota, ctx, key, fn QuotaFunc[T]) (T, error)` | Block for a token, then run fn panic-safe                      |
+| `TryExecute`          | `func TryExecute[T any](q *Quota, ctx, key, fn QuotaFunc[T]) (bool, T, error)` | Run fn only if a token is immediately available                |
 | `Quota.Remove`        | `func (q *Quota) Remove(key string) bool`                                                      | Delete a key's bucket; reports whether it existed              |
 | `Quota.Exists`        | `func (q *Quota) Exists(key string) bool`                                                      | Whether a bucket is currently tracked for key                  |
 | `Quota.KeyCount`      | `func (q *Quota) KeyCount() int64`                                                             | Number of currently tracked keys                               |
@@ -282,8 +283,8 @@ val, err := quotax.Execute(q, ctx, userID,
 
 | Option                    | Default                        | Description                                        |
 | ------------------------- | ------------------------------ | -------------------------------------------------- |
-| `WithRate(r)`             | `DefaultRate` (10)             | Per-key sustained tokens/s; `r ≤ 0` ignored        |
-| `WithBurst(n)`            | `DefaultBurst` (20)            | Per-key bucket capacity; `n ≤ 0` ignored           |
+| `WithRate(r)`             | `DefaultRate` (10)             | Per-key sustained tokens/s; `r ≤ 0` ignored; values below `minRate` (1.0) are raised |
+| `WithBurst(n)`            | `DefaultBurst` (20)            | Per-key bucket capacity; values below `minBurst` (1) are raised                      |
 | `WithShards(n)`           | `DefaultShards` (64)           | Internal shard count; `n ≤ 0` ignored              |
 | `WithMaxKeys(n)`          | `0` (unlimited)                | Hard cap on tracked keys; `n < 0` ignored          |
 | `WithEvictionTTL(d)`      | `DefaultEvictionTTL` (15m)     | Idle time before a key is evicted; `d ≤ 0` ignored |
@@ -298,12 +299,12 @@ val, err := quotax.Execute(q, ctx, userID,
 | -------------- | ----------------------------------------------------------------------------- |
 | `ErrLimited`   | `AllowOrError`: the key's bucket is empty (wraps the key)                     |
 | `ErrMaxKeys`   | A new key cannot be admitted because `WithMaxKeys` is reached (wraps the key) |
-| `ErrCancelled` | The context was cancelled before a token was acquired (wraps the cause)       |
-| `ErrClosed`    | An admission method was called after `Close`                                  |
-| `ErrNilFunc`   | `Execute`/`TryExecute` received a nil function                                |
+| `ErrCancelled` | `Wait`/`WaitN`/`Execute`: context cancelled while waiting; `TryExecute`: context already cancelled before admission (wraps the cause) |
+| `ErrClosed`    | An admission method was called after `Close`, or a blocked wait was interrupted by `Close`                                          |
+| `ErrNilFunc`   | `Execute`/`TryExecute` received a nil function                                                                                      |
 
 
-`Allow`/`AllowN` return a bare `bool` (no error). `TryExecute` returns `(false, zero, nil)` when no token is available — the rejection is a return value, not an error. A panicking function yields a `*panix.PanicError` (test with `errors.As`) whose `Op` is `quotax.Execute` or `quotax.TryExecute`, even though admission is delegated to `ratex` internally.
+`Allow`/`AllowN` return a bare `bool` (no error). `TryExecute` returns `(false, zero, nil)` when no token is available — the rejection is a return value, not an error, and increments `limited`. A panicking function yields a `*panix.PanicError` (test with `errors.As`) whose `Op` is `quotax.Execute` or `quotax.TryExecute`.
 
 ## Pitfalls
 
@@ -321,28 +322,28 @@ val, err := quotax.Execute(q, ctx, userID,
 
 ## Safety and Concurrency
 
-Keys are partitioned across `WithShards` shards, each guarded by its own `sync.RWMutex`; requests for keys on different shards never contend. The read path (`lookup`) takes a read lock; only first-touch creation and removal take the write lock. The aggregate counters (`allowed`, `limited`, `keyCount`) and the closed flag are lock-free atomics, and the `WithMaxKeys` cap is enforced with a compare-and-swap loop so the bound holds exactly under contention. The user function in `Execute` runs **outside** all shard locks (the per-key `ratex.Limiter` owns its own brief lock), so a slow callback never blocks other keys. A single background sweeper goroutine performs eviction; `Close` stops it and blocks until it exits. Every test runs under `-race`.
+Keys are partitioned across `WithShards` shards, each guarded by its own `sync.RWMutex`; requests for keys on different shards never contend. The read path (`lookup`) takes a read lock; only first-touch creation and removal take the write lock. The aggregate counters (`allowed`, `limited`, `keyCount`) and the closed flag are lock-free atomics, and the `WithMaxKeys` cap is enforced with a compare-and-swap loop so the bound holds exactly under contention. The user function in `Execute` runs **outside** all shard locks (the per-key `ratex.Limiter` owns its own brief lock), so a slow callback never blocks other keys. A single background sweeper goroutine performs eviction; `Close` closes `closedCh` (unblocking any in-flight waiters with `ErrClosed`), stops the sweeper, and blocks until it exits. Every test runs under `-race`.
 
 ## Benchmarks
 
 > CPU: Intel i7-10510U · OS: Windows 10 · Go 1.24 · `-benchmem -count=3`
 
 
-| Benchmark                   | ns/op | B/op | allocs/op |
-| --------------------------- | ----- | ---- | --------- |
-| Allow_Hit                   | ~62   | 0    | 0         |
-| Allow_Hit_Parallel          | ~146  | 0    | 0         |
-| Allow_DistinctKeys_Parallel | ~47   | 0    | 0         |
-| Execute                     | ~212  | 96   | 2         |
-| Execute_Parallel            | ~246  | 96   | 2         |
-| TryExecute                  | ~219  | 96   | 2         |
+| Benchmark                   | ns/op  | B/op | allocs/op |
+| --------------------------- | ------ | ---- | --------- |
+| Allow_Hit                   | ~220   | 0    | 0         |
+| Allow_Hit_Parallel          | ~430   | 0    | 0         |
+| Allow_DistinctKeys_Parallel | ~170   | 0    | 0         |
+| Execute                     | ~1000  | 48   | 1         |
+| Execute_Parallel            | ~1250  | 48   | 1         |
+| TryExecute                  | ~800   | 48   | 1         |
 
 
 ### Analysis
 
 - **Allow_Hit**: 0 allocs — the steady-state path is `maphash` (allocation-free) + an `RLock` map read + the underlying `ratex.AllowN` (a refill + compare + subtract under one short mutex). Key creation is the only allocating path, and it happens once per key, not per request. This is the architectural floor for per-key token-bucket admission.
 - **Allow_DistinctKeys_Parallel** (~~47 ns) is *faster* than the single-key parallel benchmark (~~146 ns): spreading requests across 1024 keys spreads them across all 64 shards, so the per-shard `RWMutex` and each key's `ratex` mutex are essentially uncontended. The single-key parallel case funnels every goroutine through one shard and one bucket mutex — the ~2.3× slowdown versus the sequential hit is exactly that serialisation, and it is the intended trade-off for exact per-key accounting.
-- **Execute / TryExecute**: 2 allocs / 96 B is the controller-pattern floor: one alloc for quotax's per-call `execution` struct (carries the key) and one for the inner `ratex` controller it wraps, both escaping to the heap because they are captured by the closure handed to `panix.Safe`. Callers that do not need the controller or panic safety should use `Allow`/`Wait` for the zero-alloc path.
+- **Execute / TryExecute**: 1 alloc / 48 B is the controller-pattern floor: one heap allocation for quotax's per-call `execution` struct escaping into `panix.Safe`. Callers that do not need the controller or panic safety should use `Allow`/`Wait` for the zero-alloc path.
 - **Parallel scaling**: `Execute_Parallel` tracks the sequential figure closely because the shard and bucket locks are held only for the brief admission step; the (empty) user function and the two controller allocations parallelise cleanly across cores.
 
 ## Quality
@@ -350,11 +351,11 @@ Keys are partitioned across `WithShards` shards, each guarded by its own `sync.R
 
 | Metric         | Value                                 |
 | -------------- | ------------------------------------- |
-| Test functions | 39                                    |
+| Test functions | 62                                    |
 | Benchmarks     | 6                                     |
 | Fuzz targets   | 2                                     |
 | Examples       | 4                                     |
-| Coverage       | 99.6%                                 |
+| Coverage       | 96.2%                                 |
 | Race detector  | All pass                              |
 | External deps  | 0 (ratex, panix; testify in dev only) |
 
@@ -367,7 +368,9 @@ quotax/
 ├── options.go          # config, defaults, WithRate/WithBurst/WithShards/WithMaxKeys/...
 ├── types.go            # QuotaController + private execution impl + Stats
 ├── errors.go           # ErrLimited, ErrMaxKeys, ErrCancelled, ErrClosed, ErrNilFunc
+├── errors_test.go      # sentinel wrapper contract tests
 ├── quotax_test.go      # unit + table-driven tests
+├── helpers_test.go     # shared test utilities (cancelAfterCtx)
 ├── bench_test.go       # benchmarks (sequential + parallel + distinct keys)
 ├── fuzz_test.go        # FuzzAllow, FuzzExecute — cardinality + execution invariants
 ├── example_test.go     # runnable GoDoc examples

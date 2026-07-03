@@ -144,10 +144,12 @@ func WithCached[T any](ttl time.Duration, maxSize int) Option[T] {
 
 // WithKeyFunc sets a function that derives a cache key from the call context.
 // Used only under [StrategyCached]; if unset, all calls share [DefaultKey].
-// [ExecuteWithKey] overrides this per call.
+// [ExecuteWithKey] overrides this per call. A nil fn is ignored.
 func WithKeyFunc[T any](fn func(ctx context.Context) string) Option[T] {
 	return func(c *config[T]) {
-		c.keyFn = fn
+		if fn != nil {
+			c.keyFn = fn
+		}
 	}
 }
 
@@ -169,7 +171,9 @@ func WithShards[T any](n int) Option[T] {
 // ignored.
 func WithOnFallback[T any](fn func(err error, strategy Strategy)) Option[T] {
 	return func(c *config[T]) {
-		c.onFallback = fn
+		if fn != nil {
+			c.onFallback = fn
+		}
 	}
 }
 

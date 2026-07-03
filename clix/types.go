@@ -36,6 +36,10 @@ func (c *Context) Parser() *Parser { return c.parser }
 // can be nested inside [SubCommand] to build arbitrarily deep command trees.
 type Option func(*Command)
 
+// FlagOption modifies flag metadata during [AddFlag] registration.
+// Built-in flag options are [Required] and [Enum].
+type FlagOption func(*flagMeta)
+
 // Command represents a node in the CLI command tree. Each command has its
 // own flags, subcommands, an optional [Action], and collected positional
 // arguments. Use [Command.Name], [Command.Description], and

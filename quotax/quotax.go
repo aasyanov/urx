@@ -43,7 +43,6 @@ package quotax
 
 import (
 	"context"
-	"errors"
 	"hash/maphash"
 	"sync"
 	"sync/atomic"
@@ -95,6 +94,7 @@ type Quota struct {
 
 	stopEviction chan struct{}
 	evictionDone chan struct{}
+	closedCh     chan struct{}
 	closed       atomic.Bool
 }
 
@@ -125,6 +125,7 @@ func New(opts ...Option) *Quota {
 		shards:       make([]shard, cfg.shards),
 		stopEviction: make(chan struct{}),
 		evictionDone: make(chan struct{}),
+		closedCh:     make(chan struct{}),
 	}
 	for i := range q.shards {
 		q.shards[i].buckets = make(map[string]*bucket)
@@ -205,52 +206,42 @@ func (q *Quota) Wait(ctx context.Context, key string) error {
 // [ErrCancelled] wrapping ctx.Err() if the context is cancelled first.
 //
 // A request for more than the per-key burst can never be satisfied; WaitN
-// blocks until ctx is cancelled in that case.
+// blocks until ctx is cancelled or [Quota.Close] is called in that case.
 func (q *Quota) WaitN(ctx context.Context, key string, n int) error {
+	_, _, err := q.waitFor(ctx, key, n)
+	return err
+}
+
+// waitResult holds the outcome of a successful [Quota.waitFor] admission.
+type waitResult struct {
+	remaining float64
+	waited    bool
+}
+
+// waitFor blocks until n tokens are consumed, ctx is done, or the quota closes.
+// On success it returns the key's bucket and admission snapshot.
+func (q *Quota) waitFor(ctx context.Context, key string, n int) (*bucket, waitResult, error) {
+	if n < 1 {
+		n = 1
+	}
 	if q.closed.Load() {
-		return ErrClosed
+		return nil, waitResult{}, ErrClosed
 	}
 	if err := ctx.Err(); err != nil {
-		return errCancelled(err)
+		q.limited.Add(1)
+		return nil, waitResult{}, errCancelled(err)
 	}
 
 	b, err := q.bucketForWait(key)
 	if err != nil {
-		return err
+		return nil, waitResult{}, err
 	}
 
-	for {
-		if err := ctx.Err(); err != nil {
-			q.limited.Add(1)
-			return errCancelled(err)
-		}
-
-		// Refresh the access stamp each iteration so a key blocked for longer
-		// than the eviction TTL is never swept out from under an active waiter.
-		b.touch()
-		if b.limiter.AllowN(n) {
-			if err := ctx.Err(); err != nil {
-				b.limiter.Release(float64(n))
-				q.limited.Add(1)
-				return errCancelled(err)
-			}
-			q.allowed.Add(1)
-			return nil
-		}
-
-		timer := time.NewTimer(q.waitDelay(b, n))
-		select {
-		case <-ctx.Done():
-			stopTimer(timer)
-			q.limited.Add(1)
-			return errCancelled(ctx.Err())
-		case <-timer.C:
-			if err := ctx.Err(); err != nil {
-				q.limited.Add(1)
-				return errCancelled(err)
-			}
-		}
+	res, err := q.waitForOnBucket(ctx, b, n)
+	if err != nil {
+		return nil, waitResult{}, err
 	}
+	return b, res, err
 }
 
 // stopTimer stops t and drains its channel when the timer already fired, so
@@ -297,9 +288,9 @@ func (q *Quota) bucketForWait(key string) (*bucket, error) {
 //
 // Execute returns [ErrNilFunc] if fn is nil, [ErrClosed] if the limiter is
 // closed, [ErrMaxKeys] if the [WithMaxKeys] cap blocks a new key, or
-// [ErrCancelled] wrapping ctx.Err() if the context is cancelled before a token
-// is acquired.
-func Execute[T any](q *Quota, ctx context.Context, key string, fn func(ctx context.Context, qc QuotaController) (T, error)) (T, error) {
+// [ErrCancelled] wrapping ctx.Err() if the context is cancelled or the quota
+// is closed before a token is acquired.
+func Execute[T any](q *Quota, ctx context.Context, key string, fn QuotaFunc[T]) (T, error) {
 	var zero T
 	if fn == nil {
 		return zero, ErrNilFunc
@@ -308,14 +299,11 @@ func Execute[T any](q *Quota, ctx context.Context, key string, fn func(ctx conte
 		return zero, ErrClosed
 	}
 
-	b, err := q.bucketForWait(key)
+	b, res, err := q.waitFor(ctx, key, 1)
 	if err != nil {
 		return zero, err
 	}
-
-	val, err := ratex.Execute(b.limiter, ctx, adapt(key, fn))
-	q.recordExecute(err)
-	return val, normalizeErr(ctx, err, opExecute)
+	return runAfterAdmit(q, b, key, res, opExecute, ctx, fn)
 }
 
 // TryExecute attempts to run fn for the given key without blocking. If a token
@@ -324,9 +312,10 @@ func Execute[T any](q *Quota, ctx context.Context, key string, fn func(ctx conte
 // without executing fn.
 //
 // It returns (false, zero, [ErrNilFunc]) if fn is nil, (false, zero,
-// [ErrClosed]) if the limiter is closed, and (false, zero, [ErrMaxKeys]) if the
-// [WithMaxKeys] cap blocks a new key.
-func TryExecute[T any](q *Quota, ctx context.Context, key string, fn func(ctx context.Context, qc QuotaController) (T, error)) (bool, T, error) {
+// [ErrClosed]) if the limiter is closed, (false, zero, [ErrMaxKeys]) if the
+// [WithMaxKeys] cap blocks a new key, and (false, zero, [ErrCancelled]) when
+// ctx is already cancelled (no token consumed).
+func TryExecute[T any](q *Quota, ctx context.Context, key string, fn QuotaFunc[T]) (bool, T, error) {
 	var zero T
 	if fn == nil {
 		return false, zero, ErrNilFunc
@@ -334,78 +323,106 @@ func TryExecute[T any](q *Quota, ctx context.Context, key string, fn func(ctx co
 	if q.closed.Load() {
 		return false, zero, ErrClosed
 	}
+	if err := ctx.Err(); err != nil {
+		return false, zero, errCancelled(err)
+	}
 
 	b, err := q.bucketForWait(key)
 	if err != nil {
 		return false, zero, err
 	}
 
-	ok, val, err := ratex.TryExecute(b.limiter, ctx, adapt(key, fn))
-	if !ok {
+	if !b.limiter.Allow() {
 		q.limited.Add(1)
-		return false, zero, normalizeErr(ctx, err, opTryExecute)
+		return false, zero, nil
 	}
-	q.recordExecute(err)
-	return true, val, normalizeErr(ctx, err, opTryExecute)
-}
 
-// adapt converts a quotax callback into a ratex callback, wrapping the inner
-// [ratex.RateController] in a [QuotaController] that adds the key. Token refund
-// via [QuotaController.SkipToken] is delegated straight to ratex, so a skipped
-// call is correctly returned to the key's bucket. It is a package-level generic
-// function because Go methods cannot have type parameters.
-func adapt[T any](key string, fn func(ctx context.Context, qc QuotaController) (T, error)) func(ctx context.Context, rc ratex.RateController) (T, error) {
-	return func(ctx context.Context, rc ratex.RateController) (T, error) {
-		return fn(ctx, &execution{
-			key:    key,
-			tokens: rc.Tokens(),
-			rate:   rc.Rate(),
-			burst:  rc.Burst(),
-			waited: rc.Waited(),
-			inner:  rc,
-		})
-	}
-}
-
-// normalizeErr maps a delegated ratex error back into quotax's own vocabulary so
-// callers compare against a single package's sentinels and see correct panic
-// attribution:
-//
-//   - [ratex.ErrCancelled] becomes quotax's [ErrCancelled], preserving the
-//     wrapped cause (ctx.Err()).
-//   - a [*panix.PanicError] raised by the callback is re-tagged from ratex's op
-//     ("ratex.Execute") to the quotax op so the panic points at this package.
-//
-// Any other error (including a callback-originated one) passes through
-// unchanged.
-func normalizeErr(ctx context.Context, err error, op string) error {
-	if err == nil {
-		return nil
-	}
-	if errors.Is(err, ratex.ErrCancelled) {
-		cause := ctx.Err()
-		if cause == nil {
-			cause = context.Canceled
-		}
-		return errCancelled(cause)
-	}
-	var pe *panix.PanicError
-	if errors.As(err, &pe) {
-		pe.Op = op
-	}
-	return err
-}
-
-// recordExecute attributes the outcome of a ratex execution to the aggregate
-// counters. A context-cancellation error counts as limited; anything else
-// (success or a callback-originated error) counts as allowed, mirroring ratex's
-// own outcome accounting at the per-key level.
-func (q *Quota) recordExecute(err error) {
-	if errors.Is(err, ratex.ErrCancelled) {
+	if cerr := ctx.Err(); cerr != nil {
+		b.limiter.Release(1)
 		q.limited.Add(1)
-		return
+		return false, zero, errCancelled(cerr)
 	}
+
 	q.allowed.Add(1)
+	res := waitResult{remaining: b.limiter.Tokens(), waited: false}
+	val, err := runAfterAdmit(q, b, key, res, opTryExecute, ctx, fn)
+	return true, val, err
+}
+
+// waitForOnBucket is the blocking admission loop once the key's bucket exists.
+func (q *Quota) waitForOnBucket(ctx context.Context, b *bucket, n int) (waitResult, error) {
+	if n < 1 {
+		n = 1
+	}
+	if q.closed.Load() {
+		return waitResult{}, ErrClosed
+	}
+	if err := ctx.Err(); err != nil {
+		q.limited.Add(1)
+		return waitResult{}, errCancelled(err)
+	}
+
+	waited := false
+	for {
+		if q.closed.Load() {
+			q.limited.Add(1)
+			return waitResult{}, ErrClosed
+		}
+		if err := ctx.Err(); err != nil {
+			q.limited.Add(1)
+			return waitResult{}, errCancelled(err)
+		}
+
+		b.touch()
+		if b.limiter.AllowN(n) {
+			if err := ctx.Err(); err != nil {
+				b.limiter.Release(float64(n))
+				q.limited.Add(1)
+				return waitResult{}, errCancelled(err)
+			}
+			q.allowed.Add(1)
+			return waitResult{remaining: b.limiter.Tokens(), waited: waited}, nil
+		}
+
+		timer := time.NewTimer(q.waitDelay(b, n))
+		select {
+		case <-ctx.Done():
+			stopTimer(timer)
+			q.limited.Add(1)
+			return waitResult{}, errCancelled(ctx.Err())
+		case <-q.closedCh:
+			stopTimer(timer)
+			q.limited.Add(1)
+			return waitResult{}, ErrClosed
+		case <-timer.C:
+			if err := ctx.Err(); err != nil {
+				q.limited.Add(1)
+				return waitResult{}, errCancelled(err)
+			}
+		}
+		waited = true
+	}
+}
+
+// runAfterAdmit invokes fn under panic recovery after a token has been consumed.
+// It refunds the token to the key's bucket when the callback requests
+// [QuotaController.SkipToken].
+func runAfterAdmit[T any](q *Quota, b *bucket, key string, res waitResult, op string, ctx context.Context, fn QuotaFunc[T]) (T, error) {
+	qc := &execution{
+		key:    key,
+		tokens: res.remaining,
+		rate:   b.limiter.Rate(),
+		burst:  b.limiter.Burst(),
+		waited: res.waited,
+	}
+	val, err := panix.Safe(op, func() (T, error) {
+		return fn(ctx, qc)
+	})
+	if qc.skipToken {
+		b.limiter.Release(1)
+		q.allowed.Add(-1)
+	}
+	return val, err
 }
 
 // --- Key management ---
@@ -470,14 +487,16 @@ func (q *Quota) ResetStats() {
 // --- Lifecycle ---
 
 // Close stops the background eviction goroutine and marks the limiter closed:
-// subsequent admission calls return false or [ErrClosed]. Close blocks until
-// the sweeper has exited. It is idempotent and always returns nil; the error
-// return satisfies the common closer contract used across urx.
+// subsequent admission calls return false or [ErrClosed], and any [Quota.WaitN]
+// or [Execute] call blocked waiting for a token returns [ErrClosed] promptly.
+// Close blocks until the sweeper has exited. It is idempotent and always returns
+// nil; the error return satisfies the common closer contract used across urx.
 func (q *Quota) Close() error {
 	if q.closed.Swap(true) {
 		return nil
 	}
 	close(q.stopEviction)
+	close(q.closedCh)
 	<-q.evictionDone
 	return nil
 }
@@ -573,7 +592,7 @@ func (q *Quota) waitDelay(b *bucket, n int) time.Duration {
 	if deficit <= 0 {
 		return minWaitDelay
 	}
-	d := time.Duration(deficit / q.cfg.rate * nanosPerSecond)
+	d := time.Duration(deficit / b.limiter.Rate() * nanosPerSecond)
 	if d < minWaitDelay {
 		return minWaitDelay
 	}

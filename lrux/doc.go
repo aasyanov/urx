@@ -18,9 +18,9 @@
 //	c.Set("answer", 42)
 //	v, ok := c.Get("answer")
 //
-//	v = c.GetOrCompute("answer", func() int { return expensive() },
-//	    lrux.WithSingleflight(),
-//	)
+//	v, err := c.GetOrCompute(ctx, "answer", func(ctx context.Context) (int, error) {
+//	    return expensive(ctx)
+//	}, lrux.WithSingleflight())
 //
 // # Sharding
 //

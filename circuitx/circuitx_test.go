@@ -118,6 +118,21 @@ func TestWithOp_TryDefault(t *testing.T) {
 	assert.Equal(t, opTryExecute, New(WithOp("")).cfg.opOrDefaultTry())
 }
 
+func TestWithOnStateChange(t *testing.T) {
+	var fired bool
+	b := New(
+		WithMaxFailures(1),
+		WithOnStateChange(func(State, State) { fired = true }),
+	)
+	_, _ = Execute(b, context.Background(), fail[int]())
+	assert.True(t, fired, "hook fires on trip")
+
+	fired = false
+	b2 := New(WithMaxFailures(1), WithOnStateChange(nil))
+	_, _ = Execute(b2, context.Background(), fail[int]())
+	assert.False(t, fired, "nil hook is ignored")
+}
+
 // TestNewConfig_FloorsInvalidValues exercises the defensive floors in newConfig
 // directly. The public WithXxx options already reject invalid values, so these
 // floors are a second belt reachable only by an option that writes a raw
@@ -160,6 +175,18 @@ func TestExecute_FailuresTripToOpen(t *testing.T) {
 	assert.Equal(t, Open, b.State(), "tripped at threshold")
 	assert.Equal(t, uint64(1), b.Stats().Trips)
 	assert.Equal(t, uint64(3), b.Stats().TotalFail)
+}
+
+func TestExecute_FailureReturnsValue(t *testing.T) {
+	b := New(WithMaxFailures(5))
+	ctx := context.Background()
+
+	got, err := Execute(b, ctx, func(context.Context, CircuitController) (int, error) {
+		return 42, errBoom
+	})
+	require.ErrorIs(t, err, errBoom)
+	assert.Equal(t, 42, got, "callback value must pass through on counted failure")
+	assert.Equal(t, Closed, b.State())
 }
 
 func TestExecute_SuccessResetsFailureCount(t *testing.T) {
@@ -609,6 +636,72 @@ func TestReset_NoopWhenAlreadyClosed(t *testing.T) {
 	assert.Equal(t, 0, changes, "no transition fired when already closed")
 }
 
+func TestReset_FiresHookFromOpen(t *testing.T) {
+	var from, to State
+	b := New(
+		WithMaxFailures(1),
+		WithOnStateChange(func(f, t State) { from, to = f, t }),
+	)
+	ctx := context.Background()
+	_, _ = Execute(b, ctx, fail[int]())
+	require.Equal(t, Open, b.State())
+
+	b.Reset()
+	assert.Equal(t, Closed, b.State())
+	assert.Equal(t, Open, from)
+	assert.Equal(t, Closed, to)
+}
+
+func TestReset_DuringHalfOpenInflightProbe(t *testing.T) {
+	b := New(WithMaxFailures(1), WithResetTimeout(20*time.Millisecond), WithHalfOpenMax(1))
+	ctx := context.Background()
+
+	_, _ = Execute(b, ctx, fail[int]())
+	testx.Eventually(t, func() bool { return b.State() == HalfOpen }, time.Second)
+
+	release := make(chan struct{})
+	entered := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = Execute(b, ctx, func(context.Context, CircuitController) (int, error) {
+			close(entered)
+			<-release
+			return 1, nil
+		})
+	}()
+	<-entered
+	require.Equal(t, int32(1), b.halfOpenInflight.Load())
+
+	b.Reset()
+	assert.Equal(t, Closed, b.State())
+	assert.Equal(t, int32(0), b.halfOpenInflight.Load())
+
+	close(release)
+	<-done
+	assert.GreaterOrEqual(t, b.halfOpenInflight.Load(), int32(0),
+		"finishing probe must not drive inflight negative")
+
+	got, err := Execute(b, ctx, ok(9))
+	require.NoError(t, err)
+	assert.Equal(t, 9, got)
+}
+
+// TestReleaseProbe_NeverNegative covers the clamped probe release used when
+// [Reset] clears the budget while a probe is still running.
+func TestReleaseProbe_NeverNegative(t *testing.T) {
+	b := New()
+
+	b.halfOpenInflight.Store(1)
+	b.releaseProbe()
+	assert.Equal(t, int32(0), b.halfOpenInflight.Load())
+
+	b.halfOpenInflight.Store(0)
+	b.releaseProbe()
+	assert.Equal(t, int32(0), b.halfOpenInflight.Load(),
+		"release after Reset-cleared budget is a no-op")
+}
+
 // TestOpenFrom_IdempotentWhenAlreadyOpen covers the early-return branch in
 // openFrom: a second trip from an already-Open circuit must not double-count or
 // re-fire the hook.
@@ -727,6 +820,30 @@ func TestStats_Snapshot(t *testing.T) {
 	assert.Equal(t, uint64(2), s.TotalFail)
 	assert.Equal(t, uint64(1), s.Rejected)
 	assert.Equal(t, uint64(1), s.Trips)
+}
+
+func TestStats_NoStatePromotion(t *testing.T) {
+	var edges int
+	b := New(
+		WithMaxFailures(1),
+		WithResetTimeout(5*time.Millisecond),
+		WithOnStateChange(func(State, State) { edges++ }),
+	)
+	ctx := context.Background()
+	_, _ = Execute(b, ctx, fail[int]())
+	require.Equal(t, Open, b.State())
+	require.Equal(t, 1, edges, "trip edge only")
+
+	time.Sleep(10 * time.Millisecond)
+
+	s := b.Stats()
+	assert.Equal(t, Open, s.State, "Stats must not promote Open to HalfOpen")
+	assert.Equal(t, Open, State(b.state.Load()))
+	assert.Equal(t, 1, edges, "Stats must not fire onStateChange")
+
+	// State() still drives promotion when explicitly queried.
+	assert.Equal(t, HalfOpen, b.State())
+	assert.Equal(t, 2, edges)
 }
 
 func TestResetStats_ZeroesCountersKeepsState(t *testing.T) {

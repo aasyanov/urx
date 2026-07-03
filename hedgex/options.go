@@ -84,9 +84,11 @@ func WithMaxParallel(n int) Option {
 	}
 }
 
-// WithDelay sets the stagger between launching successive copies. A copy is
-// launched only if no earlier copy has already returned a success within the
-// delay window. Default: [DefaultDelay]. Values <= 0 are ignored.
+// WithDelay sets the base stagger between launching successive copies. The next
+// copy fires when its scheduled delay elapses if earlier copies have not yet
+// succeeded; if every in-flight copy finishes without a win, the next copy
+// launches immediately rather than waiting out the remaining delay. Default:
+// [DefaultDelay]. Values <= 0 are ignored.
 func WithDelay(d time.Duration) Option {
 	return func(c *config) {
 		if d > 0 {

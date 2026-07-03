@@ -51,3 +51,34 @@ func FuzzReadinessWithFailingCheck(f *testing.F) {
 		}
 	})
 }
+
+// FuzzReadinessMarkDown exercises the MarkDown short-circuit path without panicking.
+func FuzzReadinessMarkDown(f *testing.F) {
+	f.Add(true)
+	f.Add(false)
+
+	f.Fuzz(func(t *testing.T, markedDown bool) {
+		c := New()
+		c.Register("svc", func(context.Context) error { return nil })
+		if markedDown {
+			c.MarkDown()
+		}
+
+		rep := c.Readiness(context.Background())
+		if rep.Duration == "" {
+			t.Fatal("empty duration")
+		}
+		if markedDown {
+			if rep.Status != StatusDown {
+				t.Fatalf("marked down: expected down, got %q", rep.Status)
+			}
+			if rep.Components != nil {
+				t.Fatal("marked down: components must be nil")
+			}
+			return
+		}
+		if rep.Status != StatusUp {
+			t.Fatalf("expected up, got %q", rep.Status)
+		}
+	})
+}

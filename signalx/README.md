@@ -139,8 +139,9 @@ The deadline is checked **before each hook** and **once more after the loop**, s
 | `Wait` runs hooks in order                     | Global hooks (registration order) precede per-call hooks (argument order)              |
 | `Wait` runs every non-skipped hook             | A panicking hook does not abort the remaining hooks                                    |
 | `Wait` bounds the drain                        | Hooks that exceed the timeout yield `ErrShutdownTimeout`                               |
-| `Wait` never panics                            | Hook panics become `ErrHookPanic` joined with `*panix.PanicError`                      |
+| `Wait` never panics from hook execution        | Hook panics become `ErrHookPanic` joined with `*panix.PanicError`                      |
 | `Wait(nil, …)` is safe                         | A nil context becomes `context.Background()` (and thus blocks forever)                 |
+| Nil hooks panic at registration/call time      | `OnShutdown(nil)`, `Wait(ctx, nil)`, and `Trap(ctx, nil signal)` are programmer errors |
 | `OnShutdown`/`ResetHooks` are concurrency-safe | The global registry is mutex-protected                                                 |
 
 
@@ -252,10 +253,10 @@ signalx.Wait(ctx, drainFn)
 
 | Symbol               | Signature                                                                                       | Description                                                                          |
 | -------------------- | ----------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
-| `Trap`               | `func Trap(parent context.Context, signals ...os.Signal) (context.Context, context.CancelFunc)` | Derive a context cancelled when one of `signals` arrives (default `SIGINT, SIGTERM`) |
+| `Trap`               | `func Trap(parent context.Context, signals ...os.Signal) (context.Context, context.CancelFunc)` | Derive a context cancelled when one of `signals` arrives (default `SIGINT, SIGTERM`; panics if any explicit signal is nil) |
 | `Wait`               | `func Wait(ctx context.Context, hooks ...func(ctx context.Context)) error`                      | Block on `ctx`, then run global + per-call hooks under the default 15s timeout       |
 | `WaitWith`           | `func WaitWith(ctx context.Context, opts []Option, hooks ...func(ctx context.Context)) error`   | Configurable form of `Wait`                                                          |
-| `OnShutdown`         | `func OnShutdown(fn func(ctx context.Context))`                                                 | Register a process-global hook (runs before per-call hooks)                          |
+| `OnShutdown`         | `func OnShutdown(fn func(ctx context.Context))`                                                 | Register a process-global hook (runs before per-call hooks; panics if fn is nil)     |
 | `ResetHooks`         | `func ResetHooks()`                                                                             | Clear the global hook registry (intended for tests)                                  |
 | `Option`             | `type Option func(*config)`                                                                     | Functional option for `WaitWith`                                                     |
 | `WithTimeout`        | `func WithTimeout(d time.Duration) Option`                                                      | Set the total hook-drain timeout; `≤ 0` disables it                                  |
@@ -279,10 +280,18 @@ signalx.Wait(ctx, drainFn)
 | `ErrShutdownTimeout` | The configured timeout elapsed before every hook completed                          |
 | `ErrHookPanic`       | A shutdown hook panicked; the joined error carries the `*panix.PanicError` cause(s) |
 
+Both may appear in the same returned error when a hook panics and the drain budget is exhausted before later hooks finish. Use `errors.Is` for each sentinel independently.
+
 
 Both are sentinel errors created with `errors.New`; compare with `errors.Is`. When a hook panics, `errors.As(err, &pe)` extracts the underlying `*panix.PanicError` with `Op == "signalx.Wait"`.
 
 ## Pitfalls
+
+> [!WARNING]
+> **Hooks do not return errors to `Wait`.** Shutdown hooks are `func(context.Context)` with no return value. Log or record failures inside the hook (`if err := srv.Shutdown(ctx); err != nil { log.Printf(...) }`). Only timeout overruns and recovered panics surface through `Wait`'s return value.
+
+> [!WARNING]
+> **Nil hooks panic at registration or call time.** `OnShutdown(nil)`, `Wait(ctx, nil)`, and `Trap(ctx, nil signal)` are programmer errors and panic immediately — the same contract as `healthx.Register` with a nil check function.
 
 > [!WARNING]
 > **Hooks must respect their context — the timeout does not forcibly kill them.** Hooks run synchronously in the caller's goroutine; `WithTimeout` cancels the context passed to each hook but cannot interrupt a hook that ignores it. A hook that blocks on a non-context-aware call (e.g. a `Close()` with no deadline) will hang `Wait` indefinitely. Always thread the hook's `ctx` into the operations it performs (`srv.Shutdown(ctx)`, `db.PingContext(ctx)`), or wrap a stubborn call in its own goroutine + `select`.
@@ -338,12 +347,12 @@ Both are sentinel errors created with `errors.New`; compare with `errors.Is`. Wh
 
 | Metric                | Value                                                                         |
 | --------------------- | ----------------------------------------------------------------------------- |
-| Test functions        | 23                                                                            |
+| Test functions        | 30                                                                            |
 | Table-driven subtests | 4                                                                             |
 | Benchmarks            | 6                                                                             |
-| Fuzz targets          | 1                                                     |
+| Fuzz targets          | 1                                                                             |
 | Examples              | 3                                                                             |
-| Coverage              | 100% (Linux/CI); 98.3% (Windows, signal-delivery tests are `//go:build unix`) |
+| Coverage              | 100% (Linux/CI); 98.6% (Windows, signal-delivery branch is `//go:build unix`) |
 | Race detector         | All pass                                                                      |
 | External deps         | 0 (urx/panix internally; testify in tests only)                               |
 
@@ -354,6 +363,7 @@ Both are sentinel errors created with `errors.New`; compare with `errors.Is`. Wh
 signalx/
 ├── signalx.go            # Trap, Wait, WaitWith, OnShutdown, ResetHooks, hook runner
 ├── errors.go             # ErrShutdownTimeout, ErrHookPanic sentinels
+├── errors_test.go        # Sentinel identity tests
 ├── options.go            # Option, config, WithTimeout, defaults
 ├── signalx_test.go       # Unit + table-driven + concurrency tests (cross-platform)
 ├── signalx_unix_test.go  # Real signal-delivery tests (//go:build unix)

@@ -3,8 +3,8 @@
 // type-safe concurrent map.
 //
 // [Lazy] is a generic, thread-safe lazy initializer — like [sync.Once] but
-// with a typed return value and error handling. [Group] is an error group
-// with [github.com/aasyanov/urx/panix] panic recovery and optional
+// with a typed return value, error handling, and [github.com/aasyanov/urx/panix]
+// panic recovery. [Group] is an error group with panix recovery and optional
 // concurrency limiting. [Map] is a generic, type-safe wrapper around
 // [sync.Map] with an O(1) length.
 //
@@ -24,5 +24,5 @@
 // # Dependencies
 //
 // syncx depends only on the Go standard library and the urx panix package
-// (used to convert task panics into structured errors).
+// (used to convert init and task panics into structured errors).
 package syncx

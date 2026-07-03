@@ -99,7 +99,7 @@ Get(key)
   └── present, live    → accessedAt = now → move node to head → hits++ → return value, true
 ```
 
-`Get` promotes the entry to the head (most recently used) under a write lock. `GetFast` and `Peek` skip promotion and use a read lock, so they run concurrently — prefer them for read-heavy paths where strict recency does not matter.
+`Get` promotes the entry to the head (most recently used) under a write lock and eagerly removes expired entries. `GetFast` and `Peek` skip promotion and use a read lock, so they run concurrently — prefer them for read-heavy paths where strict recency does not matter. Unlike `Get`, `GetFast` reports expired entries as missing but does not remove them.
 
 ### Insertion and eviction
 
@@ -108,7 +108,7 @@ Set(key, value)
   │
   ├── key exists → fire EvictionReplaced → overwrite → move to head
   └── new key    → push node at head
-                     └── size > capacity → remove tail (EvictionLRU) → evictions++
+                     └── size > capacity → remove tail (EvictionCapacity) → evictions++
 ```
 
 ### Expiration
@@ -118,15 +118,15 @@ Entries carry an absolute `expiresAt`. They are removed **lazily** on the next `
 ### Singleflight compute
 
 ```text
-GetOrCompute(key, fn, WithSingleflight())
+GetOrCompute(ctx, key, fn, WithSingleflight())
   │
   ├── cache hit → return cached value
   └── miss → singleflight.Do(key):
-               ├── leader  → fn() runs once → store → return
+               ├── leader  → fn(ctx) runs once → store → return
                └── waiters → block, then share the leader's result
 ```
 
-With the context-aware `GetOrComputeCtx` + `WithSingleflight`, the compute function receives a **detached context** so one caller's cancellation cannot abort the shared computation for the other waiters; each caller's own context is still honored for its own return.
+With [WithSingleflight], the shared compute runs under a **detached context** so one caller's cancellation cannot abort the shared computation for the other waiters; each caller's own context is still honored for its own return. Without singleflight, the context is checked before compute starts and again before storing — a cancelled context after compute returns the context error without caching.
 
 ## Normative Contracts
 
@@ -135,9 +135,10 @@ With the context-aware `GetOrComputeCtx` + `WithSingleflight`, the compute funct
 | ------------------------ | ---------------------------------------------------------------------------------------------- |
 | Capacity bound           | With `WithCapacity(n > 0)`, `Len()` never exceeds `n` after any operation returns              |
 | LRU order                | `Get`/`Set`/`Touch` move the entry to MRU; the tail is always the next eviction victim         |
+| Touch TTL                | `Touch` slides per-entry expiry by preserving remaining lifetime since last access             |
 | Eviction callback timing | `OnEvict` runs **after** the lock is released; it may call back into the cache                 |
 | Callback panic isolation | A panic in the eviction callback or compute function is recovered and cannot corrupt the cache |
-| Close idempotency        | `Close` is safe to call any number of times; post-close mutations are no-ops                   |
+| Close idempotency        | `Close` is safe to call any number of times, always returns nil; post-close mutations are no-ops except `GetOrCompute` → `ErrClosed` |
 | Singleflight             | `WithSingleflight` guarantees `compute` runs at most once per in-flight key                    |
 | TTL semantics            | `TTL(key)` returns `-1` for no-expiry, `0` for missing/expired, positive remaining otherwise   |
 
@@ -200,7 +201,7 @@ var users = lrux.NewSharded[string, *User](
 )
 
 func GetUser(ctx context.Context, id string) (*User, error) {
-	return users.GetOrComputeCtx(ctx, id, func(ctx context.Context) (*User, error) {
+	return users.GetOrCompute(ctx, id, func(ctx context.Context) (*User, error) {
 		return db.QueryUser(ctx, id) // runs once per id even under 1000 concurrent misses
 	}, lrux.WithSingleflight())
 }
@@ -271,11 +272,10 @@ func keepAlive(id string) bool {
 | `Snapshot`        | `func (c *Cache[K, V]) Snapshot() []*Entry[K, V]`                                                                   | All live entries as snapshots          |
 | `Range`           | `func (c *Cache[K, V]) Range(fn func(K, V) bool)`                                                                   | Iterate, stop when fn returns false    |
 | `ExpireOld`       | `func (c *Cache[K, V]) ExpireOld() int`                                                                             | Remove all expired entries             |
-| `GetOrCompute`    | `func (c *Cache[K, V]) GetOrCompute(key K, compute func() V, opts ...ComputeOption) V`                              | Lazy populate                          |
-| `GetOrComputeCtx` | `func (c *Cache[K, V]) GetOrComputeCtx(ctx, key K, compute func(ctx) (V, error), opts ...ComputeOption) (V, error)` | Context + error aware populate         |
+| `GetOrCompute`    | `func (c *Cache[K, V]) GetOrCompute(ctx context.Context, key K, compute func(ctx context.Context) (V, error), opts ...ComputeOption) (V, error)` | Context-aware lazy populate |
 | `Stats`           | `func (c *Cache[K, V]) Stats() Stats`                                                                               | Counter snapshot                       |
 | `ResetStats`      | `func (c *Cache[K, V]) ResetStats()`                                                                                | Zero counters                          |
-| `Close`           | `func (c *Cache[K, V]) Close()`                                                                                     | Stop sweeper, drain, mark closed       |
+| `Close`           | `func (c *Cache[K, V]) Close() error`                                                                               | Stop sweeper, drain, mark closed       |
 | `IsClosed`        | `func (c *Cache[K, V]) IsClosed() bool`                                                                             | Closed-state check                     |
 
 
@@ -315,10 +315,10 @@ func keepAlive(id string) bool {
 ## Errors
 
 
-| Error         | Condition                                                            |
-| ------------- | -------------------------------------------------------------------- |
-| `ErrClosed`   | Returned by `GetOrComputeCtx` when the cache has been closed         |
-| `ErrNotFound` | Available sentinel for compute functions that signal an absent value |
+| Error         | Condition                                                                                    |
+| ------------- | -------------------------------------------------------------------------------------------- |
+| `ErrClosed`   | Returned by `GetOrCompute` when the cache is closed; all other methods are silent no-ops  |
+| `ErrNotFound` | Sentinel for compute functions; propagated by `GetOrCompute`, nothing is cached           |
 
 
 ## Pitfalls
@@ -334,6 +334,12 @@ func keepAlive(id string) bool {
 
 > [!WARNING]
 > **Call `Close`.** A cache created with a cleanup interval owns a background goroutine. Failing to `Close` it leaks that goroutine for the lifetime of the process.
+
+> [!WARNING]
+> **`GetFast` does not evict expired entries.** Expired keys count as misses but remain in `Len()` until `Get`, `ExpireOld`, or the background sweeper removes them. Use `Get` when eager expiry cleanup is required.
+
+> [!WARNING]
+> **Context cancellation after compute.** On the direct (non-singleflight) path, a context cancelled during compute prevents storing the result; the context error is returned instead.
 
 ## Safety and Concurrency
 
@@ -353,6 +359,7 @@ All methods on `Cache` and `ShardedCache` are safe for concurrent use. Mutations
 | Cache_Mixed (90% read)    | 62    | 0    | 0         |
 | Cache_Get_Parallel        | 136   | 0    | 0         |
 | Cache_GetOrCompute_Hit    | 74    | 0    | 0         |
+| Cache_GetOrCompute_Miss   | 5487  | 174  | 2         |
 | ShardedCache_Get_Parallel | 55    | 0    | 0         |
 | ShardedCache_Set_Parallel | 147   | 71   | 0         |
 | Hasher_String             | 11    | 0    | 0         |
@@ -365,6 +372,7 @@ All methods on `Cache` and `ShardedCache` are safe for concurrent use. Mutations
 - **Allocation floor (writes): 1 node per *new* key, amortized to 0.** `Cache_Set` reports 0 allocs/op because the benchmark reuses a fixed key set within capacity; inserting a genuinely new key costs exactly one `node`. `ShardedCache_Set_Parallel` shows 71 B/op (rounding to 0 allocs/op) from node churn under capacity pressure.
 - **Hashing is free.** `maphash.Comparable` (Go 1.24) hashes any comparable key via the runtime's type hasher with no allocation — `Hasher_Int` at 8 ns/op replaced an earlier hand-rolled hasher that allocated 160 B/op per call.
 - **Bottleneck (single cache): the write lock.** `Cache_Get_Parallel` at 136 ns/op vs 58 ns/op sequential reflects contention on the single `RWMutex` when `Get` promotes under a write lock.
+- **Compute miss path:** `Cache_GetOrCompute_Miss` at ~5.5 µs/op with 2 allocs/op — one for the map insert node and one from the compute closure escape; the double-checked lock and optional eviction add the rest.
 - **Sharding scales reads.** `ShardedCache_Get_Parallel` at 55 ns/op is **2.5× faster** than the single-cache parallel read because 16 independent locks spread the contention. Use the sharded variant whenever more than a few goroutines hit the cache concurrently.
 
 ## Quality
@@ -372,11 +380,11 @@ All methods on `Cache` and `ShardedCache` are safe for concurrent use. Mutations
 
 | Metric         | Value                                                 |
 | -------------- | ----------------------------------------------------- |
-| Test functions | 94                                                    |
-| Benchmarks     | 11                                                    |
-| Fuzz targets   | 3                                                     |
-| Examples       | 5                                                     |
-| Coverage       | 95.5%                                                 |
+| Test functions | 103                                               |
+| Benchmarks     | 12                                                |
+| Fuzz targets   | 3                                                 |
+| Examples       | 5                                                 |
+| Coverage       | 97.4%                                             |
 | Race detector  | All pass                                              |
 | External deps  | golang.org/x/sync (singleflight); testify (test only) |
 
@@ -388,7 +396,7 @@ lrux/
 ├── doc.go              # package-level GoDoc
 ├── lrux.go             # Cache: core ops, intrusive list, lifecycle, sweeper
 ├── sharded.go          # ShardedCache: shard routing, parallel batch ops
-├── compute.go          # GetOrCompute(Ctx) + singleflight dedup
+├── compute.go          # GetOrCompute + singleflight dedup
 ├── hash.go             # maphash.Comparable shard hasher, keyString, nextPow2
 ├── options.go          # Option / ShardedOption / ComputeOption + defaults
 ├── errors.go           # ErrClosed, ErrNotFound sentinels

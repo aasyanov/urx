@@ -39,6 +39,35 @@ func FuzzExecute(f *testing.F) {
 	})
 }
 
+// FuzzTryExecute drives the non-blocking admission path. The invariants match
+// [FuzzExecute]: no panic, active returns to zero after every completed call.
+func FuzzTryExecute(f *testing.F) {
+	f.Add(10, int64(time.Second))
+	f.Add(0, int64(0))
+	f.Add(-5, int64(-1))
+	f.Add(1, int64(time.Millisecond))
+
+	ctx := context.Background()
+	f.Fuzz(func(t *testing.T, maxConcurrent int, timeoutNanos int64) {
+		b := New(WithMaxConcurrent(maxConcurrent), WithTimeout(time.Duration(timeoutNanos)))
+		defer func() { _ = b.Close() }()
+
+		ok, _, err := TryExecute(b, ctx,
+			func(_ context.Context, bc BulkController) (int, error) {
+				if bc.Active() < 1 || bc.Active() > bc.MaxConcurrent() {
+					t.Fatalf("active %d out of bounds [1, %d]", bc.Active(), bc.MaxConcurrent())
+				}
+				return 1, nil
+			})
+		if !ok || err != nil {
+			t.Fatalf("single uncontended TryExecute should always succeed: ok=%v err=%v", ok, err)
+		}
+		if got := b.Active(); got != 0 {
+			t.Fatalf("active not released: got %d", got)
+		}
+	})
+}
+
 // FuzzAcquireRelease verifies that any acquire/release sequence keeps the active
 // counter non-negative and back to zero once all tokens are freed.
 func FuzzAcquireRelease(f *testing.F) {

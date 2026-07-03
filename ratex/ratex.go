@@ -159,18 +159,34 @@ func (l *Limiter) Wait(ctx context.Context) error {
 // A request for more than the bucket capacity can never be satisfied; WaitN
 // blocks until ctx is cancelled in that case.
 func (l *Limiter) WaitN(ctx context.Context, n int) error {
+	_, err := l.waitFor(ctx, n)
+	return err
+}
+
+// waitResult holds the outcome of a successful [Limiter.waitFor] admission.
+type waitResult struct {
+	remaining float64
+	waited    bool
+}
+
+// waitFor blocks until n tokens are consumed or ctx is done. On success it
+// reports the remaining balance and whether the call slept at least once. On
+// cancellation it records one Limited outcome and returns [ErrCancelled].
+func (l *Limiter) waitFor(ctx context.Context, n int) (waitResult, error) {
 	if n < 1 {
 		n = 1
 	}
 	need := float64(n)
+	waited := false
+
 	for {
 		if err := ctx.Err(); err != nil {
 			l.countLimited()
-			return errCancelled(err)
+			return waitResult{}, errCancelled(err)
 		}
 
 		l.mu.Lock()
-		ok, _ := l.take(need)
+		ok, rem := l.take(need)
 		if ok {
 			l.allowed++
 		}
@@ -179,9 +195,9 @@ func (l *Limiter) WaitN(ctx context.Context, n int) error {
 			if err := ctx.Err(); err != nil {
 				l.refund(need)
 				l.countLimited()
-				return errCancelled(err)
+				return waitResult{}, errCancelled(err)
 			}
-			return nil
+			return waitResult{remaining: rem, waited: waited}, nil
 		}
 
 		timer := time.NewTimer(l.delay(n))
@@ -189,13 +205,14 @@ func (l *Limiter) WaitN(ctx context.Context, n int) error {
 		case <-ctx.Done():
 			stopTimer(timer)
 			l.countLimited()
-			return errCancelled(ctx.Err())
+			return waitResult{}, errCancelled(ctx.Err())
 		case <-timer.C:
 			if err := ctx.Err(); err != nil {
 				l.countLimited()
-				return errCancelled(err)
+				return waitResult{}, errCancelled(err)
 			}
 		}
+		waited = true
 	}
 }
 
@@ -249,7 +266,7 @@ func (l *Limiter) delay(n int) time.Duration {
 //
 // Execute returns [ErrNilFunc] if fn is nil, or [ErrCancelled] wrapping
 // ctx.Err() if the context is cancelled before a token is acquired.
-func Execute[T any](l *Limiter, ctx context.Context, fn func(ctx context.Context, rc RateController) (T, error)) (T, error) {
+func Execute[T any](l *Limiter, ctx context.Context, fn RateFunc[T]) (T, error) {
 	var zero T
 	if fn == nil {
 		return zero, ErrNilFunc
@@ -269,7 +286,7 @@ func Execute[T any](l *Limiter, ctx context.Context, fn func(ctx context.Context
 // Returns (false, zero, [ErrNilFunc]) if fn is nil, or (false, zero,
 // [ErrCancelled]) when ctx is already done — including after a token was taken
 // but before fn runs, in which case the token is refunded.
-func TryExecute[T any](l *Limiter, ctx context.Context, fn func(ctx context.Context, rc RateController) (T, error)) (bool, T, error) {
+func TryExecute[T any](l *Limiter, ctx context.Context, fn RateFunc[T]) (bool, T, error) {
 	var zero T
 	if fn == nil {
 		return false, zero, ErrNilFunc
@@ -303,60 +320,16 @@ func TryExecute[T any](l *Limiter, ctx context.Context, fn func(ctx context.Cont
 // acquire blocks until one token is consumed or ctx is done. It reports whether
 // the call had to wait and the token balance after consumption.
 func (l *Limiter) acquire(ctx context.Context) (waited bool, remaining float64, err error) {
-	if err := ctx.Err(); err != nil {
-		l.countLimited()
-		return false, 0, errCancelled(err)
+	res, err := l.waitFor(ctx, 1)
+	if err != nil {
+		return false, 0, err
 	}
-
-	l.mu.Lock()
-	ok, rem := l.take(1)
-	if ok {
-		l.allowed++
-	}
-	l.mu.Unlock()
-	if ok {
-		if err := ctx.Err(); err != nil {
-			l.refund(1)
-			l.countLimited()
-			return false, 0, errCancelled(err)
-		}
-		return false, rem, nil
-	}
-
-	for {
-		timer := time.NewTimer(l.delay(1))
-		select {
-		case <-ctx.Done():
-			stopTimer(timer)
-			l.countLimited()
-			return false, 0, errCancelled(ctx.Err())
-		case <-timer.C:
-			if err := ctx.Err(); err != nil {
-				l.countLimited()
-				return false, 0, errCancelled(err)
-			}
-		}
-
-		l.mu.Lock()
-		ok, rem := l.take(1)
-		if ok {
-			l.allowed++
-		}
-		l.mu.Unlock()
-		if ok {
-			if err := ctx.Err(); err != nil {
-				l.refund(1)
-				l.countLimited()
-				return false, 0, errCancelled(err)
-			}
-			return true, rem, nil
-		}
-	}
+	return res.waited, res.remaining, nil
 }
 
 // run invokes fn under panic recovery and refunds the consumed token when the
 // callback requests it via [RateController.SkipToken].
-func run[T any](l *Limiter, ctx context.Context, op string, waited bool, remaining float64, fn func(ctx context.Context, rc RateController) (T, error)) (T, error) {
+func run[T any](l *Limiter, ctx context.Context, op string, waited bool, remaining float64, fn RateFunc[T]) (T, error) {
 	rc := &execution{
 		tokens: remaining,
 		rate:   l.cfg.rate,
@@ -383,8 +356,11 @@ func (l *Limiter) refund(n float64) {
 	l.mu.Unlock()
 }
 
-// Release returns n tokens to the bucket and reverses the admission counter
-// for a previously consumed request that is being aborted.
+// Release returns n tokens to the bucket and rolls back one Allowed count,
+// reversing a prior admission from [Limiter.AllowN] or [Limiter.WaitN]. Pass
+// the same n used for that admission — for example when aborting after WaitN
+// consumed n tokens. Tokens are capped at burst; Allowed is never driven
+// below zero.
 func (l *Limiter) Release(n float64) {
 	l.refund(n)
 }

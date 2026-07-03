@@ -5,21 +5,6 @@ import (
 	"sync/atomic"
 )
 
-// ObjectOption configures an [ObjectPool] created with [NewObjectPool].
-type ObjectOption[T any] func(*objectConfig[T])
-
-type objectConfig[T any] struct {
-	reset func(T)
-}
-
-// WithReset registers a hook invoked on every [ObjectPool.Put] before the
-// object is returned to the pool. Use it to clear an object's state (e.g.
-// `buf.Reset()`) so the next [ObjectPool.Get] sees a clean instance.
-// Default: nil (objects are pooled as-is).
-func WithReset[T any](fn func(T)) ObjectOption[T] {
-	return func(c *objectConfig[T]) { c.reset = fn }
-}
-
 // ObjectPool is a generic, type-safe object pool backed by [sync.Pool]. It
 // amortizes allocation of reusable objects (buffers, encoders, scratch
 // slices) across goroutines. It is safe for concurrent use.
@@ -36,22 +21,20 @@ type ObjectPool[T any] struct {
 }
 
 // NewObjectPool creates an [ObjectPool] that calls factory to construct a new
-// instance whenever the pool is empty. Panics if factory is nil.
-func NewObjectPool[T any](factory func() T, opts ...ObjectOption[T]) *ObjectPool[T] {
+// instance whenever the pool is empty. Returns [ErrNilFactory] when factory
+// is nil.
+func NewObjectPool[T any](factory func() T, opts ...ObjectOption[T]) (*ObjectPool[T], error) {
 	if factory == nil {
-		panic("poolx: NewObjectPool factory function is nil")
+		return nil, ErrNilFactory
 	}
-	var cfg objectConfig[T]
-	for _, opt := range opts {
-		opt(&cfg)
-	}
+	cfg := newObjectConfig(opts)
 
 	op := &ObjectPool[T]{reset: cfg.reset}
 	op.pool.New = func() any {
 		op.creates.Add(1)
 		return factory()
 	}
-	return op
+	return op, nil
 }
 
 // Get acquires an object from the pool, constructing a new one via the factory

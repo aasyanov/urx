@@ -118,6 +118,7 @@ The nominal delay before the retry following attempt `i` (0-based) is `base * 2^
 | Abort                      | `RetryController.Abort` stops after the current attempt and returns `ErrAborted` |
 | Panic safety               | A panicking attempt becomes a `*panix.PanicError`, handled as a normal failure   |
 | Error wrapping             | Every terminal error joins the underlying cause (test with `errors.Is`)          |
+| `attempts=` semantics      | `ErrExhausted` reports the stopping attempt; full budget exhaustion reports `maxAttempts` |
 | Controller scope           | A `RetryController` is valid only during its attempt; do not retain it           |
 
 
@@ -227,19 +228,26 @@ _, err := retryx.Do(ctx, func(ctx context.Context, _ retryx.RetryController) (Re
 ## API
 
 
-| Symbol            | Signature                                                                                                | Description                                                             |
-| ----------------- | -------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
-| `Do`              | `func Do[T any](ctx context.Context, fn RetryFunc[T], opts ...Option) (T, error)` | Retry fn with backoff until success, exhaustion, abort, or cancellation |
-| `RetryFunc[T]`    | `func(ctx context.Context, rc RetryController) (T, error)`                        | Callback type handed to `Do`                                            |
-| `WithMaxAttempts` | `func WithMaxAttempts(n int) Option`                                              | Total attempts including the first; ≤ 0 → 1                             |
-| `WithBackoff`     | `func WithBackoff(d time.Duration) Option`                                        | Base backoff; ≤ 0 ignored                                               |
-| `WithMaxBackoff`  | `func WithMaxBackoff(d time.Duration) Option`                                     | Cap on any single delay; ≤ 0 ignored                                    |
-| `WithJitter`      | `func WithJitter(enabled bool) Option`                                            | Enable/disable `[0.5, 1.5)` jitter                                      |
-| `WithRetryIf`     | `func WithRetryIf(fn func(error) bool) Option`                                   | Predicate deciding retryability                                         |
-| `WithOnRetry`     | `func WithOnRetry(fn func(attempt int, err error)) Option`                        | Callback after each retryable failure                                   |
-| `WithOp`          | `func WithOp(op string) Option`                                                  | Operation name in `*panix.PanicError`; empty ignored                     |
-| `Option`          | `type Option func(*config)`                                                       | Functional option for `Do`                                              |
-| `RetryController` | `interface{ Number; LastErr; Elapsed; Abort }`                                    | Per-attempt control handed to the callback                              |
+| Symbol                | Signature                                                                                                | Description                                                             |
+| --------------------- | -------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
+| `Do`                  | `func Do[T any](ctx context.Context, fn RetryFunc[T], opts ...Option) (T, error)` | Retry fn with backoff until success, exhaustion, abort, or cancellation |
+| `RetryFunc[T]`        | `func(ctx context.Context, rc RetryController) (T, error)`                        | Callback type handed to `Do`                                            |
+| `RetryController`     | `interface{ Number; LastErr; Elapsed; Abort }`                                    | Per-attempt control handed to the callback                              |
+| `Option`              | `type Option func(*config)`                                                       | Functional option for `Do`                                              |
+| `DefaultMaxAttempts`  | `const DefaultMaxAttempts = 3`                                                    | Default total attempts when `WithMaxAttempts` is omitted                |
+| `DefaultBackoff`      | `const DefaultBackoff = 100 * time.Millisecond`                                   | Default base backoff when `WithBackoff` is omitted                      |
+| `DefaultMaxBackoff`   | `const DefaultMaxBackoff = 10 * time.Second`                                      | Default delay cap when `WithMaxBackoff` is omitted                      |
+| `WithMaxAttempts`     | `func WithMaxAttempts(n int) Option`                                              | Total attempts including the first; ≤ 0 → 1                             |
+| `WithBackoff`         | `func WithBackoff(d time.Duration) Option`                                        | Base backoff; ≤ 0 ignored                                               |
+| `WithMaxBackoff`      | `func WithMaxBackoff(d time.Duration) Option`                                     | Cap on any single delay; ≤ 0 ignored                                    |
+| `WithJitter`          | `func WithJitter(enabled bool) Option`                                            | Enable/disable `[0.5, 1.5)` jitter                                      |
+| `WithRetryIf`         | `func WithRetryIf(fn func(error) bool) Option`                                   | Predicate deciding retryability                                         |
+| `WithOnRetry`         | `func WithOnRetry(fn func(attempt int, err error)) Option`                        | Callback after each retryable failure                                   |
+| `WithOp`              | `func WithOp(op string) Option`                                                  | Operation name in `*panix.PanicError`; empty ignored                     |
+| `ErrExhausted`        | `var ErrExhausted error`                                                          | All attempts failed or a non-retryable error stopped the loop           |
+| `ErrCancelled`        | `var ErrCancelled error`                                                          | Context cancelled or expired before/during retry                        |
+| `ErrAborted`          | `var ErrAborted error`                                                            | Callback invoked `RetryController.Abort`                              |
+| `ErrNilFunc`          | `var ErrNilFunc error`                                                            | Supplied callback was nil                                               |
 
 
 ### RetryController
@@ -272,9 +280,9 @@ _, err := retryx.Do(ctx, func(ctx context.Context, _ retryx.RetryController) (Re
 
 | Error          | Condition                                                                                   |
 | -------------- | ------------------------------------------------------------------------------------------- |
-| `ErrExhausted` | Every attempt failed, or a non-retryable error stopped the loop (wraps the last cause)      |
-| `ErrCancelled` | The context was cancelled or expired, before an attempt or during backoff (wraps ctx.Err()) |
-| `ErrAborted`   | The callback called `RetryController.Abort` (wraps the last cause)                          |
+| `ErrExhausted` | Every attempt failed, or a non-retryable error stopped the loop (wraps the last cause). The message includes `attempts=N`: when [WithRetryIf] rejects an error, `N` is the 1-based attempt that stopped the loop; when the full budget is consumed, `N` equals `maxAttempts`. |
+| `ErrCancelled` | The context was cancelled or expired, before an attempt or during backoff (wraps `ctx.Err()`) |
+| `ErrAborted`   | The callback called `RetryController.Abort` (wraps the last cause; message includes `attempt=N`) |
 | `ErrNilFunc`   | The supplied function was nil                                                               |
 
 
@@ -289,7 +297,7 @@ A panicking attempt that exhausts the budget surfaces as `ErrExhausted` wrapping
 > **The default retries everything.** Without `WithRetryIf`, permanent failures (validation, auth) burn the full attempt budget. Always classify errors in production.
 
 > [!NOTE]
-> **retryx** does not impose a per-attempt deadline.** A single attempt can block indefinitely if `fn` ignores `ctx`. Wrap each attempt with `toutx.Execute` for a hard per-try timeout.
+> **retryx does not impose a per-attempt deadline.** A single attempt can block indefinitely if `fn` ignores `ctx`. Wrap each attempt with `toutx.Execute` for a hard per-try timeout.
 
 > [!NOTE]
 > **Jitter can exceed `maxBackoff` slightly.** Because jitter is applied after the cap, a delay can reach up to `1.5 × maxBackoff`. This is intentional decorrelation, not a bug.
@@ -300,7 +308,7 @@ A panicking attempt that exhausts the budget surfaces as `ErrExhausted` wrapping
 
 ## Benchmarks
 
-> CPU: Intel i7-10510U · OS: Windows 10 · Go 1.24 · `-benchmem -count=1`
+> CPU: Intel i7-10510U · OS: Windows 10 · Go 1.24 · `-benchmem -count=3`
 
 
 | Benchmark               | ns/op  | B/op | allocs/op |
@@ -324,7 +332,7 @@ A panicking attempt that exhausts the budget surfaces as `ErrExhausted` wrapping
 
 | Metric         | Value                          |
 | -------------- | ------------------------------ |
-| Test functions | 26                             |
+| Test functions | 42                             |
 | Benchmarks     | 4                              |
 | Fuzz targets   | 1                              |
 | Examples       | 4                              |
@@ -342,6 +350,7 @@ retryx/
 ├── types.go            # RetryController + private attempt impl
 ├── errors.go           # ErrExhausted, ErrCancelled, ErrAborted, ErrNilFunc
 ├── retryx_test.go      # unit + table-driven tests
+├── errors_test.go      # sentinel wrapper contract tests
 ├── bench_test.go       # benchmarks (sequential + parallel)
 ├── fuzz_test.go        # FuzzDo — attempt-budget invariants
 ├── example_test.go     # runnable GoDoc examples

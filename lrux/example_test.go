@@ -25,29 +25,29 @@ func ExampleCache_GetOrCompute() {
 	c := lrux.New[string, int]()
 	defer c.Close()
 
-	value := c.GetOrCompute("expensive", func() int {
-		return 1 + 1 // pretend this is a costly database query
+	ctx := context.Background()
+	value, err := c.GetOrCompute(ctx, "expensive", func(ctx context.Context) (int, error) {
+		return 1 + 1, nil // pretend this is a costly database query
 	}, lrux.WithSingleflight())
-
-	fmt.Println(value)
-	// Output: 2
+	fmt.Println(value, err)
+	// Output: 2 <nil>
 }
 
-// ExampleCache_GetOrComputeCtx demonstrates context-aware computation with
-// error propagation: a failing compute leaves nothing cached.
-func ExampleCache_GetOrComputeCtx() {
+// ExampleCache_GetOrCompute_error demonstrates error propagation: a failing
+// compute leaves nothing cached.
+func ExampleCache_GetOrCompute_error() {
 	c := lrux.New[string, string]()
 	defer c.Close()
 
 	ctx := context.Background()
-	v, err := c.GetOrComputeCtx(ctx, "user:1", func(ctx context.Context) (string, error) {
+	v, err := c.GetOrCompute(ctx, "user:1", func(ctx context.Context) (string, error) {
 		return "Ada", nil
 	})
 	fmt.Println(v, err)
 	// Output: Ada <nil>
 }
 
-// ExampleCache_OnEvict demonstrates reacting to evictions, for example to
+// ExampleCache_onEvict demonstrates reacting to evictions, for example to
 // close resources when entries leave the cache.
 func ExampleCache_onEvict() {
 	c := lrux.New[string, int](

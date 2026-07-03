@@ -11,7 +11,7 @@ go get github.com/aasyanov/urx
 ```
 
 > [!IMPORTANT]
-> **toutx** enforces a deadline on the *caller*, not on the *callee*.** When the timeout fires, `Execute` returns immediately with `ErrDeadlineExceeded`, but the function goroutine keeps running until it observes its cancelled context. A function that ignores `ctx.Done()` will leak a goroutine. Always honour the context inside the callback.
+> **toutx** enforces a deadline on the *caller*, not on the *callee*. When the timeout fires, `Execute` returns immediately with `ErrDeadlineExceeded`, but the function goroutine keeps running until it observes its cancelled context. A function that ignores `ctx.Done()` will leak a goroutine. Always honour the context inside the callback.
 
 ## The Problem
 
@@ -202,7 +202,7 @@ report, err := retryx.Do(ctx, func(ctx context.Context, rc retryx.RetryControlle
 
 | Symbol              | Signature                                                                                                                                                   | Description                                                                |
 | ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------- |
-| `Execute`           | `func Execute[T any](ctx context.Context, timeout time.Duration, fn func(ctx context.Context, tc TimeoutController) (T, error), opts ...Option) (T, error)` | Run fn under a deadline; classify deadline vs cancellation; recover panics |
+| `Execute`           | `func Execute[T any](ctx context.Context, timeout time.Duration, fn TimeoutFunc[T], opts ...Option) (T, error)`                                             | Run fn under a deadline; classify deadline vs cancellation; recover panics |
 | `New`               | `func New(opts ...Option) *Timer`                                                                                                                           | Create a reusable preset of timeout + op                                   |
 | `Timer.Timeout`     | `func (t *Timer) Timeout() time.Duration`                                                                                                                   | The timer's configured timeout                                             |
 | `Timer.Op`          | `func (t *Timer) Op() string`                                                                                                                               | The timer's configured operation name                                      |
@@ -211,6 +211,7 @@ report, err := retryx.Do(ctx, func(ctx context.Context, rc retryx.RetryControlle
 | `WithTimer`         | `func WithTimer(t *Timer) Option`                                                                                                                           | Seed a call from a `Timer` preset (nil ignored)                            |
 | `Option`            | `type Option func(*config)`                                                                                                                                 | Functional option for `Execute` and `New`                                  |
 | `TimeoutController` | `interface{ Op; Timeout; Deadline; Elapsed; Remaining }`                                                                                                    | Per-call budget exposed to the callback                                    |
+| `TimeoutFunc`       | `type TimeoutFunc[T any] func(ctx context.Context, tc TimeoutController) (T, error)`                                                                      | Unit of work executed by `Execute`                                         |
 | `DefaultTimeout`    | `const = 30 * time.Second`                                                                                                                                  | Timeout applied when none is configured                                    |
 
 
@@ -287,10 +288,10 @@ A panicking function does not produce a sentinel — it returns a `*panix.PanicE
 
 | Metric         | Value                          |
 | -------------- | ------------------------------ |
-| Test functions | 21                             |
+| Test functions | 38                             |
 | Benchmarks     | 3                              |
 | Fuzz targets   | 1                              |
-| Examples       | 4                              |
+| Examples       | 5                              |
 | Coverage       | 100.0%                         |
 | Race detector  | All pass                       |
 | External deps  | 0 (panix; testify in dev only) |
@@ -300,13 +301,15 @@ A panicking function does not produce a sentinel — it returns a `*panix.PanicE
 
 ```text
 toutx/
-├── toutx.go            # package doc + Execute[T]
+├── toutx.go            # package doc + Execute[T] + resolveDeadline
 ├── options.go          # config, Option, WithTimeout/WithOp, Timer, WithTimer
-├── types.go            # TimeoutController + private execution impl
+├── types.go            # TimeoutController, TimeoutFunc, private execution impl
 ├── errors.go           # ErrDeadlineExceeded, ErrCancelled, ErrNilFunc
 ├── toutx_test.go       # unit + table-driven tests
+├── await_test.go       # white-box awaitResult / normalizeResult / resolveDeadline
+├── errors_test.go      # sentinel wrapper unit tests
 ├── bench_test.go       # benchmarks (sequential + parallel)
-├── fuzz_test.go        # FuzzExecute — timeout/duration invariants
+├── fuzz_test.go        # FuzzExecute — timeout/duration/cancellation invariants
 ├── example_test.go     # runnable GoDoc examples
 ├── footprint_test.go   # struct size guards
 └── README.md           # this file

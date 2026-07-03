@@ -96,7 +96,9 @@ It is the deliberately small piece the other layers build on.
 | ------------------- | ------------------------------------------------------------------------------------------ |
 | Partial-file safety | Fields not present in the file retain their prior values.                                  |
 | Validator timing    | `Validate` runs after a successful decode, or before writing when creating a missing file. |
-| AutoFix reporting   | Even when `fix=true` repairs a field, the original violation is still reported.            |
+| AutoFix reporting   | When `fix=true` repairs values but violations remain, they are joined under `ErrValidationFailed`. A validator that returns `nil` after repair succeeds. |
+| Marshal safety      | Unencodable values (including YAML encoder panics) return `ErrWriteFailed`; callers never crash. |
+| Text-file newline   | Every [`Marshal`]/`Save` payload ends with a trailing `\n`.                                |
 | Sentinel errors     | Every failure wraps a package sentinel; use [`errors.Is`].                                 |
 | Injectable I/O      | `Load`/`Save` never touch disk when [`WithReader`]/[`WithWriter`] are supplied.            |
 | No urx imports      | cfgx imports no other urx subpackage; layering is via pointer sharing.                     |
@@ -246,10 +248,13 @@ cfgx.Save("config.yaml", &cfg) // write the corrected values back
 > Validate at the *end* of the pipeline, not inside `Load`, when you layer env and flags on top. `Load` validates the file-only state; if env or flags will still override fields, call `cfg.Validate(false)` once after the whole chain so you validate the final values.
 
 > [!WARNING]
-> `WithAutoFix` still reports. A repaired field does not suppress the error — `Load` returns `ErrValidationFailed` describing what was wrong. Check `errors.Is(err, ErrValidationFailed)` and decide whether a repaired config is acceptable.
+> `WithAutoFix` still reports when the [`Validator`] returns errors after the fix pass. A validator that repairs every violation and returns `nil` produces no error — `Load`/`Parse` succeed. When errors remain, check `errors.Is(err, ErrValidationFailed)` and decide whether a partially repaired config is acceptable.
+
+> [!WARNING]
+> Empty input is codec-dependent. YAML and TOML accept an empty byte slice (dst keeps its prior values); JSON returns [`ErrParseFailed`]. Do not assume all three codecs treat `""` the same way.
 
 > [!NOTE]
-> Codecs normalise some strings: JSON rewrites invalid UTF-8 to U+FFFD and YAML trims surrounding whitespace. Treat config values as well-formed UTF-8; do not rely on byte-exact preservation of pathological strings.
+> Every [`Save`] and create-if-missing write ends with a trailing newline (POSIX text-file convention). Codecs may still normalise strings: JSON rewrites invalid UTF-8 to U+FFFD and YAML trims surrounding whitespace. Treat config values as well-formed UTF-8; do not rely on byte-exact preservation of pathological strings.
 
 ## Safety and Concurrency
 
@@ -260,15 +265,17 @@ cfgx.Save("config.yaml", &cfg) // write the corrected values back
 > CPU: Intel i7-10510U · OS: Windows 10 · Go 1.24 · `-benchmem -count=1`
 
 
-| Benchmark           | ns/op | B/op | allocs/op |
-| ------------------- | ----- | ---- | --------- |
-| Parse_YAML          | 10188 | 7472 | 54        |
-| Parse_JSON          | 1039  | 272  | 7         |
-| Parse_TOML          | 5767  | 3544 | 37        |
-| Marshal_YAML        | 7998  | 6832 | 27        |
-| Marshal_JSON        | 921   | 96   | 2         |
-| Load_InjectedReader | 29359 | 7472 | 54        |
-| ResolveFormat       | 43    | 0    | 0         |
+| Benchmark                    | ns/op | B/op | allocs/op |
+| ---------------------------- | ----- | ---- | --------- |
+| Parse_YAML                   | 28486 | 7472 | 54        |
+| Parse_JSON                   | 6467  | 272  | 7         |
+| Parse_TOML                   | 23544 | 3544 | 37        |
+| Parse_JSON_Parallel          | 2037  | 272  | 7         |
+| Marshal_YAML                 | 18981 | 6832 | 27        |
+| Marshal_JSON                 | 1936  | 96   | 2         |
+| Load_InjectedReader          | 22626 | 7472 | 54        |
+| Load_InjectedReader_Parallel | 36580 | 7472 | 54        |
+| ResolveFormat                | 60    | 0    | 0         |
 
 
 ### Analysis
@@ -277,6 +284,7 @@ cfgx.Save("config.yaml", &cfg) // write the corrected values back
 - **TOML sits between the two.** BurntSushi/toml decodes in a single pass but still allocates per-key metadata.
 - **ResolveFormat is 0 allocs / ~43 ns** — extension detection is a lowercase + switch, off the decode hot path entirely.
 - **Load_InjectedReader ≈ Parse_YAML + reader overhead.** The gap reflects the closure call and the reflect-based pointer check in `requirePointer`; both are one-time per load.
+- **Parallel benchmarks** (`Parse_JSON_Parallel`, `Load_InjectedReader_Parallel`) confirm the package is stateless: no mutex, no shared cache — goroutines scale linearly because each call owns its own `dst`.
 - **Allocation floor is the codec's, not cfgx's.** cfgx adds a constant handful of allocations (the option closure application and the validator interface check); everything else is the third-party decoder. Config loading happens once at startup, so absolute speed matters less than correctness — but JSON is the clear choice when it does.
 
 ## Quality
@@ -284,11 +292,11 @@ cfgx.Save("config.yaml", &cfg) // write the corrected values back
 
 | Metric         | Value                                             |
 | -------------- | ------------------------------------------------- |
-| Test functions | 20                                                |
-| Benchmarks     | 7                                                 |
+| Test functions | 32                                                |
+| Benchmarks     | 9                                                 |
 | Fuzz targets   | 2                                                 |
-| Examples       | 4                                                 |
-| Coverage       | 96.7%                                             |
+| Examples       | 5                                                 |
+| Coverage       | 99.2%                                             |
 | Race detector  | All pass                                          |
 | External deps  | 2 (yaml.v3, BurntSushi/toml; testify in dev only) |
 
@@ -303,7 +311,8 @@ cfgx/
 ├── codec.go           # resolveFormat, marshal, unmarshal
 ├── errors.go          # sentinel errors + internal wrapper helpers
 ├── cfgx_test.go       # unit + table-driven tests
-├── bench_test.go      # benchmarks per codec
+├── footprint_test.go  # testx.AssertFootprint bounds for core types
+├── bench_test.go      # benchmarks per codec (sequential + parallel)
 ├── fuzz_test.go       # never-panic + round-trip fuzz targets
 ├── example_test.go    # runnable GoDoc examples (incl. the pipeline)
 └── README.md          # this file

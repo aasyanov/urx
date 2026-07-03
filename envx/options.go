@@ -13,6 +13,9 @@ const keySeparator = "_"
 // type: "a,b,c" → []string{"a", "b", "c"}.
 const listSeparator = ","
 
+// defaultPrefix is the prefix applied when [WithPrefix] is not supplied.
+const defaultPrefix = ""
+
 type config struct {
 	prefix string
 	lookup func(string) (string, bool)
@@ -20,6 +23,7 @@ type config struct {
 
 func defaultConfig() config {
 	return config{
+		prefix: defaultPrefix,
 		lookup: os.LookupEnv,
 	}
 }
@@ -29,7 +33,7 @@ type Option func(*config)
 
 // WithPrefix sets a prefix prepended to all variable names, joined with "_".
 // A trailing underscore in prefix is trimmed and the prefix is upper-cased.
-// Default: no prefix.
+// Default: empty string (no prefix).
 //
 // Example: WithPrefix("APP") makes Bind(env, "PORT", 0) read "APP_PORT".
 func WithPrefix(prefix string) Option {

@@ -9,6 +9,11 @@ import (
 // [sync.Map] that adds compile-time key/value typing and an O(1) [Map.Len].
 // It is safe for concurrent use from multiple goroutines.
 //
+// Mutating operations serialize length accounting through an internal mutex
+// so [Map.Len] stays consistent with live entries even when [Map.Clear] runs
+// concurrently with [Map.Store] or [Map.Delete]. Reads ([Map.Load], [Map.Range],
+// [Map.Len]) do not take the mutex.
+//
 // Like [sync.Map], Map is optimized for two cases: keys that are written once
 // but read many times, and disjoint key sets across goroutines. For workloads
 // dominated by writes to a shared key set, a plain map guarded by a
@@ -19,6 +24,9 @@ import (
 type Map[K comparable, V any] struct {
 	m   sync.Map
 	len atomic.Int64
+	// mu serializes length updates with [Map.Clear] so Len stays consistent
+	// when Clear runs concurrently with Store, Delete, and related ops.
+	mu sync.Mutex
 }
 
 // NewMap creates an empty [Map].
@@ -39,6 +47,8 @@ func (m *Map[K, V]) Load(key K) (V, bool) {
 
 // Store sets the value for key, overwriting any existing value.
 func (m *Map[K, V]) Store(key K, value V) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if _, loaded := m.m.Swap(key, value); !loaded {
 		m.len.Add(1)
 	}
@@ -47,6 +57,8 @@ func (m *Map[K, V]) Store(key K, value V) {
 // Swap stores value for key and returns the previous value if one was
 // present. The loaded result is true if an existing value was replaced.
 func (m *Map[K, V]) Swap(key K, value V) (previous V, loaded bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	prev, loaded := m.m.Swap(key, value)
 	if !loaded {
 		m.len.Add(1)
@@ -58,6 +70,8 @@ func (m *Map[K, V]) Swap(key K, value V) (previous V, loaded bool) {
 
 // Delete removes the entry for key. It is a no-op if the key is absent.
 func (m *Map[K, V]) Delete(key K) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if _, loaded := m.m.LoadAndDelete(key); loaded {
 		m.len.Add(-1)
 	}
@@ -66,6 +80,8 @@ func (m *Map[K, V]) Delete(key K) {
 // LoadAndDelete deletes the value for key, returning the previous value if
 // any. The loaded result is true if the key was present.
 func (m *Map[K, V]) LoadAndDelete(key K) (value V, loaded bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	val, loaded := m.m.LoadAndDelete(key)
 	if !loaded {
 		var zero V
@@ -79,6 +95,8 @@ func (m *Map[K, V]) LoadAndDelete(key K) (value V, loaded bool) {
 // stores and returns value. The loaded result is true if the value was
 // loaded, false if stored.
 func (m *Map[K, V]) LoadOrStore(key K, value V) (actual V, loaded bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	val, loaded := m.m.LoadOrStore(key, value)
 	if !loaded {
 		m.len.Add(1)
@@ -101,9 +119,11 @@ func (m *Map[K, V]) Len() int {
 }
 
 // Clear removes all entries from the map and resets [Map.Len] to zero.
-// Concurrent stores may add entries while Clear runs; those entries remain
-// after Clear returns and Len is adjusted by the usual store/delete paths.
+// Entries added concurrently while Clear holds its lock remain after Clear
+// returns; [Map.Len] reflects the live count via the usual store/delete paths.
 func (m *Map[K, V]) Clear() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.m.Clear()
 	m.len.Store(0)
 }

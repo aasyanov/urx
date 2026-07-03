@@ -123,9 +123,10 @@ func (e *execution) Trip() { e.tripped = true }
 // compile-time assertion that execution satisfies the public interface.
 var _ CircuitController = (*execution)(nil)
 
-// Stats holds a point-in-time snapshot of breaker counters. All cumulative
-// fields are reset by [Breaker.ResetStats]; State, Failures, and MaxFailures
-// reflect the live circuit at snapshot time.
+// Stats holds a read-only, point-in-time snapshot of breaker counters.
+// [Breaker.Stats] reads the live state without lazy Open→HalfOpen promotion.
+// All cumulative fields are reset by [Breaker.ResetStats]; State, Failures, and
+// MaxFailures reflect the circuit at snapshot time.
 type Stats struct {
 	// State is the circuit state at snapshot time.
 	State State `json:"state"`

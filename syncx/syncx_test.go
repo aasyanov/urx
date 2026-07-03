@@ -102,6 +102,38 @@ func TestLazy_ResetIdempotent(t *testing.T) {
 	})
 }
 
+func TestLazy_GetRecoversInitPanic(t *testing.T) {
+	l, err := NewLazy(func() (int, error) {
+		panic("init crashed")
+	})
+	require.NoError(t, err)
+
+	v, err := l.Get()
+	assert.Zero(t, v)
+	pe := testx.RequirePanicError(t, err, opLazy)
+	assert.Equal(t, "init crashed", pe.Value)
+	assert.False(t, l.Done())
+}
+
+func TestLazy_GetRetriesAfterInitPanic(t *testing.T) {
+	var calls atomic.Int64
+	l, err := NewLazy(func() (int, error) {
+		if calls.Add(1) < 2 {
+			panic("transient")
+		}
+		return 9, nil
+	})
+	require.NoError(t, err)
+
+	_, err1 := l.Get()
+	testx.RequirePanicError(t, err1, opLazy)
+
+	v, err2 := l.Get()
+	require.NoError(t, err2)
+	assert.Equal(t, 9, v)
+	assert.Equal(t, int64(2), calls.Load())
+}
+
 func TestLazy_ConcurrentGet(t *testing.T) {
 	var calls atomic.Int64
 	l, err := NewLazy(func() (int, error) {
@@ -273,7 +305,33 @@ func TestMap_Clear_Concurrent(t *testing.T) {
 		m.Store(999, 999)
 		m.Delete(999)
 	})
-	assert.GreaterOrEqual(t, m.Len(), 0)
+
+	seen := 0
+	m.Range(func(int, int) bool {
+		seen++
+		return true
+	})
+	assert.Equal(t, m.Len(), seen)
+}
+
+func TestMap_ClearLenMatchesRangeUnderConcurrency(t *testing.T) {
+	m := NewMap[int, int]()
+	for i := range 100 {
+		m.Store(i, i)
+	}
+
+	testx.HammerVoid(50, 200, func() {
+		m.Clear()
+		m.Store(999, 999)
+		m.Delete(999)
+	})
+
+	seen := 0
+	m.Range(func(int, int) bool {
+		seen++
+		return true
+	})
+	assert.Equal(t, m.Len(), seen, "Len must match the number of entries Range visits")
 }
 
 func TestMap_ConcurrentDisjointKeys(t *testing.T) {
@@ -284,8 +342,7 @@ func TestMap_ConcurrentDisjointKeys(t *testing.T) {
 		m.Load(k)
 		m.Delete(k)
 	})
-	// Disjoint churn must not corrupt the counter into negative territory.
-	assert.GreaterOrEqual(t, m.Len(), 0)
+	assert.Equal(t, 0, m.Len())
 }
 
 func TestMap_ConcurrentLenConsistency(t *testing.T) {
@@ -319,13 +376,55 @@ func TestGroup_CollectsFirstError(t *testing.T) {
 	sentinel := errors.New("first")
 
 	g.Go(func(context.Context) error { return sentinel })
-	g.Go(func(ctx context.Context) error {
-		<-ctx.Done() // cancelled by the failing sibling
-		return ctx.Err()
+	g.Go(func(context.Context) error {
+		time.Sleep(10 * time.Millisecond)
+		return nil
 	})
 
 	err := g.Wait()
-	require.Error(t, err)
+	require.ErrorIs(t, err, sentinel)
+}
+
+func TestGroup_ParentContextCancelled(t *testing.T) {
+	parent, cancel := context.WithCancel(context.Background())
+	g, ctx := NewGroup(parent)
+	cancel()
+
+	observed := make(chan struct{})
+	g.Go(func(c context.Context) error {
+		<-c.Done()
+		close(observed)
+		return c.Err()
+	})
+
+	_ = g.Wait()
+	select {
+	case <-observed:
+	default:
+		t.Fatal("task should observe parent cancellation")
+	}
+	require.ErrorIs(t, ctx.Err(), context.Canceled)
+}
+
+func TestGroup_ReuseAfterWait(t *testing.T) {
+	g, ctx := NewGroup(context.Background())
+	g.Go(func(context.Context) error { return nil })
+	require.NoError(t, g.Wait())
+
+	select {
+	case <-ctx.Done():
+	default:
+		t.Fatal("derived context should be cancelled after Wait")
+	}
+
+	errCh := make(chan error, 1)
+	g.Go(func(c context.Context) error {
+		errCh <- c.Err()
+		return c.Err()
+	})
+	err := g.Wait()
+	require.ErrorIs(t, err, context.Canceled)
+	require.ErrorIs(t, <-errCh, context.Canceled)
 }
 
 func TestGroup_AllSucceed(t *testing.T) {

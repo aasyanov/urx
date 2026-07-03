@@ -9,6 +9,9 @@
 *.test
 cover.out
 coverage.txt
+coverprofile
+cover
+coverage
 benchmark.txt
 results.txt
 

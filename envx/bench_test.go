@@ -10,6 +10,7 @@ func benchEnv() *Env {
 		"PORT": "9090",
 		"HOST": "db.local",
 		"DUR":  "1m30s",
+		"AT":   "2025-01-02T15:04:05Z",
 		"LIST": "a,b,c,d,e",
 	})))
 }
@@ -54,6 +55,14 @@ func BenchmarkBind_Absent(b *testing.B) {
 	}
 }
 
+func BenchmarkBind_Time(b *testing.B) {
+	env := benchEnv()
+	b.ResetTimer()
+	for b.Loop() {
+		_ = Bind(env, "AT", time.Time{})
+	}
+}
+
 func BenchmarkValidate(b *testing.B) {
 	env := benchEnv()
 	Bind(env, "PORT", 0)
@@ -69,5 +78,12 @@ func BenchmarkParse_Int(b *testing.B) {
 	b.ResetTimer()
 	for b.Loop() {
 		_, _ = parse[int]("9090")
+	}
+}
+
+func BenchmarkParse_Time(b *testing.B) {
+	b.ResetTimer()
+	for b.Loop() {
+		_, _ = parse[time.Time]("2025-01-02T15:04:05Z")
 	}
 }

@@ -19,17 +19,18 @@ import (
 // (for example, the chosen backend is unreachable), freeing its slot without
 // failing the whole call.
 type HedgeController interface {
-	// Attempt returns the 1-based attempt number of this copy: 1 is the
-	// original request, 2 the first hedge, 3 the second, and so on.
+	// Attempt returns the 1-based launch ordinal of this copy among non-nil
+	// backends: 1 is the original request, 2 the first hedge, and so on. Nil
+	// slots in an [ExecuteMulti] slice are not counted.
 	Attempt() int
 
 	// IsHedge reports whether this copy is a speculative hedge (Attempt > 1)
 	// rather than the original request.
 	IsHedge() bool
 
-	// Backends returns the total number of copies scheduled for this call,
-	// i.e. the effective parallelism after capping at [WithMaxParallel]. Use
-	// it to size per-backend selection (replica index = Attempt-1).
+	// Backends returns the number of launchable copies scheduled for this call:
+	// non-nil entries after capping at [WithMaxParallel], excluding skipped nil
+	// slots. Use it to size per-backend selection (replica index = Attempt-1).
 	Backends() int
 
 	// Elapsed returns the wall-clock time since the first copy was launched,

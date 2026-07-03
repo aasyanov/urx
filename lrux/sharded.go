@@ -18,6 +18,7 @@ const parallelBatchThreshold = 64
 //
 // Create with [NewSharded] and configure via [ShardedOption] functions. Call
 // [ShardedCache.Close] when done to stop every shard's cleanup goroutine.
+// Close is idempotent and returns nil.
 type ShardedCache[K comparable, V any] struct {
 	shards    []*Cache[K, V]
 	shardMask uint64
@@ -84,14 +85,9 @@ func (c *ShardedCache[K, V]) GetEntry(key K) *Entry[K, V] { return c.shard(key).
 func (c *ShardedCache[K, V]) TTL(key K) time.Duration { return c.shard(key).TTL(key) }
 
 // GetOrCompute returns the value under key or computes and stores one.
-func (c *ShardedCache[K, V]) GetOrCompute(key K, compute func() V, opts ...ComputeOption) V {
-	return c.shard(key).GetOrCompute(key, compute, opts...)
-}
-
-// GetOrComputeCtx returns the value under key or computes one with context
-// and error support. See [Cache.GetOrComputeCtx].
-func (c *ShardedCache[K, V]) GetOrComputeCtx(ctx context.Context, key K, compute func(ctx context.Context) (V, error), opts ...ComputeOption) (V, error) {
-	return c.shard(key).GetOrComputeCtx(ctx, key, compute, opts...)
+// See [Cache.GetOrCompute].
+func (c *ShardedCache[K, V]) GetOrCompute(ctx context.Context, key K, compute func(ctx context.Context) (V, error), opts ...ComputeOption) (V, error) {
+	return c.shard(key).GetOrCompute(ctx, key, compute, opts...)
 }
 
 // Resize sets the per-shard capacity, evicting least-recently-used entries in
@@ -137,11 +133,14 @@ func (c *ShardedCache[K, V]) ExpireOld() int {
 	return total
 }
 
-// Close closes every shard. It is idempotent.
-func (c *ShardedCache[K, V]) Close() {
+// Close closes every shard. It is idempotent and always returns nil.
+func (c *ShardedCache[K, V]) Close() error {
 	for _, s := range c.shards {
-		s.Close()
+		if err := s.Close(); err != nil {
+			return err
+		}
 	}
+	return nil
 }
 
 // IsClosed reports whether the shards have been closed.

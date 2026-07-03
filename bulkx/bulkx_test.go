@@ -77,6 +77,10 @@ func TestWithOp_OverridesDefault(t *testing.T) {
 	assert.Equal(t, opExecute, newConfig(nil).opOrDefault())
 	assert.Equal(t, "api.search", newConfig([]Option{WithOp("api.search")}).opOrDefault())
 	assert.Equal(t, opExecute, newConfig([]Option{WithOp("")}).opOrDefault())
+
+	assert.Equal(t, opTryExecute, newConfig(nil).opOrDefaultTry())
+	assert.Equal(t, "api.search", newConfig([]Option{WithOp("api.search")}).opOrDefaultTry())
+	assert.Equal(t, opTryExecute, newConfig([]Option{WithOp("")}).opOrDefaultTry())
 }
 
 // --- Execute: happy path ---
@@ -165,6 +169,31 @@ func TestExecute_ReturnsErrClosedAfterClose(t *testing.T) {
 			func(context.Context, BulkController) (int, error) { return 1, nil })
 		return err
 	}, ErrClosed, "Execute")
+}
+
+func TestExecute_BlockedWaiterRejectedOnClose(t *testing.T) {
+	b := New(WithMaxConcurrent(1), WithTimeout(time.Minute))
+	tokens := fill(t, b, 1)
+
+	waiting := make(chan error, 1)
+	go func() {
+		_, err := Execute(b, context.Background(),
+			func(context.Context, BulkController) (int, error) { return 1, nil })
+		waiting <- err
+	}()
+
+	testx.Eventually(t, func() bool { return !b.Allow() }, time.Second)
+	time.Sleep(50 * time.Millisecond)
+	require.NoError(t, b.Close())
+
+	select {
+	case err := <-waiting:
+		require.ErrorIs(t, err, ErrClosed)
+	case <-time.After(time.Second):
+		t.Fatal("blocked Execute did not wake on Close")
+	}
+
+	release(tokens)
 }
 
 func TestExecute_ReturnsErrNilFunc(t *testing.T) {
@@ -297,6 +326,145 @@ func TestTryExecute_ReturnsErrNilFunc(t *testing.T) {
 	assert.False(t, ok)
 }
 
+func TestTryExecute_ReturnsErrCancelledOnCancelledContext(t *testing.T) {
+	b := New()
+	defer func() { require.NoError(t, b.Close()) }()
+
+	called := false
+	ok, _, err := TryExecute(b, testx.CancelledCtx(),
+		func(context.Context, BulkController) (int, error) {
+			called = true
+			return 1, nil
+		})
+	require.ErrorIs(t, err, ErrCancelled)
+	require.ErrorIs(t, err, context.Canceled)
+	assert.False(t, ok)
+	assert.False(t, called, "fn must not run for a cancelled context")
+	assert.Equal(t, 0, b.Active(), "cancelled request must not consume a slot")
+}
+
+func TestTryExecute_ReturnsErrCancelledOnExpiredDeadline(t *testing.T) {
+	b := New()
+	defer func() { require.NoError(t, b.Close()) }()
+
+	ok, _, err := TryExecute(b, testx.ExpiredCtx(),
+		func(context.Context, BulkController) (int, error) { return 1, nil })
+	require.ErrorIs(t, err, ErrCancelled)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	assert.False(t, ok)
+}
+
+func TestTryExecute_ReleasesSlotAfterReturn(t *testing.T) {
+	b := New(WithMaxConcurrent(10))
+	defer func() { require.NoError(t, b.Close()) }()
+
+	ok, _, err := TryExecute(b, context.Background(),
+		func(_ context.Context, bc BulkController) (int, error) {
+			assert.Equal(t, 1, b.Active())
+			assert.Equal(t, 1, bc.Active())
+			return 1, nil
+		})
+	require.NoError(t, err)
+	assert.True(t, ok)
+	assert.Equal(t, 0, b.Active())
+}
+
+func TestTryExecute_RecoversPanic(t *testing.T) {
+	b := New()
+	defer func() { require.NoError(t, b.Close()) }()
+
+	ok, _, err := TryExecute(b, context.Background(),
+		func(context.Context, BulkController) (int, error) {
+			panic("kaboom")
+		})
+	assert.True(t, ok)
+	testx.RequirePanicError(t, err, opTryExecute)
+	assert.Equal(t, 0, b.Active(), "slot released even on panic")
+}
+
+func TestTryExecute_RecoversPanic_WithCustomOp(t *testing.T) {
+	b := New(WithOp("api.search"))
+	defer func() { require.NoError(t, b.Close()) }()
+
+	ok, _, err := TryExecute(b, context.Background(),
+		func(context.Context, BulkController) (int, error) {
+			panic("kaboom")
+		})
+	assert.True(t, ok)
+	testx.RequirePanicError(t, err, "api.search")
+}
+
+// errOnSecondCheckCtx returns nil from Err on the first call and context.Canceled
+// thereafter, exercising TryExecute's post-slot context re-check.
+type errOnSecondCheckCtx struct {
+	context.Context
+	n atomic.Int32
+}
+
+func (c *errOnSecondCheckCtx) Err() error {
+	if c.n.Add(1) == 1 {
+		return nil
+	}
+	return context.Canceled
+}
+
+func TestTryExecute_ReturnsErrCancelledAfterSlotClaim(t *testing.T) {
+	b := New(WithMaxConcurrent(10))
+	defer func() { require.NoError(t, b.Close()) }()
+
+	ok, _, err := TryExecute(b, &errOnSecondCheckCtx{Context: context.Background()},
+		func(context.Context, BulkController) (int, error) { return 1, nil })
+	require.ErrorIs(t, err, ErrCancelled)
+	require.ErrorIs(t, err, context.Canceled)
+	assert.False(t, ok)
+	assert.Equal(t, 0, b.Active())
+}
+
+func TestTryExecute_ReturnsErrClosedViaCommitSlot(t *testing.T) {
+	b := New(WithMaxConcurrent(128))
+	ctx := context.Background()
+	var commitRejected atomic.Int64
+
+	var wg sync.WaitGroup
+	for range 32 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for range 200 {
+				ok, _, err := TryExecute(b, ctx,
+					func(context.Context, BulkController) (int, error) { return 1, nil })
+				if !ok && errors.Is(err, ErrClosed) {
+					commitRejected.Add(1)
+				}
+			}
+		}()
+	}
+	for range 16 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for range 50 {
+				_ = b.Close()
+			}
+		}()
+	}
+	wg.Wait()
+	require.NoError(t, b.Close())
+	assert.Greater(t, commitRejected.Load(), int64(0))
+}
+
+func TestReleaseUncommittedSlot_FreesSemaphore(t *testing.T) {
+	b := New(WithMaxConcurrent(2))
+	defer func() { require.NoError(t, b.Close()) }()
+
+	b.sem <- struct{}{}
+	b.releaseUncommittedSlot()
+
+	tok, err := b.Acquire(context.Background())
+	require.NoError(t, err)
+	tok.Release()
+}
+
 // --- Acquire / Token ---
 
 func TestAcquire_TracksActive(t *testing.T) {
@@ -339,7 +507,8 @@ func TestAcquire_BlockedWaiterRejectedOnClose(t *testing.T) {
 		waiting <- err
 	}()
 
-	testx.Eventually(t, func() bool { return b.Active() == 1 }, time.Second)
+	testx.Eventually(t, func() bool { return !b.Allow() }, time.Second)
+	time.Sleep(50 * time.Millisecond)
 	require.NoError(t, b.Close())
 
 	select {
@@ -504,6 +673,17 @@ func TestClose_Idempotent(t *testing.T) {
 	assert.True(t, b.IsClosed())
 }
 
+func TestCommitSlot_RejectsAfterClose(t *testing.T) {
+	b := New(WithMaxConcurrent(10))
+	b.sem <- struct{}{}
+	require.NoError(t, b.Close())
+
+	waited, err := b.commitSlot(false)
+	require.ErrorIs(t, err, ErrClosed)
+	assert.False(t, waited)
+	assert.Equal(t, uint64(1), b.Stats().Rejected)
+}
+
 // --- Concurrency ---
 
 func TestExecute_RaceSafe(t *testing.T) {
@@ -574,7 +754,7 @@ func TestExecute_NeverExceedsMaxConcurrent(t *testing.T) {
 
 func TestExecute_ControllerSnapshot(t *testing.T) {
 	b := New(WithMaxConcurrent(8))
-	defer b.Close()
+	defer func() { require.NoError(t, b.Close()) }()
 
 	var snapshot struct {
 		active        int

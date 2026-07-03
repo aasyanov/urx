@@ -215,6 +215,36 @@ func TestWarmer_StopRetainsCapacity(t *testing.T) {
 	testx.Never(t, func() bool { return w.Capacity() != cap }, 100*time.Millisecond)
 }
 
+func TestWarmer_StopRetainsProgress(t *testing.T) {
+	w := New(WithDuration(time.Second), WithInterval(10*time.Millisecond), WithMinCapacity(0.1))
+	w.Start()
+	testx.Eventually(t, func() bool { return w.Progress() > 0.05 }, 2*time.Second)
+	frozen := w.Progress()
+	w.Stop()
+
+	assert.False(t, w.IsWarming())
+	assert.Greater(t, frozen, 0.0)
+	testx.Never(t, func() bool { return w.Progress() != frozen }, 100*time.Millisecond)
+}
+
+func TestWarmer_StopRetainsProgressInStatsAndRejections(t *testing.T) {
+	w := New(WithDuration(time.Second), WithInterval(10*time.Millisecond), WithMinCapacity(0.1))
+	w.Start()
+	testx.Eventually(t, func() bool { return w.Progress() > 0.05 }, 2*time.Second)
+	w.Stop()
+
+	progress := w.Progress()
+	s := w.Stats()
+	assert.InDelta(t, progress, s.Progress, 1e-9)
+	assert.InDelta(t, w.Capacity(), s.Capacity, 1e-9)
+
+	err := w.AllowOrError()
+	if err != nil {
+		require.ErrorIs(t, err, ErrRejected)
+		assert.Contains(t, err.Error(), "progress=")
+	}
+}
+
 func TestWarmer_StopIdempotent(t *testing.T) {
 	w := New(WithDuration(time.Second))
 	w.Start()
@@ -223,6 +253,16 @@ func TestWarmer_StopIdempotent(t *testing.T) {
 		w.Stop()
 		w.Stop()
 	})
+}
+
+func TestWarmer_StopIdempotent_PreservesFrozenProgress(t *testing.T) {
+	w := New(WithDuration(time.Second), WithInterval(10*time.Millisecond), WithMinCapacity(0.1))
+	w.Start()
+	testx.Eventually(t, func() bool { return w.Progress() > 0.05 }, 2*time.Second)
+	w.Stop()
+	frozen := w.Progress()
+	w.Stop()
+	assert.InDelta(t, frozen, w.Progress(), 1e-9)
 }
 
 func TestWarmer_StopWithoutStart(t *testing.T) {
@@ -298,6 +338,37 @@ func TestWarmer_OnCapacityChangeCallback(t *testing.T) {
 	w.Start()
 	defer w.Stop()
 	testx.Eventually(t, func() bool { return count.Load() > 0 }, 2*time.Second)
+}
+
+func TestWarmer_OnCapacityChange_SkipsBelowEpsilon(t *testing.T) {
+	var count atomic.Int64
+	w := New(
+		WithDuration(100*time.Second),
+		WithInterval(10*time.Millisecond),
+		WithMinCapacity(0.5),
+		WithMaxCapacity(0.505),
+		WithOnCapacityChange(func(_, _ float64) { count.Add(1) }),
+	)
+	w.Start()
+	time.Sleep(80 * time.Millisecond)
+	w.Stop()
+	assert.Equal(t, int64(0), count.Load(), "sub-epsilon capacity deltas must not fire the callback")
+}
+
+func TestWarmer_OnCapacityChange_SkipsWhenUnchangedOnComplete(t *testing.T) {
+	var count atomic.Int64
+	w := New(
+		WithDuration(40*time.Millisecond),
+		WithInterval(10*time.Millisecond),
+		WithMinCapacity(1),
+		WithMaxCapacity(1),
+		WithOnCapacityChange(func(_, _ float64) { count.Add(1) }),
+		WithOnComplete(func() {}),
+	)
+	w.Start()
+	defer w.Stop()
+	testx.Eventually(t, w.IsComplete, 2*time.Second)
+	assert.Equal(t, int64(0), count.Load(), "completion must not fire onCapacityChange when capacity is unchanged")
 }
 
 func TestWarmer_Progress(t *testing.T) {
@@ -400,6 +471,17 @@ func TestWarmer_WaitForCompletion_ContextCancelled(t *testing.T) {
 	defer w.Stop()
 	err := w.WaitForCompletion(testx.CancelledCtx())
 	require.ErrorIs(t, err, context.Canceled)
+}
+
+func TestWarmer_WaitForCompletion_StoppedMidRamp(t *testing.T) {
+	w := New(WithDuration(time.Hour), WithInterval(10*time.Millisecond))
+	w.Start()
+	testx.Eventually(t, w.IsWarming, 2*time.Second)
+	w.Stop()
+
+	err := w.WaitForCompletion(testx.CancelledCtx())
+	require.ErrorIs(t, err, context.Canceled)
+	assert.False(t, w.IsComplete())
 }
 
 func TestWarmer_WaitForCompletion_Timeout(t *testing.T) {

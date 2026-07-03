@@ -14,6 +14,7 @@ func mapEnv(m map[string]string, opts ...Option) *Env {
 }
 
 func TestBind_AllSupportedTypes(t *testing.T) {
+	wantTime := time.Date(2025, 1, 2, 15, 4, 5, 0, time.UTC)
 	env := mapEnv(map[string]string{
 		"STR":   "hello",
 		"BOOL":  "true",
@@ -23,6 +24,7 @@ func TestBind_AllSupportedTypes(t *testing.T) {
 		"UINT":  "12",
 		"FLOAT": "3.14",
 		"DUR":   "1m30s",
+		"AT":    "2025-01-02T15:04:05Z",
 		"LIST":  "a, b ,c",
 	})
 
@@ -34,6 +36,7 @@ func TestBind_AllSupportedTypes(t *testing.T) {
 	assert.Equal(t, uint(12), Bind(env, "UINT", uint(0)).Value())
 	assert.InDelta(t, 3.14, Bind(env, "FLOAT", 0.0).Value(), 1e-9)
 	assert.Equal(t, 90*time.Second, Bind(env, "DUR", time.Duration(0)).Value())
+	assert.True(t, Bind(env, "AT", time.Time{}).Value().Equal(wantTime))
 	assert.Equal(t, []string{"a", "b", "c"}, Bind(env, "LIST", []string(nil)).Value())
 
 	require.NoError(t, env.Validate())
@@ -61,6 +64,7 @@ func TestBind_InvalidValueReported(t *testing.T) {
 		{name: "bad float", key: "N", val: "x", bind: func(e *Env) validator { return Bind(e, "N", 0.0) }},
 		{name: "bad bool", key: "N", val: "maybe", bind: func(e *Env) validator { return Bind(e, "N", false) }},
 		{name: "bad dur", key: "N", val: "soon", bind: func(e *Env) validator { return Bind(e, "N", time.Duration(0)) }},
+		{name: "bad time", key: "N", val: "not-a-date", bind: func(e *Env) validator { return Bind(e, "N", time.Time{}) }},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -99,6 +103,25 @@ func TestBindRequired_PresentIsValid(t *testing.T) {
 	require.NoError(t, env.Validate())
 }
 
+func TestBindRequired_InvalidReported(t *testing.T) {
+	env := mapEnv(map[string]string{"PORT": "not-a-number"})
+	BindRequired[int](env, "PORT")
+	require.ErrorIs(t, env.Validate(), ErrInvalid)
+}
+
+func TestNew_DefaultConfig(t *testing.T) {
+	cfg := defaultConfig()
+	assert.Equal(t, defaultPrefix, cfg.prefix)
+	assert.NotNil(t, cfg.lookup)
+}
+
+func TestBind_LowercaseNameUppercased(t *testing.T) {
+	env := mapEnv(map[string]string{"PORT": "9090"})
+	v := Bind(env, "port", 8080)
+	assert.Equal(t, "PORT", v.Key())
+	assert.Equal(t, 9090, v.Value())
+}
+
 func TestWithPrefix(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -123,9 +146,29 @@ func TestWithPrefix(t *testing.T) {
 func TestBindTo_OverlaysWhenSet(t *testing.T) {
 	env := mapEnv(map[string]string{"PORT": "9090"})
 	port := 8080
-	BindTo(env, "PORT", &port)
+	v := BindTo(env, "PORT", &port)
 	assert.Equal(t, 9090, port)
+	assert.Equal(t, 9090, v.Value())
 	require.NoError(t, env.Validate())
+}
+
+func TestBindTo_InvalidKeepsTarget(t *testing.T) {
+	env := mapEnv(map[string]string{"PORT": "not-a-number"})
+	port := 8080
+	v := BindTo(env, "PORT", &port)
+	assert.Equal(t, 8080, port)
+	assert.Equal(t, 8080, v.Value())
+	require.ErrorIs(t, env.Validate(), ErrInvalid)
+}
+
+func TestBindTo_PtrAliasesTarget(t *testing.T) {
+	env := mapEnv(map[string]string{"PORT": "9090"})
+	port := 8080
+	v := BindTo(env, "PORT", &port)
+	require.Same(t, &port, v.Ptr())
+	*v.Ptr() = 3000
+	assert.Equal(t, 3000, port)
+	assert.Equal(t, 3000, v.Value())
 }
 
 func TestBindTo_KeepsTargetWhenAbsent(t *testing.T) {
@@ -161,6 +204,27 @@ func TestBindRequiredTo_OverlaysAndRequires(t *testing.T) {
 		env := mapEnv(map[string]string{})
 		assert.Panics(t, func() { BindRequiredTo[string](env, "HOST", nil) })
 	})
+
+	t.Run("invalid keeps fallback", func(t *testing.T) {
+		env := mapEnv(map[string]string{"PORT": "not-a-number"})
+		port := 8080
+		v := BindRequiredTo(env, "PORT", &port)
+		assert.Equal(t, 8080, port)
+		assert.Equal(t, 8080, v.Value())
+		require.ErrorIs(t, env.Validate(), ErrInvalid)
+	})
+
+	t.Run("ptr aliases target", func(t *testing.T) {
+		env := mapEnv(map[string]string{"HOST": "db.prod"})
+		host := "localhost"
+		v := BindRequiredTo(env, "HOST", &host)
+		require.Same(t, &host, v.Ptr())
+	})
+}
+
+func TestValidate_EmptyEnv(t *testing.T) {
+	env := New(WithLookup(MapLookup(map[string]string{})))
+	require.NoError(t, env.Validate())
 }
 
 func TestValidate_JoinsMultipleErrors(t *testing.T) {

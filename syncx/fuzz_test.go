@@ -12,6 +12,7 @@ func FuzzMap(f *testing.F) {
 	f.Add([]byte{0, 1, 2, 3})
 	f.Add([]byte{0, 5, 1, 5, 2, 5, 3, 5})
 	f.Add([]byte{4, 4, 4, 4})
+	f.Add([]byte{5, 0, 5, 1, 0, 2})
 
 	f.Fuzz(func(t *testing.T, data []byte) {
 		m := NewMap[byte, byte]()
@@ -20,7 +21,7 @@ func FuzzMap(f *testing.F) {
 		// Each pair of bytes is (op, key). op selects the operation; the
 		// stored value is derived from the key to keep the oracle simple.
 		for i := 0; i+1 < len(data); i += 2 {
-			op, key := data[i]%5, data[i+1]
+			op, key := data[i]%6, data[i+1]
 			switch op {
 			case 0: // Store
 				m.Store(key, key)
@@ -39,6 +40,9 @@ func FuzzMap(f *testing.F) {
 			case 4: // Swap
 				m.Swap(key, key)
 				oracle[key] = key
+			case 5: // Clear
+				m.Clear()
+				clear(oracle)
 			}
 		}
 

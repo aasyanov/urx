@@ -142,10 +142,11 @@ func ExecuteMulti[T any](h *Hedger, ctx context.Context, fns []HedgeFunc[T]) (T,
 		return zero, errCancelled(err)
 	}
 
+	backends := launchableCount(fns)
 	if fn, single := lone(fns); single {
 		return runSync(h, ctx, fn)
 	}
-	return dispatch(h, ctx, fns)
+	return dispatch(h, ctx, fns, backends)
 }
 
 // lone returns the sole launchable (non-nil) entry of fns and true when exactly
@@ -200,25 +201,26 @@ func runSync[T any](h *Hedger, ctx context.Context, fn HedgeFunc[T]) (T, error) 
 //
 // dispatch is a package-level generic function because Go methods cannot carry
 // their own type parameters.
-func dispatch[T any](h *Hedger, ctx context.Context, fns []HedgeFunc[T]) (T, error) {
+func dispatch[T any](h *Hedger, ctx context.Context, fns []HedgeFunc[T], backends int) (T, error) {
 	var zero T
 
 	hedgeCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	resultCh := make(chan result[T], len(fns))
+	resultCh := make(chan result[T], backends)
 	start := time.Now()
-	delays := h.delays(len(fns))
+	delays := h.delays(backends)
 
-	// next is the index of the next copy to launch; pending counts launched
-	// copies whose result has not yet been reaped. anyNonNil guarantees the
-	// first launch succeeds.
-	next, _ := launchNext(h, hedgeCtx, fns, 0, start, resultCh)
+	// next is the slice index of the next copy to launch; attempt is the
+	// 1-based launch ordinal among non-nil entries; pending counts launched
+	// copies whose result has not yet been reaped.
+	var attempt int
+	next, attempt, _ := launchNext(h, hedgeCtx, fns, 0, attempt, backends, start, resultCh)
 	pending := 1
 
 	var timer *time.Timer
 	var timerCh <-chan time.Time
-	if d, ok := delayFor(delays, next); ok {
+	if d, ok := delayFor(delays, attempt); ok {
 		timer = time.NewTimer(d)
 		timerCh = timer.C
 		defer timer.Stop()
@@ -232,75 +234,108 @@ func dispatch[T any](h *Hedger, ctx context.Context, fns []HedgeFunc[T]) (T, err
 			return zero, errCancelled(ctx.Err())
 
 		case res := <-resultCh:
-			pending--
-			if !res.withdrawn {
-				if res.err == nil {
-					cancel()
-					h.wins.Add(1)
-					return res.value, nil
-				}
-				if firstErr == nil {
-					firstErr = res.err
-				}
+			if val, won := consumeResult(h, res, &pending, &firstErr, cancel); won {
+				return val, nil
 			}
 			if pending > 0 {
 				continue
 			}
-			// No copy is in flight. Launch the next one immediately rather
-			// than waiting out its delay — a copy that fails (or withdraws)
-			// fast should accelerate the hedge, not stall on the timer.
-			if next < len(fns) {
-				var launched bool
-				next, launched = launchNext(h, hedgeCtx, fns, next, start, resultCh)
-				if launched {
-					pending++
-					if d, ok := delayFor(delays, next); ok {
-						resetTimer(timer, d, start)
-					} else {
-						timerCh = nil
-					}
-					continue
-				}
-			}
-			if next >= len(fns) {
+			if err := relaunchAfterFailure(h, hedgeCtx, fns, &next, &attempt, backends, start, resultCh, &pending, &firstErr, timer, &timerCh, delays); err != nil {
 				h.failures.Add(1)
-				return zero, errAllFailed(orWithdrawn(firstErr))
+				return zero, err
 			}
+			continue
 
 		case <-timerCh:
 			var launched bool
-			next, launched = launchNext(h, hedgeCtx, fns, next, start, resultCh)
+			next, attempt, launched = launchNext(h, hedgeCtx, fns, next, attempt, backends, start, resultCh)
 			if launched {
 				pending++
 			}
-			if d, ok := delayFor(delays, next); ok {
-				resetTimer(timer, d, start)
-			} else {
-				timerCh = nil
-			}
+			armTimer(timer, &timerCh, delays, attempt, start)
 		}
 	}
 }
 
-// launchNext starts the next launchable copy at or after index from, advancing
-// past nil entries. It returns the index immediately after the one launched (or
-// len(fns) when only nil entries remained) and whether a copy was actually
-// launched. It fires the WithOnHedge hook and increments the hedge counter for
-// copies beyond the original.
-func launchNext[T any](h *Hedger, ctx context.Context, fns []HedgeFunc[T], from int, start time.Time, ch chan<- result[T]) (int, bool) {
+// consumeResult applies one copy outcome. It returns won=true when the copy
+// succeeded and the dispatch loop should return its value.
+func consumeResult[T any](h *Hedger, res result[T], pending *int, firstErr *error, cancel context.CancelFunc) (T, bool) {
+	var zero T
+	*pending--
+	if res.withdrawn {
+		return zero, false
+	}
+	if res.err == nil {
+		cancel()
+		h.wins.Add(1)
+		return res.value, true
+	}
+	if *firstErr == nil {
+		*firstErr = res.err
+	}
+	return zero, false
+}
+
+// relaunchAfterFailure launches the next copy immediately when no copy remains
+// in flight. Returns nil when a new copy started, or an error when every
+// launchable copy finished without a win.
+func relaunchAfterFailure[T any](
+	h *Hedger,
+	ctx context.Context,
+	fns []HedgeFunc[T],
+	next, attempt *int,
+	backends int,
+	start time.Time,
+	resultCh chan<- result[T],
+	pending *int,
+	firstErr *error,
+	timer *time.Timer,
+	timerCh *<-chan time.Time,
+	delays []time.Duration,
+) error {
+	if *next >= len(fns) {
+		return errAllFailed(orWithdrawn(*firstErr))
+	}
+	var launched bool
+	*next, *attempt, launched = launchNext(h, ctx, fns, *next, *attempt, backends, start, resultCh)
+	if !launched {
+		return errAllFailed(orWithdrawn(*firstErr))
+	}
+	*pending++
+	armTimer(timer, timerCh, delays, *attempt, start)
+	return nil
+}
+
+// armTimer rearms or disables the stagger timer for the next scheduled copy.
+func armTimer(timer *time.Timer, timerCh *<-chan time.Time, delays []time.Duration, launchedAttempt int, start time.Time) {
+	if d, ok := delayFor(delays, launchedAttempt); ok {
+		resetTimer(timer, d, start)
+		*timerCh = timer.C
+		return
+	}
+	*timerCh = nil
+}
+
+// launchNext starts the next launchable copy at or after slice index from. It
+// returns the index immediately after the one launched (or len(fns) when only
+// nil entries remained), the updated 1-based launch ordinal, and whether a copy
+// was actually launched. It fires the WithOnHedge hook and increments the hedge
+// counter for copies beyond the original.
+func launchNext[T any](h *Hedger, ctx context.Context, fns []HedgeFunc[T], from, attempt, backends int, start time.Time, ch chan<- result[T]) (next int, attemptOut int, launched bool) {
 	for i := from; i < len(fns); i++ {
 		if fns[i] == nil {
 			continue
 		}
-		if i > 0 {
+		attempt++
+		if attempt > 1 {
 			h.hedges.Add(1)
-			h.fireOnHedge(i + 1)
+			h.fireOnHedge(attempt)
 		}
-		hc := &execution{attempt: i + 1, backends: len(fns), start: start}
+		hc := &execution{attempt: attempt, backends: backends, start: start}
 		go run(h, ctx, fns[i], hc, ch)
-		return i + 1, true
+		return i + 1, attempt, true
 	}
-	return len(fns), false
+	return len(fns), attempt, false
 }
 
 // fireOnHedge invokes the configured launch hook asynchronously under panic
@@ -365,6 +400,17 @@ func (h *Hedger) ResetStats() {
 	h.failures.Store(0)
 }
 
+// launchableCount returns the number of non-nil entries in fns.
+func launchableCount[T any](fns []HedgeFunc[T]) int {
+	n := 0
+	for _, fn := range fns {
+		if fn != nil {
+			n++
+		}
+	}
+	return n
+}
+
 // anyNonNil reports whether fns has at least one launchable entry.
 func anyNonNil[T any](fns []HedgeFunc[T]) bool {
 	for _, fn := range fns {
@@ -384,12 +430,12 @@ func orWithdrawn(firstErr error) error {
 	return context.Canceled
 }
 
-// delayFor returns the launch delay for the copy at index next (the value of
-// the dispatch cursor after a launch), or false when no further copy is
-// scheduled. delays[i] holds the launch time of copy i+1, so copy next uses
-// delays[next-1].
-func delayFor(delays []time.Duration, next int) (time.Duration, bool) {
-	idx := next - 1
+// delayFor returns the launch delay for the copy after launchedAttempt (the
+// 1-based ordinal of the most recently launched copy), or false when no further
+// copy is scheduled. delays[i] holds the launch time of copy i+2, so after copy
+// k launches the next schedule entry is delays[k-1].
+func delayFor(delays []time.Duration, launchedAttempt int) (time.Duration, bool) {
+	idx := launchedAttempt - 1
 	if idx < 0 || idx >= len(delays) {
 		return 0, false
 	}

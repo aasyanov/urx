@@ -50,6 +50,18 @@ func BenchmarkMap_Store(b *testing.B) {
 	}
 }
 
+func BenchmarkMap_Store_Parallel(b *testing.B) {
+	m := NewMap[int, int]()
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		i := 0
+		for pb.Next() {
+			m.Store(i, i)
+			i++
+		}
+	})
+}
+
 func BenchmarkMap_LoadOrStore(b *testing.B) {
 	m := NewMap[int, int]()
 	m.Store(1, 1)
@@ -78,6 +90,18 @@ func BenchmarkGroup_Go(b *testing.B) {
 		g.Go(func(context.Context) error { return nil })
 		_ = g.Wait()
 	}
+}
+
+func BenchmarkGroup_Go_Parallel(b *testing.B) {
+	ctx := context.Background()
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			g, _ := NewGroup(ctx)
+			g.Go(func(context.Context) error { return nil })
+			_ = g.Wait()
+		}
+	})
 }
 
 func BenchmarkGroup_Go_Limited(b *testing.B) {

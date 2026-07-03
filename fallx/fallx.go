@@ -48,7 +48,8 @@ import (
 // [Fallback.Close].
 //
 // A Fallback is safe for concurrent use from any number of goroutines: counters
-// are lock-free atomics and the cache is sharded under per-shard mutexes.
+// are lock-free atomics. Under [StrategyCached] the result cache is sharded
+// across per-shard mutexes; other strategies allocate no cache storage.
 type Fallback[T any] struct {
 	cfg config[T]
 
@@ -79,12 +80,9 @@ type Fallback[T any] struct {
 func New[T any](opts ...Option[T]) *Fallback[T] {
 	cfg := newConfig(opts)
 
-	f := &Fallback[T]{
-		cfg:    cfg,
-		shards: make([]*cacheShard[T], cfg.shardCount),
-	}
-	for i := range f.shards {
-		f.shards[i] = newCacheShard[T]()
+	f := &Fallback[T]{cfg: cfg}
+	if cfg.strategy == StrategyCached {
+		f.initCache()
 	}
 
 	if cfg.strategy == StrategyCached && cfg.cleanupInterval > 0 {
@@ -205,20 +203,20 @@ func (f *Fallback[T]) resolveKey(ctx context.Context) string {
 }
 
 // Seed pre-populates the cache with value for key using the configured TTL.
-// Meaningful only under [StrategyCached]; use it to warm the cache so the very
-// first failure already has a fallback to replay. After [Fallback.Close], Seed
-// is a no-op so the cache snapshot remains inspectable via [Fallback.Stats].
+// Meaningful only under [StrategyCached]; on other strategies and after
+// [Fallback.Close] it is a no-op. Use it to warm the cache so the very first
+// failure already has a fallback to replay.
 func (f *Fallback[T]) Seed(key string, value T) {
-	if f.closed.Load() {
+	if f.closed.Load() || f.cfg.strategy != StrategyCached {
 		return
 	}
 	f.cacheResult(key, value, f.cfg.cacheTTL)
 }
 
-// SeedWithTTL is [Fallback.Seed] with an explicit entry lifetime. After
-// [Fallback.Close] it is a no-op.
+// SeedWithTTL is [Fallback.Seed] with an explicit entry lifetime. It is a no-op
+// under strategies other than [StrategyCached] and after [Fallback.Close].
 func (f *Fallback[T]) SeedWithTTL(key string, value T, ttl time.Duration) {
-	if f.closed.Load() {
+	if f.closed.Load() || f.cfg.strategy != StrategyCached {
 		return
 	}
 	if ttl <= 0 {
@@ -227,11 +225,12 @@ func (f *Fallback[T]) SeedWithTTL(key string, value T, ttl time.Duration) {
 	f.cacheResult(key, value, ttl)
 }
 
-// ClearCache removes every cached entry and resets the cache size to zero. It
-// does not affect counters or the closed state. After [Fallback.Close] it is a
-// no-op so cached entries remain readable via [Fallback.Stats].
+// ClearCache removes every cached entry and resets the cache size to zero under
+// [StrategyCached]. It does not affect counters or the closed state. On other
+// strategies and after [Fallback.Close] it is a no-op so cached entries remain
+// readable via [Fallback.Stats].
 func (f *Fallback[T]) ClearCache() {
-	if f.closed.Load() {
+	if f.closed.Load() || f.cfg.strategy != StrategyCached || len(f.shards) == 0 {
 		return
 	}
 	f.evictMu.Lock()

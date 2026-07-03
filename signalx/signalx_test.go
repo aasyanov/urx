@@ -2,6 +2,7 @@ package signalx
 
 import (
 	"context"
+	"os"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -51,6 +52,56 @@ func TestTrap_DoubleCancelIdempotent(t *testing.T) {
 		cancel()
 		cancel()
 	})
+}
+
+func TestTrap_NilSignalPanics(t *testing.T) {
+	var nilSignal os.Signal
+	assert.Panics(t, func() {
+		_, _ = Trap(context.Background(), nilSignal)
+	})
+}
+
+func TestOnShutdown_NilHookPanics(t *testing.T) {
+	ResetHooks()
+	t.Cleanup(ResetHooks)
+
+	assert.Panics(t, func() {
+		OnShutdown(nil)
+	})
+}
+
+func TestWait_NilHookPanics(t *testing.T) {
+	ResetHooks()
+	t.Cleanup(ResetHooks)
+
+	assert.Panics(t, func() {
+		_ = Wait(testx.CancelledCtx(), nil)
+	})
+}
+
+func TestWait_SingleHookOverrunReportsTimeout(t *testing.T) {
+	ResetHooks()
+	t.Cleanup(ResetHooks)
+
+	err := WaitWith(testx.CancelledCtx(), []Option{WithTimeout(20 * time.Millisecond)},
+		func(context.Context) { time.Sleep(60 * time.Millisecond) },
+	)
+	require.ErrorIs(t, err, ErrShutdownTimeout)
+}
+
+func TestWait_TimeoutAndHookPanicJoined(t *testing.T) {
+	ResetHooks()
+	t.Cleanup(ResetHooks)
+
+	err := WaitWith(testx.CancelledCtx(), []Option{WithTimeout(20 * time.Millisecond)},
+		func(context.Context) { panic("timeout panic") },
+		func(context.Context) { time.Sleep(60 * time.Millisecond) },
+	)
+	require.ErrorIs(t, err, ErrShutdownTimeout)
+	require.ErrorIs(t, err, ErrHookPanic)
+
+	pe := testx.RequirePanicError(t, err, opWait)
+	assert.Equal(t, "timeout panic", pe.Value)
 }
 
 func TestWait_RunsHooksInOrder(t *testing.T) {

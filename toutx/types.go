@@ -7,8 +7,9 @@ import (
 
 // TimeoutController exposes per-call deadline context to the [Execute]
 // callback. The implementation is private; callers interact only through this
-// interface. A TimeoutController is bound to a single Execute call and must not
-// be retained after the callback returns.
+// interface. A TimeoutController is bound to a single [Execute] call, must not
+// be retained after the callback returns, and is accessed only from that call's
+// callback goroutine — it is not safe for concurrent use across goroutines.
 type TimeoutController interface {
 	// Op returns the logical operation name for this call.
 	Op() string

@@ -133,10 +133,25 @@
 // [errors.Is] for programmatic handling. The special sentinel [ErrHelp]
 // is returned for --help / -h. [ErrVersion] is returned for --version / -V.
 //
+// # cfgx → envx → clix pipeline
+//
+// clix is the CLI override layer in the urx configuration stack. Bind the
+// same struct fields that [cfgx] loads from files and [envx] overlays from
+// the environment — all through plain pointer sharing:
+//
+//	cfgx.Load("config.yaml", &cfg)
+//	envx.BindTo(env, "PORT", &cfg.Port)
+//	clix.AddFlag(&cfg.Port, "port", "p", cfg.Port, "listen port")
+//
+// Supported flag types (string, int, bool, float64, [time.Duration],
+// [time.Time]) cover the common subset shared with envx. Types such as
+// []string, int64, and uint are env-only; map them explicitly before binding.
+//
 // # Fail-fast panics
 //
 // Programming mistakes are caught at construction time via panics:
-// duplicate flag names or short aliases, duplicate subcommand names,
+// empty command or flag names, duplicate flag names or short aliases,
+// shadowing an inherited flag on a subcommand, duplicate subcommand names,
 // duplicate [Run] on the same command, unsupported flag types, and enum
 // type mismatches. These fire on the very first run, making
 // misconfiguration impossible to ship.
@@ -156,6 +171,8 @@ package clix
 // [Parser]. Parsing happens synchronously inside New but the matched
 // action is NOT executed — call [Parser.Run] to run it.
 //
+// If name is empty, New panics.
+//
 // If --help or -h is encountered at any level, [Parser.Err] returns
 // [ErrHelp] and [Parser.Help] returns the help text for that level.
 //
@@ -165,6 +182,9 @@ package clix
 // All parse errors wrap sentinel error values from this package.
 // Use [errors.Is] to distinguish them for programmatic handling.
 func New(osArgs []string, name, desc string, opts ...Option) *Parser {
+	if name == "" {
+		panic("clix: empty command name")
+	}
 	root := newCommand(name, desc)
 	for _, opt := range opts {
 		opt(root)

@@ -62,6 +62,10 @@ const (
 //
 // Each attempt runs under [panix.Safe]; a recovered panic is reported as a
 // [*panix.PanicError] and handled like any other (retryable) failure.
+//
+// Do is safe for concurrent use from multiple goroutines: each call owns its
+// resolved configuration, per-attempt [RetryController], and backoff timer;
+// nothing is shared between calls.
 func Do[T any](ctx context.Context, fn RetryFunc[T], opts ...Option) (T, error) {
 	cfg := newConfig(opts)
 

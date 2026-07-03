@@ -58,3 +58,49 @@ func FuzzSafeVoid(f *testing.F) {
 		}
 	})
 }
+
+func FuzzWrap(f *testing.F) {
+	f.Add("op", "panic value")
+	f.Add("", "")
+	f.Fuzz(func(t *testing.T, op, panicVal string) {
+		wrapped := Wrap(op, func() (string, error) {
+			panic(panicVal)
+		})
+		val, err := wrapped()
+		if val != "" {
+			t.Errorf("expected zero value, got %q", val)
+		}
+		var pe *PanicError
+		if !errors.As(err, &pe) {
+			t.Fatalf("expected *PanicError, got %T: %v", err, err)
+		}
+		if pe.Op != op {
+			t.Errorf("Op = %q, want %q", pe.Op, op)
+		}
+		if len(pe.Stack) == 0 {
+			t.Error("Stack is empty")
+		}
+	})
+}
+
+func FuzzWrapVoid(f *testing.F) {
+	f.Add("op", true)
+	f.Add("", false)
+	f.Fuzz(func(t *testing.T, op string, shouldPanic bool) {
+		wrapped := WrapVoid(op, func() error {
+			if shouldPanic {
+				panic(op)
+			}
+			return nil
+		})
+		err := wrapped()
+		if shouldPanic {
+			var pe *PanicError
+			if !errors.As(err, &pe) {
+				t.Fatalf("expected *PanicError, got %T: %v", err, err)
+			}
+		} else if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+}

@@ -29,6 +29,7 @@ A static concurrency bound forces an impossible choice. Set it too low and you l
 ✅ Limiter              — servo-control a concurrency limit from feedback
 ✅ Execute[T]           — admit + run a callback, releasing the permit on return/panic
 ✅ Acquire / release    — manual admission when a callback does not fit
+✅ Allow                — non-blocking probe without admission
 ✅ AdaptController      — limit + in-flight snapshot, SkipSample() to drop outliers
 ✅ AIMD/Vegas/Gradient  — three control laws for error- or latency-driven overload
 ✅ panic safety         — a panicking callback becomes a *panix.PanicError, not a crash
@@ -72,10 +73,10 @@ A static concurrency bound forces an impossible choice. Set it too low and you l
  latency/ring          WithAlgorithm         │
    │                   WithInitial/Min/Max   Algorithm enum (types.go)
  Execute/TryExecute     WithSmoothing        AIMD / Vegas / Gradient
- Acquire/release        WithJitter / WithOp  │
-   │                   │                    errors.go
+ Acquire/release/Allow  WithJitter / WithOp  AdaptFunc[T] (types.go)
+   │                   opOrDefault/Try()    │
  adjust → aimd/vegas/  ringCapacity()        ErrClosed/ErrTimeout
- gradient → permits    opOrDefault()         ErrCancelled/ErrNilFunc
+ gradient → permits                          ErrCancelled/ErrNilFunc
 ```
 
 ## How It Works
@@ -116,16 +117,16 @@ Only the periodic adaptation step and the percentile snapshot take the mutex; th
 
 | Algorithm      | Signal                 | Grows when                   | Backs off when                      | Best for                                  |
 | -------------- | ---------------------- | ---------------------------- | ----------------------------------- | ----------------------------------------- |
-| **AIMD****     | success/failure        | every success (`+rate`)      | any failure (`×ratio`)              | failure-driven overload; the safe default |
-| **Vegas****    | latency vs RTT_min     | estimated queue below target | estimated queue above `2×target`    | a stable backend floor latency            |
-| **Gradient**** | latency vs EMA average | sample at/below average      | sample above average (proportional) | drifting floor latency                    |
+| **AIMD**     | success/failure        | every success (`+rate`)      | any failure (`×ratio`)              | failure-driven overload; the safe default |
+| **Vegas**    | latency vs RTT_min     | estimated queue below target | estimated queue above `2×target`    | a stable backend floor latency            |
+| **Gradient** | latency vs EMA average | sample at/below average      | sample above average (proportional) | drifting floor latency                    |
 
 
 `AIMD` is the TCP congestion-avoidance law: additive increase, multiplicative decrease. `Vegas` infers queued work from how far the current round-trip time sits above the best ever seen (`RTT_min`) and holds the limit inside a tolerance band. `Gradient` compares each sample to a smoothed running average, so it adapts when the backend's baseline latency itself moves.
 
 ### Keeping the feedback honest
 
-Two mechanisms stop the controller from chasing noise. **Warmup** (`WithWarmupSamples`) ignores the first N samples so an unrepresentative cold start does not move the limit. **RTT_min** decay** (`WithMinLatencyDecay`) drifts the recorded minimum slowly toward the average so `Vegas` cannot stick forever to one anomalously fast sample. The callback can also call `AdaptController.SkipSample()` to exclude a known outlier (a cache miss, a cold connection) from both the latency feedback and the percentile history — it still counts toward the success/failure totals.
+Two mechanisms stop the controller from chasing noise. **Warmup** (`WithWarmupSamples`) ignores the first N samples so an unrepresentative cold start does not move the limit. **RTT_min decay** (`WithMinLatencyDecay`) drifts the recorded minimum slowly toward the average so `Vegas` cannot stick forever to one anomalously fast sample. The callback can also call `AdaptController.SkipSample()` to exclude a known outlier (a cache miss, a cold connection) from both the latency feedback and the percentile history — it still counts toward the success/failure totals.
 
 ## Normative Contracts
 
@@ -241,6 +242,14 @@ if !ran {
 }
 ```
 
+### Probe without admission
+
+```go
+if !l.Allow() {
+	return serveCached() // at capacity, skip the expensive path
+}
+```
+
 ### Observe limit changes
 
 ```go
@@ -255,8 +264,9 @@ l := adaptx.New(adaptx.WithOnLimitChange(func(old, new int) {
 | Symbol                     | Signature                                                                                                               | Description                                     |
 | -------------------------- | ----------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------- |
 | `New`                      | `func New(opts ...Option) *Limiter`                                                                                     | Create a limiter with defaults + options        |
-| `Execute`                  | `func Execute[T any](l *Limiter, ctx context.Context, fn func(context.Context, AdaptController) (T, error)) (T, error)` | Admit + run a callback (recommended)            |
-| `TryExecute`               | `func TryExecute[T any](l *Limiter, ctx context.Context, fn ...) (bool, T, error)`                                      | Non-blocking variant; (false, …) when saturated |
+| `Execute`                  | `func Execute[T any](l *Limiter, ctx context.Context, fn AdaptFunc[T]) (T, error)`                                      | Admit + run a callback (recommended)            |
+| `TryExecute`               | `func TryExecute[T any](l *Limiter, ctx context.Context, fn AdaptFunc[T]) (bool, T, error)`                              | Non-blocking variant; (false, …) when saturated |
+| `Limiter.Allow`            | `func (l *Limiter) Allow() bool`                                                                                        | Probe whether a permit is free (no admission)   |
 | `Limiter.Acquire`          | `func (l *Limiter) Acquire(ctx context.Context) (release func(bool, time.Duration), err error)`                         | Blocking manual admission                       |
 | `Limiter.TryAcquire`       | `func (l *Limiter) TryAcquire() (release func(bool, time.Duration), ok bool)`                                           | Non-blocking manual admission                   |
 | `Limiter.Limit`            | `func (l *Limiter) Limit() int`                                                                                         | Current adaptive limit                          |
@@ -267,6 +277,8 @@ l := adaptx.New(adaptx.WithOnLimitChange(func(old, new int) {
 | `Limiter.CloseWithTimeout` | `func (l *Limiter) CloseWithTimeout(d time.Duration) error`                                                             | Shutdown with custom drain window               |
 | `Limiter.IsClosed`         | `func (l *Limiter) IsClosed() bool`                                                                                     | Report closed state                             |
 | `Algorithm`                | `type Algorithm uint8`                                                                                                  | `AIMD` / `Vegas` / `Gradient`                   |
+| `AIMD`, `Vegas`, `Gradient`| constants                                                                                                               | Control-law selectors                           |
+| `AdaptFunc[T]`             | `func(ctx context.Context, ac AdaptController) (T, error)`                                                              | Unit of work for `Execute` / `TryExecute`       |
 
 
 ### AdaptController
@@ -298,7 +310,7 @@ l := adaptx.New(adaptx.WithOnLimitChange(func(old, new int) {
 | `WithWarmupSamples(n)`   | `10`               | Samples before adaptation; 0 disables warmup                    |
 | `WithMinLatencyDecay(f)` | `0.001`            | RTT_min drift toward average; 0 disables, outside [0,1] ignored |
 | `WithJitter(f)`          | `0.1`              | Fraction of an increase that may be withheld; 0 disables        |
-| `WithOp(s)`              | `"adaptx.Execute"` | Operation name attached to panic reports                        |
+| `WithOp(s)`              | `[opExecute]` / `[opTryExecute]` | Operation name attached to panic reports                        |
 | `WithOnLimitChange(fn)`  | none               | Async callback on every limit change                            |
 
 
@@ -309,7 +321,7 @@ l := adaptx.New(adaptx.WithOnLimitChange(func(old, new int) {
 | -------------- | --------------------------------------------------------------------------------- |
 | `ErrClosed`    | Admission attempted after `Close`                                                 |
 | `ErrTimeout`   | Blocking acquire exceeded its context deadline (wraps `context.DeadlineExceeded`) |
-| `ErrCancelled` | Context cancelled before a permit was available (wraps `ctx.Err()`)               |
+| `ErrCancelled` | Context cancelled before a permit was available (`Execute`, `Acquire`, `TryExecute`; wraps `ctx.Err()`) |
 | `ErrNilFunc`   | `Execute`/`TryExecute` given a nil function                                       |
 
 
@@ -327,7 +339,7 @@ A panicking callback surfaces as a `*panix.PanicError` returned by `Execute` (re
 > **`ResetStats` snaps the limit immediately.** Counters, latency estimators, and the permit pool are reset to the configured initial limit in one step. When in-flight work exceeds that initial limit the live limit is raised to the in-flight count so permits never go negative.
 
 > [!NOTE]
-> **SkipSample** keeps the success/failure totals.** A skipped call is removed from latency feedback and percentile history only — it still counts as a success or failure in `Stats`. Use it for outlier *latency*, not to hide errors.
+> **SkipSample keeps the success/failure totals.** A skipped call is removed from latency feedback and percentile history only — it still counts as a success or failure in `Stats`. Use it for outlier *latency*, not to hide errors.
 
 ## Safety and Concurrency
 
@@ -340,20 +352,23 @@ A panicking callback surfaces as a `*panix.PanicError` returned by `Execute` (re
 
 | Benchmark        | ns/op | B/op | allocs/op |
 | ---------------- | ----- | ---- | --------- |
-| Execute          | 304   | 52   | 3         |
-| Execute_Parallel | 604   | 52   | 3         |
-| Acquire          | 191   | 28   | 2         |
-| Acquire_Parallel | 445   | 28   | 2         |
-| TryAcquire       | 146   | 28   | 2         |
-| Limit            | 17    | 0    | 0         |
+| Execute          | 652   | 52   | 3         |
+| Execute_Parallel | 930   | 52   | 3         |
+| Acquire          | 305   | 28   | 2         |
+| Acquire_Parallel | 653   | 28   | 2         |
+| TryAcquire       | 207   | 28   | 2         |
+| TryExecute       | 643   | 52   | 3         |
+| Allow            | 28    | 0    | 0         |
+| Limit            | 26    | 0    | 0         |
 
 
 ### Analysis
 
-- **Execute**: ~304 ns / 3 allocs is the admit-path floor. The three allocations are the release closure, the `atomic.Bool` it captures for double-call safety, and the `execution` controller — all of which escape to the heap because the closure outlives the stack frame and the controller is handed to the callback through the `panix.Safe` boundary as an interface. The semaphore receive, the atomic counter bumps, and (post-warmup) the mutex-guarded adaptation step are otherwise alloc-free.
-- **Acquire / TryAcquire**: 2 allocs / 28 B — the release closure and its captured `atomic.Bool`. `TryAcquire` is ~25 % cheaper than `Acquire` because it skips the context pre-check and the blocking `select`. Both are the right primitive when a single callback does not fit the call shape.
-- **Execute_Parallel**: ~604 ns, ~2× the serial cost at 8 goroutines. The slowdown is the shared `inFlight`/`total` counters and the channel send/receive contending on the same cache lines; there is no mutex on the admission path, so it scales predictably with core count.
-- **Limit**: 0 allocs, ~17 ns — a single mutex lock/unlock around an `int` read. This is the cheapest observability call and is safe to poll from a metrics loop.
+- **Execute**: ~652 ns / 3 allocs is the admit-path floor. The three allocations are the release closure, the `atomic.Bool` it captures for double-call safety, and the `execution` controller — all of which escape to the heap because the closure outlives the stack frame and the controller is handed to the callback through the `panix.Safe` boundary as an interface. The semaphore receive, the atomic counter bumps, and (post-warmup) the mutex-guarded adaptation step are otherwise alloc-free.
+- **Acquire / TryAcquire**: 2 allocs / 28 B — the release closure and its captured `atomic.Bool`. `TryAcquire` is ~30 % cheaper than `Acquire` because it skips the context pre-check and the blocking `select`. Both are the right primitive when a single callback does not fit the call shape.
+- **TryExecute**: same 3-allocation floor as `Execute`; uses `[opTryExecute]` for panic attribution unless `WithOp` overrides both entry points.
+- **Execute_Parallel**: ~930 ns, ~1.4× the serial cost at 8 goroutines. The slowdown is the shared `inFlight`/`total` counters and the channel send/receive contending on the same cache lines; there is no mutex on the admission path, so it scales predictably with core count.
+- **Allow / Limit**: 0 allocs, ~26–28 ns — a single mutex lock/unlock around limit and in-flight reads. Safe to poll from a metrics loop; `Allow` is cheaper when you only need a yes/no without running a callback.
 - **Allocation floor**: the admit path's 3 allocs are architectural (closure + atomic + controller). They are the cost of the controller API and the idempotent release guarantee, not avoidable bookkeeping; a controller-free, fire-and-forget API could reach fewer allocs but would drop the load snapshot and `SkipSample` that justify the package.
 
 ## Quality
@@ -361,11 +376,11 @@ A panicking callback surfaces as a `*panix.PanicError` returned by `Execute` (re
 
 | Metric         | Value                          |
 | -------------- | ------------------------------ |
-| Test functions | 51                             |
-| Benchmarks     | 6                              |
+| Test functions | 71                             |
+| Benchmarks     | 8                              |
 | Fuzz targets   | 2                              |
 | Examples       | 4                              |
-| Coverage       | 99.3%                          |
+| Coverage       | 96.3%                          |
 | Race detector  | All pass                       |
 | External deps  | 0 (panix; testify in dev only) |
 

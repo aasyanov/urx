@@ -90,14 +90,19 @@ func ExampleShedder_Acquire() {
 }
 
 // ExampleShedController_Shed shows a callback recording graceful degradation
-// via the ShedController when the system is under load.
+// when the shedder is already under load.
 func ExampleShedController_Shed() {
-	s := shedx.New(shedx.WithCapacity(100))
+	s := shedx.New(shedx.WithCapacity(4), shedx.WithThreshold(0.5))
 	defer func() { _ = s.Close() }()
+
+	tok1, _ := s.Acquire(shedx.PriorityCritical)
+	tok2, _ := s.Acquire(shedx.PriorityCritical)
+	defer tok1.Release()
+	defer tok2.Release()
 
 	val, err := shedx.Execute(s, context.Background(), shedx.PriorityNormal,
 		func(_ context.Context, sc shedx.ShedController) (string, error) {
-			if sc.Load() > 0.5 {
+			if sc.Load() >= 0.5 {
 				sc.Shed()
 				return "cached", nil
 			}
@@ -105,5 +110,5 @@ func ExampleShedController_Shed() {
 		})
 	fmt.Println(val, err)
 	// Output:
-	// fresh <nil>
+	// cached <nil>
 }

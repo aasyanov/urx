@@ -14,13 +14,18 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func closePool(t *testing.T, wp *WorkerPool) {
+	t.Helper()
+	require.NoError(t, wp.Close())
+}
+
 func TestNewWorkerPool_Defaults(t *testing.T) {
 	wp := NewWorkerPool()
-	defer wp.Close()
+	defer closePool(t, wp)
 
 	st := wp.Stats()
-	assert.Equal(t, defaultWorkers, st.Workers)
-	assert.Equal(t, defaultQueueSize, st.QueueSize)
+	assert.Equal(t, DefaultWorkers, st.Workers)
+	assert.Equal(t, DefaultQueueSize, st.QueueSize)
 }
 
 func TestWorkerOptions(t *testing.T) {
@@ -30,16 +35,16 @@ func TestWorkerOptions(t *testing.T) {
 		wantWorkers   int
 		wantQueueSize int
 	}{
-		{name: "defaults", opts: nil, wantWorkers: defaultWorkers, wantQueueSize: defaultQueueSize},
+		{name: "defaults", opts: nil, wantWorkers: DefaultWorkers, wantQueueSize: DefaultQueueSize},
 		{name: "custom", opts: []WorkerOption{WithWorkers(8), WithQueueSize(256)}, wantWorkers: 8, wantQueueSize: 256},
-		{name: "zero workers ignored", opts: []WorkerOption{WithWorkers(0)}, wantWorkers: defaultWorkers, wantQueueSize: defaultQueueSize},
-		{name: "negative workers ignored", opts: []WorkerOption{WithWorkers(-3)}, wantWorkers: defaultWorkers, wantQueueSize: defaultQueueSize},
-		{name: "zero queue ignored", opts: []WorkerOption{WithQueueSize(0)}, wantWorkers: defaultWorkers, wantQueueSize: defaultQueueSize},
+		{name: "zero workers ignored", opts: []WorkerOption{WithWorkers(0)}, wantWorkers: DefaultWorkers, wantQueueSize: DefaultQueueSize},
+		{name: "negative workers ignored", opts: []WorkerOption{WithWorkers(-3)}, wantWorkers: DefaultWorkers, wantQueueSize: DefaultQueueSize},
+		{name: "zero queue ignored", opts: []WorkerOption{WithQueueSize(0)}, wantWorkers: DefaultWorkers, wantQueueSize: DefaultQueueSize},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			wp := NewWorkerPool(tt.opts...)
-			defer wp.Close()
+			defer closePool(t, wp)
 			st := wp.Stats()
 			assert.Equal(t, tt.wantWorkers, st.Workers)
 			assert.Equal(t, tt.wantQueueSize, st.QueueSize)
@@ -47,9 +52,15 @@ func TestWorkerOptions(t *testing.T) {
 	}
 }
 
+func TestWithWorkerOp_OverridesDefault(t *testing.T) {
+	assert.Equal(t, opWorker, newWorkerConfig(nil).opOrDefault())
+	assert.Equal(t, "api.ingest", newWorkerConfig([]WorkerOption{WithWorkerOp("api.ingest")}).opOrDefault())
+	assert.Equal(t, opWorker, newWorkerConfig([]WorkerOption{WithWorkerOp("")}).opOrDefault())
+}
+
 func TestWorkerPool_SubmitRunsTask(t *testing.T) {
 	wp := NewWorkerPool(WithWorkers(2))
-	defer wp.Close()
+	defer closePool(t, wp)
 
 	var ran atomic.Bool
 	require.NoError(t, wp.Submit(context.Background(), func(context.Context) error {
@@ -62,7 +73,7 @@ func TestWorkerPool_SubmitRunsTask(t *testing.T) {
 
 func TestWorkerPool_SubmitCountsCompleted(t *testing.T) {
 	wp := NewWorkerPool(WithWorkers(4))
-	defer wp.Close()
+	defer closePool(t, wp)
 
 	const n = 100
 	for range n {
@@ -77,7 +88,7 @@ func TestWorkerPool_SubmitCountsCompleted(t *testing.T) {
 
 func TestWorkerPool_SubmitCountsFailed(t *testing.T) {
 	wp := NewWorkerPool(WithWorkers(2))
-	defer wp.Close()
+	defer closePool(t, wp)
 
 	sentinel := errors.New("task failed")
 	require.NoError(t, wp.Submit(context.Background(), func(context.Context) error { return sentinel }))
@@ -90,7 +101,7 @@ func TestWorkerPool_SubmitCountsFailed(t *testing.T) {
 
 func TestWorkerPool_SubmitCountsPanicSeparately(t *testing.T) {
 	wp := NewWorkerPool(WithWorkers(2))
-	defer wp.Close()
+	defer closePool(t, wp)
 
 	require.NoError(t, wp.Submit(context.Background(), func(context.Context) error { panic("boom") }))
 
@@ -100,9 +111,17 @@ func TestWorkerPool_SubmitCountsPanicSeparately(t *testing.T) {
 	}, time.Second)
 }
 
+func TestWorkerPool_SubmitReturnsErrNilFunc(t *testing.T) {
+	wp := NewWorkerPool()
+	defer closePool(t, wp)
+
+	err := wp.Submit(context.Background(), nil)
+	require.ErrorIs(t, err, ErrNilFunc)
+}
+
 func TestWorkerPool_SubmitAfterCloseReturnsErrClosed(t *testing.T) {
 	wp := NewWorkerPool()
-	wp.Close()
+	require.NoError(t, wp.Close())
 
 	testx.AssertOpAfterClose(t, func() error {
 		return wp.Submit(context.Background(), func(context.Context) error { return nil })
@@ -110,9 +129,9 @@ func TestWorkerPool_SubmitAfterCloseReturnsErrClosed(t *testing.T) {
 	assert.True(t, wp.IsClosed())
 }
 
-func TestWorkerPool_SubmitCancelledContext(t *testing.T) {
+func TestWorkerPool_SubmitCancelledContextWhenQueueFull(t *testing.T) {
 	wp := NewWorkerPool(WithWorkers(1), WithQueueSize(1))
-	defer wp.Close()
+	defer closePool(t, wp)
 
 	block := make(chan struct{})
 	require.NoError(t, wp.Submit(context.Background(), func(context.Context) error {
@@ -126,9 +145,18 @@ func TestWorkerPool_SubmitCancelledContext(t *testing.T) {
 	close(block)
 }
 
+func TestWorkerPool_SubmitCancelledContextWhenQueueHasSpace(t *testing.T) {
+	wp := NewWorkerPool(WithWorkers(2), WithQueueSize(8))
+	defer closePool(t, wp)
+
+	err := wp.Submit(testx.CancelledCtx(), func(context.Context) error { return nil })
+	require.ErrorIs(t, err, ErrCancelled)
+	require.ErrorIs(t, err, context.Canceled)
+}
+
 func TestWorkerPool_TrySubmitQueueFull(t *testing.T) {
 	wp := NewWorkerPool(WithWorkers(1), WithQueueSize(1))
-	defer wp.Close()
+	defer closePool(t, wp)
 
 	block := make(chan struct{})
 	require.NoError(t, wp.Submit(context.Background(), func(context.Context) error {
@@ -142,9 +170,31 @@ func TestWorkerPool_TrySubmitQueueFull(t *testing.T) {
 	close(block)
 }
 
+func TestWorkerPool_TrySubmitCancelledContext(t *testing.T) {
+	wp := NewWorkerPool(WithWorkers(4), WithQueueSize(8))
+	defer closePool(t, wp)
+
+	called := false
+	err := wp.TrySubmit(testx.CancelledCtx(), func(context.Context) error {
+		called = true
+		return nil
+	})
+	require.ErrorIs(t, err, ErrCancelled)
+	require.ErrorIs(t, err, context.Canceled)
+	assert.False(t, called)
+}
+
+func TestWorkerPool_TrySubmitReturnsErrNilFunc(t *testing.T) {
+	wp := NewWorkerPool()
+	defer closePool(t, wp)
+
+	err := wp.TrySubmit(context.Background(), nil)
+	require.ErrorIs(t, err, ErrNilFunc)
+}
+
 func TestWorkerPool_TrySubmitAfterCloseReturnsErrClosed(t *testing.T) {
 	wp := NewWorkerPool()
-	wp.Close()
+	require.NoError(t, wp.Close())
 
 	err := wp.TrySubmit(context.Background(), func(context.Context) error { return nil })
 	require.ErrorIs(t, err, ErrClosed)
@@ -152,7 +202,7 @@ func TestWorkerPool_TrySubmitAfterCloseReturnsErrClosed(t *testing.T) {
 
 func TestWorkerPool_SubmitWaitReturnsResult(t *testing.T) {
 	wp := NewWorkerPool(WithWorkers(2))
-	defer wp.Close()
+	defer closePool(t, wp)
 
 	sentinel := errors.New("boom")
 	err := wp.SubmitWait(context.Background(), func(context.Context) error { return sentinel })
@@ -163,24 +213,56 @@ func TestWorkerPool_SubmitWaitReturnsResult(t *testing.T) {
 
 func TestWorkerPool_SubmitWaitPanicReturnsPanicError(t *testing.T) {
 	wp := NewWorkerPool(WithWorkers(2))
-	defer wp.Close()
+	defer closePool(t, wp)
 
 	err := wp.SubmitWait(context.Background(), func(context.Context) error { panic("kaboom") })
 	pe := testx.RequirePanicError(t, err, opWorker)
 	assert.Equal(t, "kaboom", pe.Value)
 }
 
+func TestWorkerPool_SubmitWaitPanicUsesCustomOp(t *testing.T) {
+	wp := NewWorkerPool(WithWorkers(2), WithWorkerOp("api.worker"))
+	defer closePool(t, wp)
+
+	err := wp.SubmitWait(context.Background(), func(context.Context) error { panic("kaboom") })
+	testx.RequirePanicError(t, err, "api.worker")
+}
+
+func TestWorkerPool_SubmitWaitReturnsErrNilFunc(t *testing.T) {
+	wp := NewWorkerPool()
+	defer closePool(t, wp)
+
+	err := wp.SubmitWait(context.Background(), nil)
+	require.ErrorIs(t, err, ErrNilFunc)
+}
+
 func TestWorkerPool_SubmitWaitAfterCloseReturnsErrClosed(t *testing.T) {
 	wp := NewWorkerPool()
-	wp.Close()
+	require.NoError(t, wp.Close())
 
 	err := wp.SubmitWait(context.Background(), func(context.Context) error { return nil })
 	require.ErrorIs(t, err, ErrClosed)
 }
 
+func TestWorkerPool_SubmitWaitCancelBeforeEnqueueWhenQueueFull(t *testing.T) {
+	wp := NewWorkerPool(WithWorkers(1), WithQueueSize(1))
+	defer closePool(t, wp)
+
+	block := make(chan struct{})
+	require.NoError(t, wp.Submit(context.Background(), func(context.Context) error {
+		<-block
+		return nil
+	}))
+	require.NoError(t, wp.Submit(context.Background(), func(context.Context) error { return nil }))
+
+	err := wp.SubmitWait(testx.CancelledCtx(), func(context.Context) error { return nil })
+	require.ErrorIs(t, err, ErrCancelled)
+	close(block)
+}
+
 func TestWorkerPool_SubmitWaitCancelDuringExecution(t *testing.T) {
 	wp := NewWorkerPool(WithWorkers(1))
-	defer wp.Close()
+	defer closePool(t, wp)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	started := make(chan struct{})
@@ -218,7 +300,7 @@ func TestWorkerPool_CloseUnblocksPendingSubmit(t *testing.T) {
 	}()
 
 	close(block)
-	wp.Close()
+	require.NoError(t, wp.Close())
 
 	select {
 	case err := <-submitReturned:
@@ -243,21 +325,18 @@ func TestWorkerPool_CloseWaitsForQueuedTasks(t *testing.T) {
 		}))
 	}
 
-	wp.Close()
+	require.NoError(t, wp.Close())
 	assert.Equal(t, int64(n), done.Load(), "Close must drain all queued tasks")
 }
 
 func TestWorkerPool_CloseIdempotent(t *testing.T) {
 	wp := NewWorkerPool()
-	assert.NotPanics(t, func() {
-		wp.Close()
-		wp.Close()
-	})
+	testx.AssertCloseIdempotent(t, wp)
 }
 
 func TestWorkerPool_ResetStats(t *testing.T) {
 	wp := NewWorkerPool(WithWorkers(2))
-	defer wp.Close()
+	defer closePool(t, wp)
 
 	require.NoError(t, wp.SubmitWait(context.Background(), func(context.Context) error { return nil }))
 	require.Greater(t, wp.Stats().Completed, uint64(0))
@@ -272,7 +351,7 @@ func TestWorkerPool_ResetStats(t *testing.T) {
 
 func TestWorkerPool_ConcurrentSubmit(t *testing.T) {
 	wp := NewWorkerPool(WithWorkers(8), WithQueueSize(256))
-	defer wp.Close()
+	defer closePool(t, wp)
 
 	var executed atomic.Int64
 	testx.HammerNoError(t, 50, 20, func() error {
@@ -303,7 +382,7 @@ func TestWorkerPool_CloseDrainsTasksEnqueuedDuringShutdown(t *testing.T) {
 	}
 
 	close(gate)
-	wp.Close()
+	require.NoError(t, wp.Close())
 
 	assert.Equal(t, int64(queued), executed.Load())
 	st := wp.Stats()
@@ -337,11 +416,50 @@ func TestWorkerPool_SubmitWaitCompletesWhenCloseDrainsQueue(t *testing.T) {
 		return wp.Stats().Submitted >= uint64(queued+1)
 	}, time.Second, time.Millisecond)
 
-	wp.Close()
+	require.NoError(t, wp.Close())
 	wg.Wait()
 
 	require.NoError(t, waitErr)
 	assert.Equal(t, int64(queued+1), ran.Load())
+}
+
+func TestWorkerPool_SubmitWaitReturnsResultDuringShutdown(t *testing.T) {
+	wp := NewWorkerPool(WithWorkers(1), WithQueueSize(4))
+
+	block := make(chan struct{})
+	require.NoError(t, wp.Submit(context.Background(), func(context.Context) error {
+		<-block
+		return nil
+	}))
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	var waitErr error
+	go func() {
+		defer wg.Done()
+		waitErr = wp.SubmitWait(context.Background(), func(context.Context) error {
+			return nil
+		})
+	}()
+
+	require.Eventually(t, func() bool {
+		return wp.Stats().Submitted >= 2
+	}, time.Second, time.Millisecond)
+
+	close(block)
+	require.NoError(t, wp.Close())
+	wg.Wait()
+
+	require.NoError(t, waitErr)
+}
+
+func TestWorkerPool_drainOrphanedTasksRunsQueuedWork(t *testing.T) {
+	wp := &WorkerPool{tasks: make(chan func(), 1)}
+
+	var ran atomic.Bool
+	wp.tasks <- func() { ran.Store(true) }
+	wp.drainOrphanedTasks()
+	assert.True(t, ran.Load())
 }
 
 func TestIsPanic(t *testing.T) {

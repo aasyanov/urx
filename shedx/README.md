@@ -95,6 +95,7 @@ Execute(s, ctx, priority, fn)
   │             Normal : overload < 0.60 ? commit : shed
   │             High   : overload < 0.90 ? commit : shed
   │       CAS(inflight, next) — retry on contention
+  │       commitReservation — closed ? rollback ; ErrClosed
   │
   ├── shed ? ──────────────► shed++ ; ErrRejected(priority)
   │
@@ -113,6 +114,7 @@ TryExecute(s, ctx, priority, fn)
   │ ctx.Err() ? ────────────────────────► (false, zero, ErrCancelled)
   │
   ├── tryReserve(priority):  CAS loop (same as Execute)
+  │     commitReservation — closed ? rollback ; ErrClosed
   │
   ├── shed ? ──────────────► shed++ ; (false, zero, nil)
   │
@@ -123,7 +125,7 @@ TryExecute(s, ctx, priority, fn)
 
 Admission is the whole game. Below the threshold every request passes. Above it, each non-critical priority is admitted only while the **overload fraction** — how far into the `[threshold, 1.0]` band the current load sits — stays under that priority's cutoff. As load climbs, `Low` drops out first (at 25 % into the band), then `Normal` (60 %), then `High` (90 %); `Critical` never drops. This produces a smooth, monotonic shed order rather than a cliff.
 
-The reservation uses a lock-free **compare-and-swap loop**: the candidate slot is committed only if admission holds for the *exact* post-increment count being stored. This is what makes the capacity bound hold under concurrency — two goroutines racing for the last slot read distinct counts, so at most one commits, and the in-flight counter is never transiently inflated past what is admitted. The loop retries only under genuine contention on the counter and allocates nothing.
+The reservation uses a lock-free **compare-and-swap loop**: the candidate slot is committed only if admission holds for the *exact* post-increment count being stored. After a successful CAS, **commitReservation** re-checks the closed flag (the same pattern as `bulkx`'s `commitSlot`): if `Close` won the race, the increment is rolled back and the caller receives `ErrClosed` rather than being admitted past shutdown. This is what makes the capacity bound hold under concurrency — two goroutines racing for the last slot read distinct counts, so at most one commits, and the in-flight counter is never transiently inflated past what is admitted. The loop retries only under genuine contention on the counter and allocates nothing.
 
 The callback runs under `panix.Safe`, so a panic becomes a `*panix.PanicError` and the in-flight slot is still released by the deferred decrement — a panicking handler can never leak capacity.
 
@@ -146,7 +148,7 @@ The `ShedController` handed to the callback carries the load snapshot taken at a
 | Panic safety         | A panicking callback becomes a `*panix.PanicError`, slot still freed                                                               |
 | Admission purity     | `Allow` reports a best-effort decision without mutating any counter or slot                                                        |
 | Token release        | `Token.Release` is idempotent; a double release never drives in-flight negative                                                    |
-| Close semantics      | After `Close`, `Execute`/`TryExecute`/`Acquire` return `ErrClosed`; in-flight work is unaffected                                   |
+| Close semantics      | After `Close`, `Execute`/`TryExecute`/`Acquire` return `ErrClosed`; optimistic CAS reservations re-check closed via `commitReservation`; in-flight work is unaffected                                   |
 | Idempotent close     | `Close` is safe to call repeatedly and always returns nil                                                                          |
 | Controller scope     | A `ShedController` is valid only during its callback; do not retain it                                                             |
 
@@ -355,11 +357,14 @@ Above the threshold, the overload fraction `(load − threshold) / (1 − thresh
 > **Critical traffic is uncapped by design.** `PriorityCritical` requests are admitted even above capacity, so `Load()` can exceed 1.0. Reserve `Critical` for genuinely must-run, low-volume traffic (health, auth, control plane).
 
 > [!NOTE]
+> **Invalid priority values are shed like High.** Only the `PriorityCritical` constant bypasses shedding. Casting arbitrary `uint8` values (for example `Priority(99)`) does not grant critical protection — use the named constants.
+
+> [!NOTE]
 > **Shedding does not abort admitted work.** A request admitted just before load spiked still runs to completion. For a hard per-request deadline, wrap the callback with `toutx.Execute`.
 
 ## Safety and Concurrency
 
-`Shedder` is safe for concurrent use from any number of goroutines. All admission state (`inflight`, `admitted`, `shed`, `degraded`, `closed`) lives in `sync/atomic` values; the hot path takes no lock. `Execute`, `TryExecute`, and `Acquire` reserve a slot with a compare-and-swap loop that commits only when the post-increment count is admissible, so the in-flight counter never exceeds the per-priority ceiling even when many goroutines race for the last slot — and it is never transiently inflated for observers. `Token.Release` likewise uses an atomic CAS, so a double release is a no-op and can never drive the counter negative. The `ShedController` is touched only by the single goroutine running its callback and needs no synchronization. Every test runs under `-race`, including a 64-goroutine capacity-bound stress test that asserts the observed in-flight count never exceeds capacity.
+`Shedder` is safe for concurrent use from any number of goroutines. All admission state (`inflight`, `admitted`, `shed`, `degraded`, `closed`) lives in `sync/atomic` values; the hot path takes no lock. `Execute`, `TryExecute`, and `Acquire` reserve a slot with a compare-and-swap loop that commits only when the post-increment count is admissible, then re-check closed via `commitReservation` so a reservation won concurrently with `Close` is rolled back instead of admitted. The in-flight counter never exceeds the per-priority ceiling even when many goroutines race for the last slot — and it is never transiently inflated for observers. `Token.Release` likewise uses an atomic CAS, so a double release is a no-op and can never drive the counter negative. The `ShedController` is touched only by the single goroutine running its callback and needs no synchronization. Every test runs under `-race`, including a 64-goroutine capacity-bound stress test that asserts the observed in-flight count never exceeds capacity.
 
 ## Benchmarks
 
@@ -398,11 +403,11 @@ Above the threshold, the overload fraction `(load − threshold) / (1 − thresh
 
 | Metric         | Value                          |
 | -------------- | ------------------------------ |
-| Test functions | 51                             |
+| Test functions | 59                             |
 | Benchmarks     | 10                             |
 | Fuzz targets   | 3                              |
-| Examples       | 5                              |
-| Coverage       | 98.3%                          |
+| Examples       | 6                              |
+| Coverage       | 98.4%                          |
 | Race detector  | All pass                       |
 | External deps  | 0 (panix; testify in dev only) |
 
@@ -415,6 +420,7 @@ shedx/
 ├── options.go          # config, Option, defaults, WithXxx
 ├── types.go            # Priority enum + ShedController + private execution impl
 ├── errors.go           # ErrRejected, ErrClosed, ErrNilFunc, ErrCancelled
+├── errors_test.go      # sentinel wrapping tests
 ├── shedx_test.go       # unit + table-driven tests
 ├── bench_test.go       # benchmarks (sequential + parallel)
 ├── fuzz_test.go        # FuzzExecute, FuzzTryExecute, FuzzAcquireRelease — admission invariants

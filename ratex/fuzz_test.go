@@ -80,3 +80,36 @@ func FuzzExecute(f *testing.F) {
 		}
 	})
 }
+
+// FuzzTryExecute drives [TryExecute] with fuzzed limiter parameters, asserting
+// it never panics and only returns documented error classes.
+func FuzzTryExecute(f *testing.F) {
+	f.Add(10.0, 5)
+	f.Add(1.0, 1)
+	f.Add(1e9, 1000)
+
+	f.Fuzz(func(t *testing.T, rate float64, burst int) {
+		l := New(WithRate(rate), WithBurst(burst))
+
+		ok, val, err := TryExecute(l, context.Background(),
+			func(_ context.Context, rc RateController) (int, error) {
+				if rc.Tokens() < 0 {
+					t.Fatalf("negative tokens in controller: %v", rc.Tokens())
+				}
+				return 7, nil
+			})
+
+		switch {
+		case err == nil && ok:
+			if val != 7 {
+				t.Fatalf("admitted but value = %d, want 7", val)
+			}
+		case err == nil && !ok:
+			// No token available — acceptable.
+		case errors.Is(err, ErrCancelled):
+			// Context was already done — acceptable.
+		default:
+			t.Fatalf("unexpected error class: %v", err)
+		}
+	})
+}

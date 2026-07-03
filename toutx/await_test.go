@@ -85,3 +85,45 @@ func TestAwaitResult_ParentCancelWhenDoneEmpty(t *testing.T) {
 	_, err := awaitResult(done, tctx, parent, "op", time.Minute)
 	require.ErrorIs(t, err, ErrCancelled)
 }
+
+func TestAwaitResult_MapsCallbackDeadlineErrorWhenParentCancelled(t *testing.T) {
+	done := make(chan execResult[int], 1)
+	done <- execResult[int]{err: context.DeadlineExceeded}
+
+	parent, cancel := context.WithCancelCause(context.Background())
+	cause := errors.New("parent stopped")
+	cancel(cause)
+
+	tctx, tcancel := context.WithTimeout(parent, time.Minute)
+	defer tcancel()
+
+	_, err := awaitResult(done, tctx, parent, "race.op", time.Minute)
+	require.ErrorIs(t, err, ErrCancelled)
+	require.ErrorIs(t, err, cause)
+}
+
+func TestNormalizeResult_CanceledWithoutParentCause(t *testing.T) {
+	var zero int
+	got, err := normalizeResult(zero, context.Background(), "op", time.Second,
+		execResult[int]{err: context.Canceled})
+	require.ErrorIs(t, err, ErrCancelled)
+	require.ErrorIs(t, err, context.Canceled)
+	assert.Equal(t, zero, got)
+}
+
+func TestResolveDeadline_FallsBackToStartPlusTimeout(t *testing.T) {
+	start := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	const timeout = 7 * time.Second
+
+	got := resolveDeadline(context.Background(), start, timeout)
+	assert.Equal(t, start.Add(timeout), got)
+}
+
+func TestResolveDeadline_UsesContextDeadline(t *testing.T) {
+	deadline := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	ctx, cancel := context.WithDeadline(context.Background(), deadline)
+	defer cancel()
+
+	got := resolveDeadline(ctx, time.Now(), time.Minute)
+	assert.Equal(t, deadline, got)
+}

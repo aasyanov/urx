@@ -2,9 +2,11 @@ package healthx
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -48,6 +50,13 @@ func TestRegister_NilCheckPanics(t *testing.T) {
 	c := New()
 	assert.Panics(t, func() {
 		c.Register("bad", nil)
+	})
+}
+
+func TestRegister_EmptyNamePanics(t *testing.T) {
+	c := New()
+	assert.Panics(t, func() {
+		c.Register("", upCheck)
 	})
 }
 
@@ -112,6 +121,7 @@ func TestReadiness_OneDownFailsOverall(t *testing.T) {
 	assert.Equal(t, StatusDown, rep.Status)
 	assert.Equal(t, StatusUp, rep.Components["ok"].Status)
 	assert.Equal(t, StatusDown, rep.Components["bad"].Status)
+	assert.Contains(t, rep.Components["bad"].Error, ErrUnhealthy.Error())
 	assert.Contains(t, rep.Components["bad"].Error, "component failed")
 }
 
@@ -148,6 +158,54 @@ func TestReadiness_ParentCancelIsUnhealthyNotTimeout(t *testing.T) {
 	assert.Equal(t, StatusDown, cs.Status)
 	assert.Contains(t, cs.Error, ErrUnhealthy.Error(), "parent cancel is a generic failure")
 	assert.NotContains(t, cs.Error, ErrTimeout.Error(), "parent cancel must not be classified as a check timeout")
+}
+
+func TestReadiness_DuplicateNameRunsBothChecks(t *testing.T) {
+	c := New()
+	var calls atomic.Int32
+	c.Register("dup", func(context.Context) error { calls.Add(1); return nil })
+	c.Register("dup", func(context.Context) error { calls.Add(1); return nil })
+
+	rep := c.Readiness(context.Background())
+	assert.Equal(t, int32(2), calls.Load(), "both registrations must run")
+	require.Len(t, rep.Components, 1, "duplicate names share one report key")
+	assert.Equal(t, StatusUp, rep.Components["dup"].Status)
+}
+
+func TestReadiness_ManyChecksNearDeadlineNotMisclassified(t *testing.T) {
+	c := New(WithTimeout(50 * time.Millisecond))
+	for i := range 20 {
+		name := string(rune('a' + i))
+		c.Register(name, func(ctx context.Context) error {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(40 * time.Millisecond):
+				return nil
+			}
+		})
+	}
+
+	rep := c.Readiness(context.Background())
+	assert.Equal(t, StatusUp, rep.Status)
+	require.Len(t, rep.Components, 20)
+	for name, cs := range rep.Components {
+		assert.Equal(t, StatusUp, cs.Status, "component %s must not be misclassified as timed out", name)
+		assert.NotContains(t, cs.Error, ErrTimeout.Error())
+	}
+}
+
+func TestDrainCheckResults_EmptiesBuffer(t *testing.T) {
+	ch := make(chan checkResult, 2)
+	ch <- checkResult{name: "a", status: ComponentStatus{Status: StatusUp, Duration: zeroDuration}}
+	ch <- checkResult{name: "b", status: ComponentStatus{Status: StatusUp, Duration: zeroDuration}}
+
+	components := make(map[string]ComponentStatus)
+	drainCheckResults(components, ch)
+
+	require.Len(t, components, 2)
+	assert.Equal(t, StatusUp, components["a"].Status)
+	assert.Equal(t, StatusUp, components["b"].Status)
 }
 
 func TestReadiness_ContextIgnoringCheckDoesNotHang(t *testing.T) {
@@ -232,6 +290,18 @@ func TestStats_MarkDownReflected(t *testing.T) {
 	assert.True(t, c.Stats().Down)
 }
 
+func TestStats_MarkDownIncrementsReadinessFailures(t *testing.T) {
+	c := New()
+	c.Register("ok", upCheck)
+	c.MarkDown()
+
+	c.Readiness(context.Background())
+
+	st := c.Stats()
+	assert.Equal(t, uint64(1), st.ReadinessChecks)
+	assert.Equal(t, uint64(1), st.ReadinessFailures)
+}
+
 func TestResetStats(t *testing.T) {
 	c := New()
 	c.Register("bad", downCheck)
@@ -256,11 +326,21 @@ func TestLiveHandler(t *testing.T) {
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	assert.Equal(t, "application/json", resp.Header.Get("Content-Type"))
 
+	var rep Report
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&rep))
+	assert.Equal(t, StatusUp, rep.Status)
+	assert.Equal(t, zeroDuration, rep.Duration)
+	assert.Nil(t, rep.Components)
+
 	c.MarkDown()
 	resp2, err := http.Get(srv.URL)
 	require.NoError(t, err)
 	defer resp2.Body.Close()
 	assert.Equal(t, http.StatusServiceUnavailable, resp2.StatusCode)
+
+	var rep2 Report
+	require.NoError(t, json.NewDecoder(resp2.Body).Decode(&rep2))
+	assert.Equal(t, StatusDown, rep2.Status)
 }
 
 func TestReadyHandler(t *testing.T) {
@@ -274,11 +354,24 @@ func TestReadyHandler(t *testing.T) {
 	defer resp.Body.Close()
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 
+	var rep Report
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&rep))
+	assert.Equal(t, StatusUp, rep.Status)
+	require.Len(t, rep.Components, 1)
+	assert.Equal(t, StatusUp, rep.Components["ok"].Status)
+	assert.NotEmpty(t, rep.Duration)
+
 	c.Register("bad", downCheck)
 	resp2, err := http.Get(srv.URL)
 	require.NoError(t, err)
 	defer resp2.Body.Close()
 	assert.Equal(t, http.StatusServiceUnavailable, resp2.StatusCode)
+
+	var rep2 Report
+	require.NoError(t, json.NewDecoder(resp2.Body).Decode(&rep2))
+	assert.Equal(t, StatusDown, rep2.Status)
+	require.Len(t, rep2.Components, 2)
+	assert.Equal(t, StatusDown, rep2.Components["bad"].Status)
 }
 
 func TestRegisterHandlers(t *testing.T) {

@@ -24,6 +24,18 @@ type cacheShard[T any] struct {
 	lru     lruHeap[T]
 }
 
+// initCache allocates the sharded result cache. It runs only under
+// [StrategyCached], from [New] before any concurrent use.
+func (f *Fallback[T]) initCache() {
+	if len(f.shards) > 0 {
+		return
+	}
+	f.shards = make([]*cacheShard[T], f.cfg.shardCount)
+	for i := range f.shards {
+		f.shards[i] = newCacheShard[T]()
+	}
+}
+
 // newCacheShard returns an empty, ready-to-use shard.
 func newCacheShard[T any]() *cacheShard[T] {
 	return &cacheShard[T]{
@@ -143,12 +155,19 @@ func (f *Fallback[T]) evictIfNeeded() {
 			break
 		}
 		shard.mu.Lock()
+		evicted := false
 		if cur, ok := shard.entries[oldest.key]; ok && cur == oldest {
 			shard.remove(oldest)
 			f.cacheSize.Add(-1)
 			f.cacheEvictions.Add(1)
+			evicted = true
 		}
 		shard.mu.Unlock()
+		if !evicted {
+			// Stale LRU heap entry or counter drift; resync rather than spin.
+			f.syncCacheSize()
+			break
+		}
 	}
 }
 

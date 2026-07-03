@@ -8,9 +8,8 @@ import (
 )
 
 // FuzzExecuteCached drives the cached strategy with arbitrary keys, TTLs, cache
-// sizes, and a success/fail flag. Invariants: it never panics, the live cache
-// size never exceeds the configured capacity, and a key whose primary just
-// succeeded replays on a subsequent failure within the TTL.
+// sizes, and a success/fail flag. Invariants: it never panics and the live cache
+// size never exceeds the configured capacity after eviction settles.
 func FuzzExecuteCached(f *testing.F) {
 	f.Add("k", int64(60_000), 4, true)
 	f.Add("", int64(0), 0, false)
@@ -23,15 +22,52 @@ func FuzzExecuteCached(f *testing.F) {
 		defer func() { _ = fb.Close() }()
 
 		ctx := context.Background()
-		_, _ = ExecuteWithKey(fb, ctx, key, func(context.Context, FallController) (int, error) {
+		_, err := ExecuteWithKey(fb, ctx, key, func(context.Context, FallController) (int, error) {
 			if succeed {
 				return 1, nil
 			}
 			return 0, errors.New("boom")
 		})
+		if succeed && err != nil {
+			t.Fatalf("primary succeeded but got error: %v", err)
+		}
+		if !succeed && err == nil {
+			t.Fatalf("primary failed on first call without cache but error is nil")
+		}
 
-		if maxSize > 0 && fb.Stats().CacheSize > maxSize {
-			t.Fatalf("cache size %d exceeds capacity %d", fb.Stats().CacheSize, maxSize)
+		effectiveMax := maxSize
+		if effectiveMax <= 0 {
+			effectiveMax = DefaultMaxCacheSize
+		}
+		if fb.Stats().CacheSize > effectiveMax {
+			t.Fatalf("cache size %d exceeds capacity %d", fb.Stats().CacheSize, effectiveMax)
+		}
+	})
+}
+
+// FuzzExecuteCachedReplay verifies that a successful primary result is replayed on
+// the very next failure when the TTL is long enough to survive back-to-back calls.
+func FuzzExecuteCachedReplay(f *testing.F) {
+	f.Add("alpha")
+	f.Add("user-42")
+	f.Add("")
+
+	f.Fuzz(func(t *testing.T, key string) {
+		fb := New(WithCached[int](time.Minute, 64), WithShards[int](4))
+		defer func() { _ = fb.Close() }()
+
+		ctx := context.Background()
+		_, err := ExecuteWithKey(fb, ctx, key, okFn(1))
+		if err != nil {
+			t.Fatalf("primary succeeded but got error: %v", err)
+		}
+
+		got, err := ExecuteWithKey(fb, ctx, key, failFn[int](errPrimary))
+		if err != nil {
+			t.Fatalf("cached replay failed after success: %v", err)
+		}
+		if got != 1 {
+			t.Fatalf("cached replay got %d, want 1", got)
 		}
 	})
 }

@@ -50,7 +50,8 @@ func newConfig(opts []Option) config {
 
 // WithRate sets the sustained rate in requests per second — the long-run
 // average number of tokens added to the bucket each second.
-// Default: [DefaultRate]. Values <= 0 are ignored.
+// Default: [DefaultRate]. Values <= 0 are ignored; values below the [minRate]
+// floor are raised to [minRate] when [New] resolves the final configuration.
 func WithRate(r float64) Option {
 	return func(c *config) {
 		if r > 0 {
@@ -62,11 +63,10 @@ func WithRate(r float64) Option {
 // WithBurst sets the bucket capacity: the maximum number of tokens that can
 // accumulate, and therefore the largest momentary burst allowed above the
 // sustained rate.
-// Default: [DefaultBurst]. Values <= 0 are ignored.
+// Default: [DefaultBurst]. Values below the [minBurst] floor are raised to
+// [minBurst] when [New] resolves the final configuration.
 func WithBurst(n int) Option {
 	return func(c *config) {
-		if n > 0 {
-			c.burst = n
-		}
+		c.burst = n
 	}
 }
