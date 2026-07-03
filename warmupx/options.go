@@ -58,6 +58,7 @@ type config struct {
 	expFactor   float64
 	onCapChange func(oldCap, newCap float64)
 	onComplete  func()
+	op          string
 }
 
 // newConfig resolves the effective configuration: defaults first, then options
@@ -87,6 +88,24 @@ func newConfig(opts []Option) config {
 		cfg.interval = maxInterval
 	}
 	return cfg
+}
+
+// opOrDefault returns the configured operation name, or [opExecute] when none
+// was set.
+func (c config) opOrDefault() string {
+	if c.op != "" {
+		return c.op
+	}
+	return opExecute
+}
+
+// opOrDefaultTry returns the configured operation name, or [opTryExecute] when
+// none was set.
+func (c config) opOrDefaultTry() string {
+	if c.op != "" {
+		return c.op
+	}
+	return opTryExecute
 }
 
 // WithStrategy sets the ramp-up strategy.
@@ -168,4 +187,15 @@ func WithOnCapacityChange(fn func(oldCap, newCap float64)) Option {
 // reaches full capacity. The callback runs in its own goroutine. Default: nil.
 func WithOnComplete(fn func()) Option {
 	return func(c *config) { c.onComplete = fn }
+}
+
+// WithOp sets the logical operation name attached to panic reports raised by
+// the callback (e.g. "api.serve", "batch.process"). Default: [opExecute] for
+// [Execute] and [opTryExecute] for [TryExecute]. An empty name is ignored.
+func WithOp(op string) Option {
+	return func(c *config) {
+		if op != "" {
+			c.op = op
+		}
+	}
 }

@@ -271,6 +271,8 @@ func (w *Warmer) WaitForCompletion(ctx context.Context) error {
 //
 // If the call is rejected, Execute returns the zero value and an error wrapping
 // [ErrRejected] without invoking fn. If fn is nil, Execute returns [ErrNilFunc].
+// If ctx is already cancelled or its deadline has expired, Execute returns
+// [ErrCancelled] without attempting admission.
 //
 // On admission fn receives the call context and a [WarmupController] exposing
 // the capacity and progress at admission time. fn runs under [panix.Safe]; a
@@ -282,12 +284,15 @@ func Execute[T any](w *Warmer, ctx context.Context, fn WarmupFunc[T]) (T, error)
 	if fn == nil {
 		return zero, ErrNilFunc
 	}
+	if err := ctx.Err(); err != nil {
+		return zero, errCancelled(err)
+	}
 
 	capacity, progress, strategy, ok := w.tryAdmit()
 	if !ok {
 		return zero, errRejected(capacity, progress)
 	}
-	return executeRun(w, ctx, opExecute, capacity, progress, strategy, fn)
+	return executeRun(w, ctx, w.cfg.opOrDefault(), capacity, progress, strategy, fn)
 }
 
 // TryExecute attempts to run fn using the same probabilistic admission as
@@ -295,20 +300,25 @@ func Execute[T any](w *Warmer, ctx context.Context, fn WarmupFunc[T]) (T, error)
 // returns (true, val, err). If the call is rejected it returns (false, zero, nil)
 // without invoking fn and increments the rejected counter.
 //
-// Returns (false, zero, [ErrNilFunc]) if fn is nil. When admitted, fn runs under
-// [panix.Safe] with the same outcome semantics as [Execute], including
-// [WarmupController.Reject] and panic recovery.
+// Returns (false, zero, [ErrNilFunc]) if fn is nil, and (false, zero,
+// [ErrCancelled]) if ctx is already cancelled or its deadline has expired (no
+// admission attempted). When admitted, fn runs under [panix.Safe] with the same
+// outcome semantics as [Execute], including [WarmupController.Reject] and panic
+// recovery.
 func TryExecute[T any](w *Warmer, ctx context.Context, fn WarmupFunc[T]) (bool, T, error) {
 	var zero T
 	if fn == nil {
 		return false, zero, ErrNilFunc
+	}
+	if err := ctx.Err(); err != nil {
+		return false, zero, errCancelled(err)
 	}
 
 	capacity, progress, strategy, ok := w.tryAdmit()
 	if !ok {
 		return false, zero, nil
 	}
-	val, err := executeRun(w, ctx, opTryExecute, capacity, progress, strategy, fn)
+	val, err := executeRun(w, ctx, w.cfg.opOrDefaultTry(), capacity, progress, strategy, fn)
 	return true, val, err
 }
 

@@ -159,6 +159,18 @@ func TestWithExpFactor(t *testing.T) {
 	assert.InDelta(t, DefaultExpFactor, newConfig([]Option{WithExpFactor(-1)}).expFactor, 1e-9)
 }
 
+func TestWithOp(t *testing.T) {
+	assert.Equal(t, "api.serve", newConfig([]Option{WithOp("api.serve")}).opOrDefault())
+	assert.Equal(t, opExecute, newConfig([]Option{WithOp("")}).opOrDefault())
+	assert.Equal(t, opExecute, newConfig(nil).opOrDefault())
+}
+
+func TestWithOp_TryDefault(t *testing.T) {
+	assert.Equal(t, opTryExecute, newConfig(nil).opOrDefaultTry())
+	assert.Equal(t, "api.serve", newConfig([]Option{WithOp("api.serve")}).opOrDefaultTry())
+	assert.Equal(t, opTryExecute, newConfig([]Option{WithOp("")}).opOrDefaultTry())
+}
+
 func TestWithStrategy(t *testing.T) {
 	w := New(WithStrategy(Step))
 	assert.Equal(t, Step, w.Strategy())
@@ -483,6 +495,14 @@ func TestExecute_RecoversPanic(t *testing.T) {
 	assert.Equal(t, int64(0), s.Rejected)
 }
 
+func TestExecute_RecoversPanic_WithCustomOp(t *testing.T) {
+	w := New(WithMinCapacity(1), WithMaxCapacity(1), WithOp("batch.process"))
+	_, err := Execute(w, context.Background(), func(context.Context, WarmupController) (int, error) {
+		panic("boom")
+	})
+	testx.RequirePanicError(t, err, "batch.process")
+}
+
 func TestExecute_ContextVisibleToCallback(t *testing.T) {
 	w := New(WithMinCapacity(1), WithMaxCapacity(1))
 	type ctxKey struct{}
@@ -492,6 +512,30 @@ func TestExecute_ContextVisibleToCallback(t *testing.T) {
 		return 0, nil
 	})
 	require.NoError(t, err)
+}
+
+func TestExecute_ReturnsErrCancelledOnCancelledContext(t *testing.T) {
+	w := New(WithMinCapacity(1), WithMaxCapacity(1))
+	called := false
+	_, err := Execute(w, testx.CancelledCtx(), func(context.Context, WarmupController) (int, error) {
+		called = true
+		return 1, nil
+	})
+	require.ErrorIs(t, err, ErrCancelled)
+	require.ErrorIs(t, err, context.Canceled)
+	assert.False(t, called, "fn must not run for a cancelled context")
+	s := w.Stats()
+	assert.Equal(t, int64(0), s.Allowed)
+	assert.Equal(t, int64(0), s.Rejected, "cancelled request must not attempt admission")
+}
+
+func TestExecute_ReturnsErrCancelledOnExpiredDeadline(t *testing.T) {
+	w := New(WithMinCapacity(1), WithMaxCapacity(1))
+	_, err := Execute(w, testx.ExpiredCtx(), func(context.Context, WarmupController) (int, error) {
+		return 1, nil
+	})
+	require.ErrorIs(t, err, ErrCancelled)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
 }
 
 // --- TryExecute ---
@@ -528,6 +572,32 @@ func TestTryExecute_NilFunc(t *testing.T) {
 	w := New(WithMinCapacity(1), WithMaxCapacity(1))
 	ok, _, err := TryExecute[int](w, context.Background(), nil)
 	require.ErrorIs(t, err, ErrNilFunc)
+	assert.False(t, ok)
+}
+
+func TestTryExecute_ReturnsErrCancelledOnCancelledContext(t *testing.T) {
+	w := New(WithMinCapacity(1), WithMaxCapacity(1))
+	called := false
+	ok, _, err := TryExecute(w, testx.CancelledCtx(), func(context.Context, WarmupController) (int, error) {
+		called = true
+		return 1, nil
+	})
+	require.ErrorIs(t, err, ErrCancelled)
+	require.ErrorIs(t, err, context.Canceled)
+	assert.False(t, ok)
+	assert.False(t, called, "fn must not run for a cancelled context")
+	s := w.Stats()
+	assert.Equal(t, int64(0), s.Allowed)
+	assert.Equal(t, int64(0), s.Rejected, "cancelled request must not attempt admission")
+}
+
+func TestTryExecute_ReturnsErrCancelledOnExpiredDeadline(t *testing.T) {
+	w := New(WithMinCapacity(1), WithMaxCapacity(1))
+	ok, _, err := TryExecute(w, testx.ExpiredCtx(), func(context.Context, WarmupController) (int, error) {
+		return 1, nil
+	})
+	require.ErrorIs(t, err, ErrCancelled)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
 	assert.False(t, ok)
 }
 
@@ -569,6 +639,15 @@ func TestTryExecute_RecoversPanic(t *testing.T) {
 	s := w.Stats()
 	assert.Equal(t, int64(0), s.Allowed)
 	assert.Equal(t, int64(0), s.Rejected)
+}
+
+func TestTryExecute_RecoversPanic_WithCustomOp(t *testing.T) {
+	w := New(WithMinCapacity(1), WithMaxCapacity(1), WithOp("batch.process"))
+	ok, _, err := TryExecute(w, context.Background(), func(context.Context, WarmupController) (int, error) {
+		panic("boom")
+	})
+	require.True(t, ok)
+	testx.RequirePanicError(t, err, "batch.process")
 }
 
 func TestTryExecute_ContextVisibleToCallback(t *testing.T) {

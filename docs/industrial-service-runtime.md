@@ -75,8 +75,7 @@ type Config struct {
 }
 
 func (c *Config) Validate(fix bool) []error {
-    // validx или ручные проверки
-    // fix=true: clamp port, repair obvious mistakes
+    // ручные проверки полей; fix=true: clamp port, repair obvious mistakes
 }
 ```
 
@@ -943,7 +942,6 @@ func TestApplyConfig_HTTPPortChange_ReloadsServer(t *testing.T) {
 | **healthx** | `/livez`/`/readyz`/`/healthz`; `SetDown` на время Apply; Register checks на DB/steward (§25) |
 | **signalx** | Trap + Wait; `root.Stop` первым hook; reject config PUT при shutdown (§26) |
 | **poolx** | workers внутри camera/recorder Unit |
-| **validx** | внутри `Config.Validate` |
 | **panix** | Safe() в HTTP handlers (не в steward callbacks!) |
 | **syncx.Lazy** | ленивые тяжёлые клиенты внутри Unit Build |
 

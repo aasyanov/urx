@@ -125,6 +125,7 @@ For fractional progress `t ∈ [0, 1]` and `delta = maxCap − minCap`, capacity
 | `Stop` retains capacity | `Stop` freezes the current capacity; it is not reset to min                                                |
 | `Execute` rejection     | A rejected `Execute` never invokes the callback                                                            |
 | `TryExecute` rejection  | Probabilistic rejection returns `(false, zero, nil)` and never invokes the callback                        |
+| Cancelled ctx           | `Execute`/`TryExecute` return `ErrCancelled` before admission; counters unchanged                         |
 | Panic safety            | A panicking `Execute`/`TryExecute` callback becomes a `*panix.PanicError`; counters stay at pre-panic admission state |
 | Goroutine lifecycle     | Exactly one loop goroutine per active ramp; it exits on `Stop`, completion, or generation change           |
 | Concurrency             | All methods are safe for concurrent use; `-race` clean                                                     |
@@ -293,6 +294,7 @@ if err := w.WaitForCompletion(ctx); err != nil {
 | `WithExpFactor(f)`         | `3.0`                                   | Steepness of `Exponential`                                 |
 | `WithOnCapacityChange(fn)` | nil                                     | Async callback on >1% capacity change                      |
 | `WithOnComplete(fn)`       | nil                                     | Async callback on completion                               |
+| `WithOp(s)`                | `[opExecute]` / `[opTryExecute]`        | Operation name attached to panic reports (`TryExecute` defaults to `"warmupx.TryExecute"`) |
 
 
 ## Errors
@@ -302,6 +304,7 @@ if err := w.WaitForCompletion(ctx); err != nil {
 | ------------- | ---------------------------------------------------------------------------------------------------------------- |
 | `ErrRejected` | `AllowOrError` / `Execute` probabilistic rejection, or `WarmupController.Reject` on an admitted `Execute`/`TryExecute` (wraps capacity + progress) |
 | `ErrNilFunc`  | `Execute` / `TryExecute` was called with a nil function                                                         |
+| `ErrCancelled`| `Execute` / `TryExecute` when ctx is already cancelled or its deadline has expired at admission time (no admission attempted) |
 
 `TryExecute` does not return `ErrRejected` for probabilistic rejection — when admission fails it returns `(false, zero, nil)`, leaving the decision to the caller. A panicking callback surfaces as a `*panix.PanicError` returned by `Execute`/`TryExecute` (reach it with `errors.As`); counters reflect the admission outcome.
 
@@ -357,7 +360,7 @@ The `Warmer` is safe for concurrent use. State (`capacity`, `start`, `warming`, 
 
 | Metric         | Value                          |
 | -------------- | ------------------------------ |
-| Test functions | 60                             |
+| Test functions | 67                             |
 | Benchmarks     | 10                             |
 | Fuzz targets   | 4                              |
 | Examples       | 6                              |

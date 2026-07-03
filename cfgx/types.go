@@ -34,8 +34,8 @@ func (f Format) String() string {
 // [Load] calls it automatically after unmarshalling: with fix=true when
 // [WithAutoFix] is enabled, or fix=false (report only) otherwise.
 //
-// Implementations should use [validx] functions internally for field
-// checks. When fix is true, the method may mutate the receiver to correct
+// Implementations should collect all validation errors (not fail-fast on
+// the first). When fix is true, the method may mutate the receiver to correct
 // invalid values and should return only the errors that remain after the
 // fix pass. This is the seam through which cfgx composes with envx (env
 // overrides) and clix (flag overrides): validate the struct once after the
