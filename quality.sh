@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Full quality run: vet, tests (race+cover), benchmarks, fuzz.
-# All output goes to quality.res in the repo root.
+# Full quality run: vet, golangci-lint, tests (race+cover), benchmarks, fuzz.
+# All output goes to quality.result in the repo root.
 
 set -uo pipefail
 
 FUZZ_TIME="${FUZZ_TIME:-30s}"
 BENCH_COUNT="${BENCH_COUNT:-3}"
-OUT_FILE="${OUT_FILE:-quality.res}"
+OUT_FILE="${OUT_FILE:-quality.result}"
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT"
@@ -62,6 +62,8 @@ run_section() {
 } > "$OUT_PATH"
 
 run_section "go vet ./..." go vet ./...
+
+run_section "golangci-lint run ./..." golangci-lint run ./...
 
 run_section "go test -race -count=1 -timeout=120s -coverprofile=coverage.txt ./..." \
     go test -race -count=1 -timeout=120s -coverprofile=coverage.txt ./...
