@@ -262,6 +262,20 @@ func TestMap_Clear(t *testing.T) {
 	assert.Equal(t, 0, m.Len())
 }
 
+func TestMap_Clear_Concurrent(t *testing.T) {
+	m := NewMap[int, int]()
+	for i := range 100 {
+		m.Store(i, i)
+	}
+
+	testx.HammerVoid(20, 200, func() {
+		m.Clear()
+		m.Store(999, 999)
+		m.Delete(999)
+	})
+	assert.GreaterOrEqual(t, m.Len(), 0)
+}
+
 func TestMap_ConcurrentDisjointKeys(t *testing.T) {
 	m := NewMap[int, int]()
 	testx.HammerVoid(50, 1000, func() {
@@ -413,6 +427,19 @@ func TestGroup_TryGoRespectsLimit(t *testing.T) {
 	assert.False(t, g.TryGo(func(context.Context) error { return nil }))
 
 	close(release)
+	require.NoError(t, g.Wait())
+}
+
+func TestGroup_TryGoFromLimitedTaskAvoidsDeadlock(t *testing.T) {
+	g, _ := NewGroup(context.Background(), WithLimit(1))
+	ready := make(chan struct{})
+	g.Go(func(context.Context) error {
+		close(ready)
+		assert.False(t, g.TryGo(func(context.Context) error { return nil }),
+			"TryGo must fail while the single concurrency slot is held")
+		return nil
+	})
+	<-ready
 	require.NoError(t, g.Wait())
 }
 

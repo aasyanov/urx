@@ -3,6 +3,7 @@ package poolx
 import (
 	"context"
 	"errors"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -281,6 +282,66 @@ func TestWorkerPool_ConcurrentSubmit(t *testing.T) {
 		})
 	})
 	assert.Equal(t, int64(50*20), executed.Load())
+}
+
+func TestWorkerPool_CloseDrainsTasksEnqueuedDuringShutdown(t *testing.T) {
+	wp := NewWorkerPool(WithWorkers(1), WithQueueSize(8))
+
+	gate := make(chan struct{})
+	require.NoError(t, wp.Submit(context.Background(), func(context.Context) error {
+		<-gate
+		return nil
+	}))
+
+	var executed atomic.Int64
+	const queued = 5
+	for range queued {
+		require.NoError(t, wp.Submit(context.Background(), func(context.Context) error {
+			executed.Add(1)
+			return nil
+		}))
+	}
+
+	close(gate)
+	wp.Close()
+
+	assert.Equal(t, int64(queued), executed.Load())
+	st := wp.Stats()
+	assert.Equal(t, st.Submitted, st.Completed+st.Failed, "every submitted task must finish before Close returns")
+}
+
+func TestWorkerPool_SubmitWaitCompletesWhenCloseDrainsQueue(t *testing.T) {
+	wp := NewWorkerPool(WithWorkers(1), WithQueueSize(4))
+
+	var ran atomic.Int64
+	const queued = 3
+	for range queued {
+		require.NoError(t, wp.Submit(context.Background(), func(context.Context) error {
+			ran.Add(1)
+			return nil
+		}))
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	var waitErr error
+	go func() {
+		defer wg.Done()
+		waitErr = wp.SubmitWait(context.Background(), func(context.Context) error {
+			ran.Add(1)
+			return nil
+		})
+	}()
+
+	require.Eventually(t, func() bool {
+		return wp.Stats().Submitted >= uint64(queued+1)
+	}, time.Second, time.Millisecond)
+
+	wp.Close()
+	wg.Wait()
+
+	require.NoError(t, waitErr)
+	assert.Equal(t, int64(queued+1), ran.Load())
 }
 
 func TestIsPanic(t *testing.T) {

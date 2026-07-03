@@ -2,7 +2,7 @@
 
 [CI](https://github.com/aasyanov/urx/actions/workflows/ci.yml)
 [Go Reference](https://pkg.go.dev/github.com/aasyanov/urx/poolx)
-[License: MIT](https://opensource.org/licenses/MIT)
+[License: MIT](../LICENSE)
 
 Three pooling primitives — a bounded worker pool, a generic object pool, and a context-aware batch processor — each with panic recovery, observability counters, and idempotent shutdown. Go 1.24+. Zero external dependencies (depends only on the urx `panix` package; testify in tests only).
 
@@ -34,6 +34,23 @@ Hand-rolled versions of these repeat the same bugs: send-on-closed-channel panic
 ❌ NOT a distributed queue (in-process only; no persistence, no delivery guarantees)
 ❌ NOT a DI container or lifecycle graph (each primitive is standalone)
 ❌ NOT a rate limiter (use ratex/quotax for request-rate control)
+```
+
+### Position in the urx Stack
+
+```text
+┌──────────────────────────────────────────────────────────┐
+│  service code: handlers, I/O pipelines, background work  │
+└────────────────────────┬─────────────────────────────────┘
+                         │
+┌────────────────────────▼─────────────────────────────────┐
+│  poolx   WorkerPool · ObjectPool[T] · Batch[T]           │
+└──────────────┬───────────────────────┬───────────────────┘
+               │                        │
+┌──────────────▼─────────┐   ┌──────────▼───────────────────┐
+│  panix.Safe / SafeVoid │   │  sync.Pool · channels · time │
+│  (panic → error/stats) │   │  (bounded queues, tickers)   │
+└────────────────────────┘   └──────────────────────────────┘
 ```
 
 Each primitive runs user code through `[panix](../panix)` so a panicking task or flush is converted to an error instead of crashing the process.
@@ -274,13 +291,13 @@ All are sentinel errors created with `errors.New`; compare with `errors.Is`. A p
 ## Pitfalls
 
 > [!WARNING]
-> `**Submit` and `TrySubmit` do not return the task's error.** They report only enqueue failures (`ErrClosed`, `ErrQueueFull`, `ErrCancelled`). The task's own error/panic is recorded in `Stats()`. Use `SubmitWait` when you need the result.
+> **Submit** and `TrySubmit` do not return the task's error.** They report only enqueue failures (`ErrClosed`, `ErrQueueFull`, `ErrCancelled`). The task's own error/panic is recorded in `Stats()`. Use `SubmitWait` when you need the result.
 
 > [!WARNING]
-> **Tasks accepted concurrently with `Close` may be dropped.** `Close` drains tasks already in the queue, but a `Submit` racing with `Close` may return `nil` yet have its task discarded. Sequence shutdown after you stop submitting.
+> **Sequence shutdown after you stop submitting.** `Close` drains every queued task, including any accepted just before workers exit, so no enqueued work is silently dropped. `SubmitWait` also returns `ErrClosed` if the pool finishes shutting down before a queued task runs (for example, when the caller's context has no deadline and `Close` wins the race).
 
 > [!WARNING]
-> `**ObjectPool` makes no retention guarantee.** `sync.Pool` may evict pooled objects on any GC cycle. Never store state in the pool that must survive; it is a reuse cache, not a registry.
+> **ObjectPool** makes no retention guarantee.** `sync.Pool` may evict pooled objects on any GC cycle. Never store state in the pool that must survive; it is a reuse cache, not a registry.
 
 > [!WARNING]
 > **Without `WithReset`, pooled objects keep their state.** A `bytes.Buffer` put back with data still in it will be handed to the next `Get` with that data. Always reset mutable objects — either via `WithReset` or before `Put`.
@@ -298,7 +315,7 @@ All are sentinel errors created with `errors.New`; compare with `errors.Is`. A p
 
 ## Benchmarks
 
-> CPU: Intel i7-10510U · OS: Windows 10 · Go 1.26 · `-benchmem -count=3`
+> CPU: Intel i7-10510U · OS: Windows 10 · Go 1.24 · `-benchmem -count=3`
 
 
 | Benchmark                     | ns/op | B/op | allocs/op |
@@ -314,10 +331,10 @@ All are sentinel errors created with `errors.New`; compare with `errors.Is`. A p
 
 ### Analysis
 
-- `**ObjectPool_GetPut`: 38 ns, 0 allocs.** The happy path is a `sync.Pool.Get`/`Put` round trip plus two atomic increments. Zero allocations because the buffer is reused; the reset hook (`WithReset`) costs nothing measurable (`bytes.Buffer.Reset` is a length zeroing). This is the entire point of the type — turning per-call allocations into amortized reuse.
-- `**ObjectPool_GetPut_Parallel`: 93 ns, 0 allocs.** ~2.4× the sequential cost under 8-way parallelism. `sync.Pool` shards per-P, so contention is on the atomic counters, not the pool itself. Still allocation-free.
-- `**Batch_Add`: 27 ns, 0 allocs.** A mutex lock, a slice append, and a length check. The reported ~7 B/op is amortized backing-array growth during the benchmark's append sequence; in steady state with a pre-sized buffer there are no allocations. This is the hottest operation and it stays allocation-free per call.
-- `**WorkerPool_SubmitWait`: 2,600 ns, 3 allocs (176 B).** Dominated by cross-goroutine handoff: enqueue, worker wakeup, and the result channel round trip. The 3 allocations are the task closure, the result channel, and the `panix.SafeVoid` deferred frame. This is the cost of *bounded concurrency with a result* — appropriate for I/O-bound work (network, disk) where a few microseconds of coordination is dwarfed by the task itself, but not for nanosecond-scale CPU work that should run inline.
+- **ObjectPool_GetPut**: 38 ns, 0 allocs.** The happy path is a `sync.Pool.Get`/`Put` round trip plus two atomic increments. Zero allocations because the buffer is reused; the reset hook (`WithReset`) costs nothing measurable (`bytes.Buffer.Reset` is a length zeroing). This is the entire point of the type — turning per-call allocations into amortized reuse.
+- **ObjectPool_GetPut_Parallel**: 93 ns, 0 allocs.** ~2.4× the sequential cost under 8-way parallelism. `sync.Pool` shards per-P, so contention is on the atomic counters, not the pool itself. Still allocation-free.
+- **Batch_Add**: 27 ns, 0 allocs.** A mutex lock, a slice append, and a length check. The reported ~7 B/op is amortized backing-array growth during the benchmark's append sequence; in steady state with a pre-sized buffer there are no allocations. This is the hottest operation and it stays allocation-free per call.
+- **WorkerPool_SubmitWait**: 2,600 ns, 3 allocs (176 B).** Dominated by cross-goroutine handoff: enqueue, worker wakeup, and the result channel round trip. The 3 allocations are the task closure, the result channel, and the `panix.SafeVoid` deferred frame. This is the cost of *bounded concurrency with a result* — appropriate for I/O-bound work (network, disk) where a few microseconds of coordination is dwarfed by the task itself, but not for nanosecond-scale CPU work that should run inline.
 - **Parallel worker scaling: 2,800 ns.** Nearly flat versus sequential — the single shared queue channel is the coordination point, and 8 workers keep it saturated without the per-submit cost degrading. Throughput scales with worker count until the queue channel's mutex becomes the bottleneck.
 - **Allocation floor.** `ObjectPool` and `Batch` hot paths are 0 allocs by design. `WorkerPool`'s 3 allocs/op is the architectural minimum for a per-task closure + result channel + recovery frame; eliminating them would require giving up either the result (`SubmitWait`) or the panic safety net.
 
@@ -329,7 +346,7 @@ All are sentinel errors created with `errors.New`; compare with `errors.Is`. A p
 | Test functions        | 43                                              |
 | Table-driven subtests | 2                                               |
 | Benchmarks            | 7                                               |
-| Fuzz targets          | 0 (no untrusted byte input)                     |
+| Fuzz targets          | 2                                               |
 | Examples              | 3                                               |
 | Coverage              | 95.7%                                           |
 | Race detector         | All pass                                        |
@@ -350,6 +367,7 @@ poolx/
 ├── object_test.go      # ObjectPool tests — reuse, reset, concurrency
 ├── batch_test.go       # Batch tests — size/interval flush, ctx, error handler
 ├── bench_test.go       # 7 benchmarks: sequential + parallel
+├── fuzz_test.go        # FuzzWorkerPoolTrySubmit, FuzzBatchAdd — pool invariants
 ├── example_test.go     # 3 runnable GoDoc examples
 ├── footprint_test.go   # Stats/config struct size guards
 └── README.md           # This file

@@ -4,7 +4,7 @@
 [Go Reference](https://pkg.go.dev/github.com/aasyanov/urx)
 [License: MIT](LICENSE)
 
-Composable infrastructure primitives for industrial Go services. Each package does one thing, composes with the rest through `context.Context` and plain interfaces, and ships with exhaustive tests, benchmarks, and documentation. No framework runtime, no central dependency, no code generation.
+Composable infrastructure primitives for production Go services. Each package does one thing, composes with the rest through `context.Context` and plain interfaces, and ships with exhaustive tests, benchmarks, and documentation. No framework runtime, no central dependency, no code generation.
 
 ```
 go get github.com/aasyanov/urx

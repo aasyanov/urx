@@ -93,8 +93,11 @@ func TestNewConfig_ThresholdResetToDefault(t *testing.T) {
 
 func TestWithOp_OverridesDefault(t *testing.T) {
 	assert.Equal(t, opExecute, newConfig(nil).opOrDefault())
+	assert.Equal(t, opTryExecute, newConfig(nil).opOrDefaultTry())
 	assert.Equal(t, "api.search", newConfig([]Option{WithOp("api.search")}).opOrDefault())
+	assert.Equal(t, "api.search", newConfig([]Option{WithOp("api.search")}).opOrDefaultTry())
 	assert.Equal(t, opExecute, newConfig([]Option{WithOp("")}).opOrDefault())
+	assert.Equal(t, opTryExecute, newConfig([]Option{WithOp("")}).opOrDefaultTry())
 }
 
 // --- Priority ---
@@ -251,6 +254,193 @@ func TestExecute_RecoversPanic(t *testing.T) {
 	assert.Equal(t, int64(0), s.InFlight(), "slot released even on panic")
 }
 
+// --- TryExecute ---
+
+func TestTryExecute_RunsWhenAdmitted(t *testing.T) {
+	s := New(WithCapacity(10))
+	defer func() { require.NoError(t, s.Close()) }()
+
+	ok, got, err := TryExecute(s, context.Background(), PriorityNormal,
+		func(context.Context, ShedController) (int, error) { return 42, nil })
+	require.NoError(t, err)
+	assert.True(t, ok)
+	assert.Equal(t, 42, got)
+	assert.Equal(t, int64(1), s.Stats().Admitted)
+}
+
+func TestTryExecute_SkipsWhenShed(t *testing.T) {
+	s := New(WithCapacity(4), WithThreshold(0.5))
+	defer func() { require.NoError(t, s.Close()) }()
+
+	tokens := fill(t, s, PriorityCritical, 4)
+	defer release(tokens)
+
+	called := false
+	ok, _, err := TryExecute(s, context.Background(), PriorityLow,
+		func(context.Context, ShedController) (int, error) {
+			called = true
+			return 1, nil
+		})
+	require.NoError(t, err)
+	assert.False(t, ok)
+	assert.False(t, called, "fn must not run when the request is shed")
+	assert.Equal(t, int64(1), s.Stats().Shed)
+	assert.Equal(t, int64(4), s.InFlight(), "shed must roll back its reserved slot")
+}
+
+func TestTryExecute_ReturnsErrClosedAfterClose(t *testing.T) {
+	s := New()
+	require.NoError(t, s.Close())
+	testx.AssertOpAfterClose(t, func() error {
+		ok, _, err := TryExecute(s, context.Background(), PriorityCritical,
+			func(context.Context, ShedController) (int, error) { return 1, nil })
+		if ok {
+			return errors.New("expected ok=false")
+		}
+		return err
+	}, ErrClosed, "TryExecute")
+}
+
+func TestTryExecute_ReturnsErrNilFunc(t *testing.T) {
+	s := New()
+	defer func() { require.NoError(t, s.Close()) }()
+
+	ok, _, err := TryExecute[int](s, context.Background(), PriorityNormal, nil)
+	require.ErrorIs(t, err, ErrNilFunc)
+	assert.False(t, ok)
+}
+
+func TestTryExecute_ReturnsErrCancelledOnCancelledContext(t *testing.T) {
+	s := New()
+	defer func() { require.NoError(t, s.Close()) }()
+
+	called := false
+	ok, _, err := TryExecute(s, testx.CancelledCtx(), PriorityCritical,
+		func(context.Context, ShedController) (int, error) {
+			called = true
+			return 1, nil
+		})
+	require.ErrorIs(t, err, ErrCancelled)
+	require.ErrorIs(t, err, context.Canceled)
+	assert.False(t, ok)
+	assert.False(t, called, "fn must not run for a cancelled context")
+	assert.Equal(t, int64(0), s.InFlight(), "cancelled request must not consume a slot")
+}
+
+func TestTryExecute_ReturnsErrCancelledOnExpiredDeadline(t *testing.T) {
+	s := New()
+	defer func() { require.NoError(t, s.Close()) }()
+
+	ok, _, err := TryExecute(s, testx.ExpiredCtx(), PriorityCritical,
+		func(context.Context, ShedController) (int, error) { return 1, nil })
+	require.ErrorIs(t, err, ErrCancelled)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	assert.False(t, ok)
+}
+
+func TestTryExecute_ReleasesSlotAfterReturn(t *testing.T) {
+	s := New(WithCapacity(10))
+	defer func() { require.NoError(t, s.Close()) }()
+
+	ok, _, err := TryExecute(s, context.Background(), PriorityNormal,
+		func(_ context.Context, sc ShedController) (int, error) {
+			assert.Equal(t, int64(1), s.InFlight())
+			assert.Equal(t, int64(0), sc.InFlight())
+			return 1, nil
+		})
+	require.NoError(t, err)
+	assert.True(t, ok)
+	assert.Equal(t, int64(0), s.InFlight())
+}
+
+func TestTryExecute_PropagatesError(t *testing.T) {
+	s := New()
+	defer func() { require.NoError(t, s.Close()) }()
+
+	sentinel := errors.New("boom")
+	ok, _, err := TryExecute(s, context.Background(), PriorityNormal,
+		func(context.Context, ShedController) (int, error) {
+			return 0, sentinel
+		})
+	require.ErrorIs(t, err, sentinel)
+	assert.True(t, ok)
+	assert.Equal(t, int64(0), s.InFlight())
+}
+
+func TestTryExecute_RecoversPanic(t *testing.T) {
+	s := New()
+	defer func() { require.NoError(t, s.Close()) }()
+
+	ok, _, err := TryExecute(s, context.Background(), PriorityNormal,
+		func(context.Context, ShedController) (int, error) {
+			panic("kaboom")
+		})
+	assert.True(t, ok)
+	testx.RequirePanicError(t, err, opTryExecute)
+	assert.Equal(t, int64(0), s.InFlight(), "slot released even on panic")
+}
+
+func TestTryExecute_RecoversPanic_WithCustomOp(t *testing.T) {
+	s := New(WithOp("api.search"))
+	defer func() { require.NoError(t, s.Close()) }()
+
+	ok, _, err := TryExecute(s, context.Background(), PriorityNormal,
+		func(context.Context, ShedController) (int, error) {
+			panic("kaboom")
+		})
+	assert.True(t, ok)
+	testx.RequirePanicError(t, err, "api.search")
+}
+
+func TestTryExecute_ShedRecordsDegradation(t *testing.T) {
+	s := New()
+	defer func() { require.NoError(t, s.Close()) }()
+
+	ok, _, err := TryExecute(s, context.Background(), PriorityNormal,
+		func(_ context.Context, sc ShedController) (string, error) {
+			sc.Shed()
+			return "cached", nil
+		})
+	require.NoError(t, err)
+	assert.True(t, ok)
+	assert.Equal(t, int64(1), s.Stats().Degraded)
+}
+
+func TestTryExecute_ReturnsErrClosedWhenClosedDuringReserve(t *testing.T) {
+	s := New(WithCapacity(1000), WithThreshold(0.9))
+	defer func() { require.NoError(t, s.Close()) }()
+
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	type result struct {
+		ok  bool
+		err error
+	}
+	results := make(chan result, 64)
+
+	for range 64 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			ok, _, err := TryExecute(s, context.Background(), PriorityNormal,
+				func(context.Context, ShedController) (int, error) { return 1, nil })
+			results <- result{ok: ok, err: err}
+		}()
+	}
+
+	require.NoError(t, s.Close())
+	close(start)
+	wg.Wait()
+	close(results)
+
+	for r := range results {
+		require.ErrorIs(t, r.err, ErrClosed)
+		assert.False(t, r.ok)
+	}
+	assert.Equal(t, int64(0), s.Stats().Shed)
+}
+
 // --- ShedController.Shed ---
 
 func TestExecute_ShedRecordsDegradation(t *testing.T) {
@@ -327,6 +517,24 @@ func TestAdmits_ProgressiveByPriority(t *testing.T) {
 	}
 }
 
+func TestAdmits_ThresholdAtCeil(t *testing.T) {
+	s := New(WithCapacity(100), WithThreshold(1.0))
+	defer func() { require.NoError(t, s.Close()) }()
+
+	assert.True(t, s.admits(PriorityLow, 99), "below full capacity")
+	assert.False(t, s.admits(PriorityLow, 100), "at capacity non-critical shed")
+	assert.False(t, s.admits(PriorityHigh, 100))
+	assert.True(t, s.admits(PriorityCritical, 100))
+}
+
+func TestAdmits_UnknownPriorityTreatedAsHigh(t *testing.T) {
+	s := New(WithCapacity(100), WithThreshold(0.8))
+	defer func() { require.NoError(t, s.Close()) }()
+
+	const inflight int64 = 95
+	assert.Equal(t, s.admits(PriorityHigh, inflight), s.admits(Priority(50), inflight))
+}
+
 func TestAllow_MatchesAdmission(t *testing.T) {
 	s := New(WithCapacity(10), WithThreshold(0.5))
 	tokens := fill(t, s, PriorityCritical, 10)
@@ -394,6 +602,37 @@ func TestAcquire_ReturnsErrClosedAfterClose(t *testing.T) {
 	require.NoError(t, s.Close())
 	_, err := s.Acquire(PriorityCritical)
 	require.ErrorIs(t, err, ErrClosed)
+	assert.Equal(t, int64(0), s.Stats().Shed, "closed admission must not count as shed")
+}
+
+func TestExecute_ReturnsErrClosedWhenClosedDuringReserve(t *testing.T) {
+	s := New(WithCapacity(1000), WithThreshold(0.9))
+	defer func() { require.NoError(t, s.Close()) }()
+
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	errs := make(chan error, 64)
+
+	for range 64 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			_, err := Execute(s, context.Background(), PriorityNormal,
+				func(context.Context, ShedController) (int, error) { return 1, nil })
+			errs <- err
+		}()
+	}
+
+	require.NoError(t, s.Close())
+	close(start)
+	wg.Wait()
+	close(errs)
+
+	for err := range errs {
+		require.ErrorIs(t, err, ErrClosed)
+	}
+	assert.Equal(t, int64(0), s.Stats().Shed)
 }
 
 func TestAcquire_RejectsWhenOverloaded(t *testing.T) {
@@ -461,6 +700,8 @@ func TestExecute_RaceSafe(t *testing.T) {
 				}
 				return 1, nil
 			})
+		_, _, _ = TryExecute(s, context.Background(), PriorityLow,
+			func(context.Context, ShedController) (int, error) { return 1, nil })
 	})
 	assert.GreaterOrEqual(t, s.InFlight(), int64(0))
 }

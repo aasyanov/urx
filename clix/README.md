@@ -36,6 +36,23 @@ CLI tools accrete flags and subcommands over time. A tool that starts as `mytool
 
 It occupies the niche of "Cobra-style command tree with generics and zero dependencies."
 
+### Position in the urx Stack
+
+```text
+┌──────────────────────────────────────────────────────────┐
+│  main(): parse flags, dispatch subcommand, run action    │
+└────────────────────────┬─────────────────────────────────┘
+                         │
+┌────────────────────────▼─────────────────────────────────┐
+│  clix   Parser · Command tree · generic flag binding     │
+└──────────────┬───────────────────────┬───────────────────┘
+               │                        │
+┌──────────────▼─────────┐   ┌──────────▼───────────────────┐
+│  cfgx (file defaults)  │   │  envx (env overrides)        │
+│  shared struct fields  │   │  shared struct fields        │
+└────────────────────────┘   └──────────────────────────────┘
+```
+
 ## Architecture
 
 ```

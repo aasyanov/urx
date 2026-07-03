@@ -48,7 +48,7 @@ func TestExecute_ImmediateSuccess(t *testing.T) {
 func TestExecute_NilFunc(t *testing.T) {
 	h := New()
 	_, err := Execute(h, context.Background(), HedgeFunc[int](nil))
-	require.ErrorIs(t, err, ErrNoFunc)
+	require.ErrorIs(t, err, ErrNilFunc)
 	assert.Equal(t, int64(1), h.Stats().Failures)
 }
 
@@ -239,13 +239,13 @@ func TestExecuteMulti_FirstSucceeds(t *testing.T) {
 func TestExecuteMulti_Empty(t *testing.T) {
 	h := New()
 	_, err := ExecuteMulti(h, context.Background(), []HedgeFunc[int]{})
-	require.ErrorIs(t, err, ErrNoFunc)
+	require.ErrorIs(t, err, ErrNilFunc)
 }
 
 func TestExecuteMulti_AllNil(t *testing.T) {
 	h := New()
 	_, err := ExecuteMulti(h, context.Background(), []HedgeFunc[int]{nil, nil})
-	require.ErrorIs(t, err, ErrNoFunc)
+	require.ErrorIs(t, err, ErrNilFunc)
 }
 
 func TestExecuteMulti_SkipsNilGaps(t *testing.T) {

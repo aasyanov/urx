@@ -71,6 +71,7 @@ func SafeVoid(op string, fn func() error) error {
 // A nil ctx is treated as [context.Background].
 //
 // SafeGo never re-panics. If onError is nil, panics are silently recovered.
+// Panics raised by onError are also recovered.
 func SafeGo(ctx context.Context, op string, fn func(ctx context.Context), onError func(ctx context.Context, err error)) {
 	if ctx == nil {
 		ctx = context.Background()

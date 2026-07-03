@@ -1,5 +1,5 @@
 // Package retryx provides a configurable retry engine with exponential backoff,
-// jitter, panic recovery, and structured error reporting for industrial Go
+// jitter, panic recovery, and structured error reporting for production Go
 // services.
 //
 // The caller supplies a [RetryFunc] that receives the call context and a
@@ -116,12 +116,23 @@ func sleep(ctx context.Context, d time.Duration) error {
 		return ctx.Err()
 	}
 	timer := time.NewTimer(d)
-	defer timer.Stop()
 	select {
 	case <-timer.C:
 		return nil
 	case <-ctx.Done():
+		stopTimer(timer)
 		return ctx.Err()
+	}
+}
+
+// stopTimer stops t and drains its channel when the timer already fired, so
+// the runtime can reclaim the timer goroutine promptly.
+func stopTimer(t *time.Timer) {
+	if !t.Stop() {
+		select {
+		case <-t.C:
+		default:
+		}
 	}
 }
 

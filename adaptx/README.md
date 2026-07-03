@@ -2,7 +2,7 @@
 
 [CI](https://github.com/aasyanov/urx/actions/workflows/ci.yml)
 [Go Reference](https://pkg.go.dev/github.com/aasyanov/urx/adaptx)
-[License: MIT](https://opensource.org/licenses/MIT)
+[License: MIT](../LICENSE)
 
 A thread-safe concurrency limiter that **discovers** a backend's safe operating limit instead of making you guess it. It starts at a configured limit and continuously moves it up or down from latency and error feedback using one of three control laws — `AIMD`, `Vegas`, or `Gradient` — opening up when the backend is fast and healthy and clamping down the moment latency climbs or errors appear. A controller for load-aware callbacks, panic recovery, and lock-light admission. Go 1.24+. Zero external dependencies (depends only on the urx `panix` package; testify in tests only).
 
@@ -99,7 +99,7 @@ Execute(l, ctx, fn)
           ├── ring buffer ← sample ; EMA avg ; RTT_min decay
           └── seen ≥ warmup ? adjust(success, latency)
                 ├── AIMD     : ok → limit+rate ; fail → limit·ratio
-                ├── Vegas    : queue=lim·(rtt−min)/min vs target band
+                ├── Vegas    : queue=lim·(rtt−min)/min vs target band from targetLatency
                 └── Gradient : g=(rtt−avg)/avg ; below → grow, above → back off
               jitter, clamp to [min,max]
               grow → push permits (pay debt first)
@@ -116,16 +116,16 @@ Only the periodic adaptation step and the percentile snapshot take the mutex; th
 
 | Algorithm      | Signal                 | Grows when                   | Backs off when                      | Best for                                  |
 | -------------- | ---------------------- | ---------------------------- | ----------------------------------- | ----------------------------------------- |
-| `**AIMD`**     | success/failure        | every success (`+rate`)      | any failure (`×ratio`)              | failure-driven overload; the safe default |
-| `**Vegas**`    | latency vs RTT_min     | estimated queue below target | estimated queue above `2×target`    | a stable backend floor latency            |
-| `**Gradient**` | latency vs EMA average | sample at/below average      | sample above average (proportional) | drifting floor latency                    |
+| **AIMD****     | success/failure        | every success (`+rate`)      | any failure (`×ratio`)              | failure-driven overload; the safe default |
+| **Vegas****    | latency vs RTT_min     | estimated queue below target | estimated queue above `2×target`    | a stable backend floor latency            |
+| **Gradient**** | latency vs EMA average | sample at/below average      | sample above average (proportional) | drifting floor latency                    |
 
 
 `AIMD` is the TCP congestion-avoidance law: additive increase, multiplicative decrease. `Vegas` infers queued work from how far the current round-trip time sits above the best ever seen (`RTT_min`) and holds the limit inside a tolerance band. `Gradient` compares each sample to a smoothed running average, so it adapts when the backend's baseline latency itself moves.
 
 ### Keeping the feedback honest
 
-Two mechanisms stop the controller from chasing noise. **Warmup** (`WithWarmupSamples`) ignores the first N samples so an unrepresentative cold start does not move the limit. `**RTT_min` decay** (`WithMinLatencyDecay`) drifts the recorded minimum slowly toward the average so `Vegas` cannot stick forever to one anomalously fast sample. The callback can also call `AdaptController.SkipSample()` to exclude a known outlier (a cache miss, a cold connection) from both the latency feedback and the percentile history — it still counts toward the success/failure totals.
+Two mechanisms stop the controller from chasing noise. **Warmup** (`WithWarmupSamples`) ignores the first N samples so an unrepresentative cold start does not move the limit. **RTT_min** decay** (`WithMinLatencyDecay`) drifts the recorded minimum slowly toward the average so `Vegas` cannot stick forever to one anomalously fast sample. The callback can also call `AdaptController.SkipSample()` to exclude a known outlier (a cache miss, a cold connection) from both the latency feedback and the percentile history — it still counts toward the success/failure totals.
 
 ## Normative Contracts
 
@@ -141,7 +141,7 @@ Two mechanisms stop the controller from chasing noise. **Warmup** (`WithWarmupSa
 | Skip honesty        | `SkipSample` removes a call from latency feedback and history but not from success/failure totals |
 | Warmup              | No adaptation occurs until `warmupSamples` samples have been recorded                             |
 | Panic safety        | A panicking callback becomes a `*panix.PanicError`, permit still freed                            |
-| Close semantics     | After `Close`, admission returns `ErrClosed`; in-flight work is unaffected                        |
+| Close semantics     | After `Close`, admission returns `ErrClosed`; blocked waiters wake immediately; in-flight work drains before permits retire |
 | Idempotent close    | `Close` is safe to call repeatedly; the first call wins, later calls return `ErrClosed`           |
 | Controller scope    | An `AdaptController` is valid only during its callback; do not retain it                          |
 
@@ -292,7 +292,7 @@ l := adaptx.New(adaptx.WithOnLimitChange(func(old, new int) {
 | `WithSmoothing(f)`       | `0.2`              | EMA weight per latency sample; outside (0, 1] ignored           |
 | `WithIncreaseRate(r)`    | `1.0`              | AIMD additive step on success; ≤ 0 ignored                      |
 | `WithDecreaseRatio(r)`   | `0.5`              | Multiplicative backoff factor; outside (0, 1) ignored           |
-| `WithTargetLatency(d)`   | `100ms`            | Vegas operating-point latency; ≤ 0 ignored                      |
+| `WithTargetLatency(d)`   | `100ms`            | Vegas operating-point RTT; scales the queue target band; ≤ 0 ignored |
 | `WithTolerance(f)`       | `0.1`              | Vegas/Gradient deviation band; outside (0, 1] ignored           |
 | `WithSampleWindow(d)`    | `1s`               | Percentile window; ≤ 0 ignored                                  |
 | `WithWarmupSamples(n)`   | `10`               | Samples before adaptation; 0 disables warmup                    |
@@ -324,10 +324,10 @@ A panicking callback surfaces as a `*panix.PanicError` returned by `Execute` (re
 > **Choose the algorithm to match your overload signal.** `Vegas` and `Gradient` need representative latency: if your work has wildly bimodal latency (cache hit vs miss) without `SkipSample`, they will thrash. When failures — not latency — are the overload signal, prefer `AIMD`.
 
 > [!NOTE]
-> **The limit converges, it does not snap.** After a `Close`+reopen or `ResetStats`, the permit pool re-converges toward the initial limit as adaptation resumes; it is not resized instantly. Size `WithInitialLimit` to a safe starting point.
+> **`ResetStats` snaps the limit immediately.** Counters, latency estimators, and the permit pool are reset to the configured initial limit in one step. When in-flight work exceeds that initial limit the live limit is raised to the in-flight count so permits never go negative.
 
 > [!NOTE]
-> `**SkipSample` keeps the success/failure totals.** A skipped call is removed from latency feedback and percentile history only — it still counts as a success or failure in `Stats`. Use it for outlier *latency*, not to hide errors.
+> **SkipSample** keeps the success/failure totals.** A skipped call is removed from latency feedback and percentile history only — it still counts as a success or failure in `Stats`. Use it for outlier *latency*, not to hide errors.
 
 ## Safety and Concurrency
 
@@ -335,7 +335,7 @@ A panicking callback surfaces as a `*panix.PanicError` returned by `Execute` (re
 
 ## Benchmarks
 
-> CPU: Intel i7-10510U · OS: Windows 10 · Go 1.26 · `-benchmem -count=3` (best of 3)
+> CPU: Intel i7-10510U · OS: Windows 10 · Go 1.24 · `-benchmem -count=3` (best of 3)
 
 
 | Benchmark        | ns/op | B/op | allocs/op |

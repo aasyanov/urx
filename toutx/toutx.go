@@ -1,5 +1,5 @@
 // Package toutx provides a thread-safe timeout execution wrapper for
-// industrial Go services.
+// production Go services.
 //
 // [Execute] runs a function within a deadline-scoped context. If the function
 // does not complete before the timeout fires, the context is cancelled and
@@ -35,6 +35,7 @@ package toutx
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/aasyanov/urx/panix"
@@ -50,8 +51,9 @@ const opExecute = "toutx.Execute"
 //
 // The callback receives a deadline-scoped context and a [TimeoutController].
 // If fn returns before the deadline, its result is returned unchanged. If the
-// deadline fires first, Execute returns [ErrDeadlineExceeded]. If the parent
-// ctx is cancelled first, Execute returns [ErrCancelled] wrapping ctx.Err().
+// deadline fires first, Execute returns [ErrDeadlineExceeded] unless fn's
+// result is already available. If the parent ctx is cancelled first, Execute
+// returns [ErrCancelled] wrapping ctx.Err().
 //
 // fn runs in a separate goroutine guarded by [panix.Safe]; a panic becomes a
 // [*panix.PanicError]. Note that when the deadline fires, Execute returns
@@ -79,33 +81,81 @@ func Execute[T any](
 	tctx, cancel := context.WithTimeout(ctx, cfg.timeout)
 	defer cancel()
 
-	tc := &execution{
-		op:      op,
-		timeout: cfg.timeout,
-		start:   start,
+	deadline, hasDeadline := tctx.Deadline()
+	if !hasDeadline {
+		deadline = start.Add(cfg.timeout)
 	}
 
-	type result struct {
-		val T
-		err error
+	tc := &execution{
+		op:           op,
+		timeout:      cfg.timeout,
+		startUnix:    start.UnixNano(),
+		deadlineUnix: deadline.UnixNano(),
 	}
-	done := make(chan result, 1)
+
+	done := make(chan execResult[T], 1)
 	go func() {
 		v, e := panix.Safe(op, func() (T, error) {
 			return fn(tctx, tc)
 		})
-		done <- result{v, e}
+		done <- execResult[T]{v, e}
 	}()
 
+	return awaitResult(done, tctx, ctx, op, cfg.timeout)
+}
+
+// awaitResult returns fn's outcome when it finishes before the deadline. When
+// the deadline fires first it re-checks done once so a result that lands in the
+// same instant as expiry is not discarded.
+func awaitResult[T any](
+	done <-chan execResult[T],
+	tctx context.Context,
+	parent context.Context,
+	op string,
+	timeout time.Duration,
+) (T, error) {
+	var zero T
 	select {
 	case r := <-done:
-		return r.val, r.err
+		return normalizeResult(zero, parent, op, timeout, r)
 	case <-tctx.Done():
-		// Parent cancellation and deadline expiry both close tctx; distinguish
-		// them so callers see the precise cause.
-		if cause := context.Cause(ctx); cause != nil {
+		select {
+		case r := <-done:
+			return normalizeResult(zero, parent, op, timeout, r)
+		default:
+			if cause := context.Cause(parent); cause != nil {
+				return zero, errCancelled(op, cause)
+			}
+			return zero, errDeadlineExceeded(op, timeout)
+		}
+	}
+}
+
+// normalizeResult maps a finished callback outcome to the package error
+// vocabulary. A nil callback error is returned as-is so a result that lands
+// in the same instant as expiry is not discarded. Context cancellation errors
+// from the callback are upgraded to [ErrCancelled] or [ErrDeadlineExceeded].
+func normalizeResult[T any](zero T, parent context.Context, op string, timeout time.Duration, r execResult[T]) (T, error) {
+	if r.err == nil {
+		return r.val, nil
+	}
+	if errors.Is(r.err, context.Canceled) {
+		cause := context.Cause(parent)
+		if cause == nil {
+			cause = context.Canceled
+		}
+		return zero, errCancelled(op, cause)
+	}
+	if errors.Is(r.err, context.DeadlineExceeded) {
+		if cause := context.Cause(parent); cause != nil && !errors.Is(cause, context.DeadlineExceeded) {
 			return zero, errCancelled(op, cause)
 		}
-		return zero, errDeadlineExceeded(op, cfg.timeout)
+		return zero, errDeadlineExceeded(op, timeout)
 	}
+	return r.val, r.err
+}
+
+type execResult[T any] struct {
+	val T
+	err error
 }

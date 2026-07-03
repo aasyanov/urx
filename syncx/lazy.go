@@ -3,9 +3,9 @@ package syncx
 import "sync"
 
 // Lazy is a generic, thread-safe lazy initializer. The init function runs at
-// most once (until [Lazy.Reset] is called); subsequent [Lazy.Get] calls
-// return the cached value and error. It is the typed, error-aware analogue of
-// [sync.Once].
+// most once per successful initialization (until [Lazy.Reset] is called);
+// subsequent [Lazy.Get] calls return the cached value. It is the typed,
+// error-aware analogue of [sync.Once].
 //
 // All methods are safe for concurrent use. In particular, [Lazy.Get] and
 // [Lazy.Reset] may be called from different goroutines without external
@@ -30,8 +30,8 @@ func NewLazy[T any](init func() (T, error)) (*Lazy[T], error) {
 }
 
 // Get returns the cached value, running the init function on the first call.
-// If init returns an error, it is wrapped as [ErrInitFailed] and cached; the
-// value is not cached and init runs again on the next Get.
+// If init returns an error, it is wrapped as [ErrInitFailed]; neither the value
+// nor the error is cached, and init runs again on the next Get.
 //
 // Concurrent callers block until init completes. Safe to call concurrently
 // with [Lazy.Reset].

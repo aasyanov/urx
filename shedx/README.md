@@ -2,9 +2,9 @@
 
 [CI](https://github.com/aasyanov/urx/actions/workflows/ci.yml)
 [Go Reference](https://pkg.go.dev/github.com/aasyanov/urx/shedx)
-[License: MIT](https://opensource.org/licenses/MIT)
+[License: MIT](../LICENSE)
 
-A thread-safe load shedder that tracks in-flight work and rejects new requests when the system is overloaded, shedding the least important traffic first so the rest can succeed. Lock-free admission, per-priority cutoffs, a controller for graceful degradation, and panic recovery. Go 1.24+. Zero external dependencies (depends only on the urx `panix` package; testify in tests only).
+A thread-safe load shedder that tracks in-flight work and rejects new requests when the system is overloaded, shedding the least important traffic first so the rest can succeed. Lock-free admission, per-priority cutoffs, `Execute`/`TryExecute` with a controller for graceful degradation, and panic recovery. Go 1.24+. Zero external dependencies (depends only on the urx `panix` package; testify in tests only).
 
 ```
 go get github.com/aasyanov/urx
@@ -28,6 +28,7 @@ Every service has a finite amount of concurrent work it can finish before latenc
 ```text
 ✅ Shedder            — track in-flight work, admit/reject by priority and load
 ✅ Execute[T]         — admit + run a callback, releasing the slot on return/panic
+✅ TryExecute[T]      — non-blocking admission: run now or reject with (false, zero, nil)
 ✅ Acquire / Token    — manual admission when a callback does not fit
 ✅ ShedController     — load snapshot at admission + Shed() to record degradation
 ✅ panic safety       — a panicking callback becomes a *panix.PanicError, not a crash
@@ -47,7 +48,7 @@ Every service has a finite amount of concurrent work it can finish before latenc
 └────────────────────────┬─────────────────────────────────┘
                          │
 ┌────────────────────────▼─────────────────────────────────┐
-│  shedx   Shedder · Execute[T] · ShedController           │
+│  shedx   Shedder · Execute[T] · TryExecute[T] · ShedController           │
 │          admit by priority + load, shed the rest         │
 └──────────────┬───────────────────────┬───────────────────┘
                │                        │
@@ -69,9 +70,9 @@ Every service has a finite amount of concurrent work it can finish before latenc
  inflight/admitted/    │                    load,inFlight,
  shed/degraded/closed  WithCapacity         capacity,degraded}
    │                   WithThreshold        Priority/Load/
- Execute[T] / Acquire  WithOp               InFlight/Capacity/Shed
+ Execute[T] / TryExecute[T] / Acquire  WithOp               InFlight/Capacity/Shed
    │                   │
- shouldAdmit(priority) Priority (types.go)   errors.go
+ admits(priority) Priority (types.go)   errors.go
    │                   Low/Normal/High/      ErrRejected
  panix.Safe(callback)  Critical              ErrClosed/ErrNilFunc
 ```
@@ -105,6 +106,21 @@ Execute(s, ctx, priority, fn)
         return val, err
 ```
 
+```text
+TryExecute(s, ctx, priority, fn)
+  │ closed ? ───────────────────────────► (false, zero, ErrClosed)
+  │ fn == nil ? ────────────────────────► (false, zero, ErrNilFunc)
+  │ ctx.Err() ? ────────────────────────► (false, zero, ErrCancelled)
+  │
+  ├── tryReserve(priority):  CAS loop (same as Execute)
+  │
+  ├── shed ? ──────────────► shed++ ; (false, zero, nil)
+  │
+  └── commit:
+        admitted++ ; runAfterAdmit(opTryExecute, fn)
+        return (true, val, err)
+```
+
 Admission is the whole game. Below the threshold every request passes. Above it, each non-critical priority is admitted only while the **overload fraction** — how far into the `[threshold, 1.0]` band the current load sits — stays under that priority's cutoff. As load climbs, `Low` drops out first (at 25 % into the band), then `Normal` (60 %), then `High` (90 %); `Critical` never drops. This produces a smooth, monotonic shed order rather than a cliff.
 
 The reservation uses a lock-free **compare-and-swap loop**: the candidate slot is committed only if admission holds for the *exact* post-increment count being stored. This is what makes the capacity bound hold under concurrency — two goroutines racing for the last slot read distinct counts, so at most one commits, and the in-flight counter is never transiently inflated past what is admitted. The loop retries only under genuine contention on the counter and allocates nothing.
@@ -124,12 +140,13 @@ The `ShedController` handed to the callback carries the load snapshot taken at a
 | Critical never shed  | `PriorityCritical` is admitted at any load, even above capacity                                                                    |
 | Monotonic shed order | As load rises, lower priorities are shed before higher ones                                                                        |
 | Context first        | A pre-cancelled context returns `ErrCancelled` without invoking fn or consuming a slot                                             |
+| Non-blocking reject  | `TryExecute` returns `(false, zero, nil)` when shed — rejection is a return value, not `ErrRejected`                               |
 | Slot release         | The in-flight slot is released when the callback returns **or panics**                                                             |
 | Shed rollback        | A shed request consumes no slot — a rejected reservation is never committed                                                        |
 | Panic safety         | A panicking callback becomes a `*panix.PanicError`, slot still freed                                                               |
 | Admission purity     | `Allow` reports a best-effort decision without mutating any counter or slot                                                        |
 | Token release        | `Token.Release` is idempotent; a double release never drives in-flight negative                                                    |
-| Close semantics      | After `Close`, `Execute`/`Acquire` return `ErrClosed`; in-flight work is unaffected                                                |
+| Close semantics      | After `Close`, `Execute`/`TryExecute`/`Acquire` return `ErrClosed`; in-flight work is unaffected                                   |
 | Idempotent close     | `Close` is safe to call repeatedly and always returns nil                                                                          |
 | Controller scope     | A `ShedController` is valid only during its callback; do not retain it                                                             |
 
@@ -206,6 +223,22 @@ resp, _ := shedx.Execute(s, ctx, shedx.PriorityNormal,
 	})
 ```
 
+### Non-blocking admission with TryExecute
+
+```go
+ok, resp, err := shedx.TryExecute(s, ctx, shedx.PriorityNormal,
+	func(ctx context.Context, sc shedx.ShedController) (*Page, error) {
+		return renderPage(ctx)
+	})
+if err != nil {
+	return err
+}
+if !ok {
+	return errBusy // shed at current load — no ErrRejected to unwrap
+}
+return resp
+```
+
 ### Manual admission with a Token
 
 ```go
@@ -245,7 +278,8 @@ resp, err := shedx.Execute(s, ctx, shedx.PriorityNormal,
 | Symbol               | Signature                                                                                                                                 | Description                              |
 | -------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------- |
 | `New`                | `func New(opts ...Option) *Shedder`                                                                                                       | Create a shedder with defaults + options |
-| `Execute`            | `func Execute[T any](s *Shedder, ctx context.Context, priority Priority, fn func(context.Context, ShedController) (T, error)) (T, error)` | Admit + run a callback                   |
+| `Execute`            | `func Execute[T any](s *Shedder, ctx context.Context, priority Priority, fn ShedFunc[T]) (T, error)` | Admit + run a callback; returns `ErrRejected` when shed |
+| `TryExecute`         | `func TryExecute[T any](s *Shedder, ctx context.Context, priority Priority, fn ShedFunc[T]) (bool, T, error)` | Non-blocking admission; `(false, zero, nil)` when shed |
 | `Shedder.Acquire`    | `func (s *Shedder) Acquire(priority Priority) (*Token, error)`                                                                            | Manual admission returning a Token       |
 | `Shedder.Allow`      | `func (s *Shedder) Allow(priority Priority) bool`                                                                                         | Non-mutating admission check             |
 | `Shedder.Load`       | `func (s *Shedder) Load() float64`                                                                                                        | Current inflight/capacity, in [0, 1+]    |
@@ -258,6 +292,7 @@ resp, err := shedx.Execute(s, ctx, shedx.PriorityNormal,
 | `Shedder.IsClosed`   | `func (s *Shedder) IsClosed() bool`                                                                                                       | Report closed state                      |
 | `Token.Release`      | `func (t *Token) Release()`                                                                                                               | Free an acquired slot (idempotent)       |
 | `Priority`           | `type Priority uint8`                                                                                                                     | Low / Normal / High / Critical           |
+| `ShedFunc[T]`        | `func(ctx context.Context, sc ShedController) (T, error)`                                                                                 | Unit of work run by `Execute` and `TryExecute` |
 
 
 ### ShedController
@@ -279,7 +314,7 @@ resp, err := shedx.Execute(s, ctx, shedx.PriorityNormal,
 | ------------------ | ------------------------ | --------------------------------------------------------------- |
 | `WithCapacity(n)`  | `DefaultCapacity` (1000) | Max in-flight operations; ≤ 0 ignored, final value floored to 1 |
 | `WithThreshold(t)` | `DefaultThreshold` (0.8) | Load fraction at which shedding begins; outside (0, 1] ignored  |
-| `WithOp(s)`        | `"shedx.Execute"`        | Operation name attached to panic reports                        |
+| `WithOp(s)`        | `[opExecute]` / `[opTryExecute]` | Operation name attached to panic reports (`TryExecute` defaults to `"shedx.TryExecute"`). |
 
 
 ### Shed cutoffs
@@ -300,18 +335,18 @@ Above the threshold, the overload fraction `(load − threshold) / (1 − thresh
 
 | Error          | Condition                                                                                            |
 | -------------- | ---------------------------------------------------------------------------------------------------- |
-| `ErrRejected`  | The request was shed for its priority at the current load (wraps the priority)                       |
-| `ErrClosed`    | The shedder has been closed                                                                          |
-| `ErrNilFunc`   | `Execute` was given a nil function                                                                   |
+| `ErrRejected`  | `Execute`/`Acquire` shed the request for its priority at the current load (wraps the priority) |
+| `ErrClosed`    | `Execute`, `TryExecute`, or `Acquire` after `Shedder.Close` |
+| `ErrNilFunc`   | `Execute` or `TryExecute` was given a nil function |
 | `ErrCancelled` | The context was already cancelled or expired at admission time (wraps `ctx.Err()`); no slot consumed |
 
 
-A panicking callback surfaces as a `*panix.PanicError` returned by `Execute` (reach it with `errors.As`); the in-flight slot is still released.
+`TryExecute` does not return `ErrRejected` — when a request would be shed it returns `(false, zero, nil)`, leaving the decision to the caller. A panicking callback surfaces as a `*panix.PanicError` returned by `Execute` or `TryExecute` (reach it with `errors.As`); the in-flight slot is still released.
 
 ## Pitfalls
 
 > [!WARNING]
-> `**shedx` bounds concurrency, not request rate.** A flood of fast requests can churn through the in-flight slots without ever raising load enough to shed. If you need requests-per-second limiting, use `ratex`; combine the two for both axes.
+> **shedx bounds concurrency, not request rate.** A flood of fast requests can churn through the in-flight slots without ever raising load enough to shed. If you need requests-per-second limiting, use `ratex`; combine the two for both axes.
 
 > [!WARNING]
 > **Sizing capacity wrong defeats the purpose.** Capacity must reflect the concurrency your *downstream* can sustain, not your accept queue. A shedder sized to 10× the real limit admits everything and protects nothing.
@@ -324,42 +359,50 @@ A panicking callback surfaces as a `*panix.PanicError` returned by `Execute` (re
 
 ## Safety and Concurrency
 
-`Shedder` is safe for concurrent use from any number of goroutines. All admission state (`inflight`, `admitted`, `shed`, `degraded`, `closed`) lives in `sync/atomic` values; the hot path takes no lock. Admission reserves a slot with a compare-and-swap loop that commits only when the post-increment count is admissible, so the in-flight counter never exceeds the per-priority ceiling even when many goroutines race for the last slot — and it is never transiently inflated for observers. `Token.Release` likewise uses an atomic CAS, so a double release is a no-op and can never drive the counter negative. The `ShedController` is touched only by the single goroutine running its callback and needs no synchronization. Every test runs under `-race`, including a 64-goroutine capacity-bound stress test that asserts the observed in-flight count never exceeds capacity.
+`Shedder` is safe for concurrent use from any number of goroutines. All admission state (`inflight`, `admitted`, `shed`, `degraded`, `closed`) lives in `sync/atomic` values; the hot path takes no lock. `Execute`, `TryExecute`, and `Acquire` reserve a slot with a compare-and-swap loop that commits only when the post-increment count is admissible, so the in-flight counter never exceeds the per-priority ceiling even when many goroutines race for the last slot — and it is never transiently inflated for observers. `Token.Release` likewise uses an atomic CAS, so a double release is a no-op and can never drive the counter negative. The `ShedController` is touched only by the single goroutine running its callback and needs no synchronization. Every test runs under `-race`, including a 64-goroutine capacity-bound stress test that asserts the observed in-flight count never exceeds capacity.
 
 ## Benchmarks
 
-> CPU: Intel i7-10510U · OS: Windows 10 · Go 1.26 · `-benchmem -count=3` (best of 3)
+> CPU: Intel i7-10510U · OS: Windows 10 · Go 1.24 · `-benchmem -count=3` (best of 3)
 
 
 | Benchmark              | ns/op | B/op | allocs/op |
 | ---------------------- | ----- | ---- | --------- |
-| Execute_Admit          | 90    | 48   | 1         |
-| Execute_Admit_Parallel | 244   | 48   | 1         |
-| Execute_Shed           | 312   | 80   | 2         |
-| Acquire                | 84    | 16   | 1         |
-| Acquire_Parallel       | 247   | 16   | 1         |
-| Allow                  | 6     | 0    | 0         |
+| Execute_Admit          | 66    | 48   | 1         |
+| Execute_Admit_Parallel | 183   | 48   | 1         |
+| Execute_Shed           | 311   | 80   | 2         |
+| TryExecute_Admit       | 74    | 48   | 1         |
+| TryExecute_Admit_Parallel | 180 | 48   | 1         |
+| TryExecute_Shed        | 12    | 0    | 0         |
+| TryExecute_Shed_Parallel | 12  | 0    | 0         |
+| Acquire                | 69    | 16   | 1         |
+| Acquire_Parallel       | 192   | 16   | 1         |
+| Allow                  | 4     | 0    | 0         |
 
 
 ### Analysis
 
 - **Execute_Admit**: 1 alloc / 48 B is the admit-path floor — the `execution` controller, which escapes because it is handed to the callback through the `panix.Safe` closure as an interface. The CAS reservation, the `admitted` increment, and the deferred decrement are all alloc-free. A controller-free fast path could reach 0 allocs but would drop the load snapshot and the `Shed` degradation hook that justify the package.
-- **Execute_Admit_Parallel**: ~244 ns, ~2.7× the serial cost at 8 goroutines. The slowdown is contention on the shared `inflight` counter: under parallelism the CAS loop occasionally retries when two goroutines race the same value, and the `admitted` counter is a second contended cache line. There is no mutex — this is the inherent cost of a single global concurrency counter, and it scales predictably.
-- **Execute_Shed**: ~312 ns / 2 allocs is the *rejection* path. The two allocs are `fmt.Errorf` wrapping the priority into `ErrRejected` (the error value plus the formatted string). Rejection only fires when the system is already overloaded, so the diagnostic-rich error costs nothing on the hot path. Use `Allow` for an alloc-free, error-free pre-check.
+- **Execute_Admit_Parallel**: ~183 ns, ~2.8× the serial cost at 8 goroutines. The slowdown is contention on the shared `inflight` counter: under parallelism the CAS loop occasionally retries when two goroutines race the same value, and the `admitted` counter is a second contended cache line. There is no mutex — this is the inherent cost of a single global concurrency counter, and it scales predictably.
+- **Execute_Shed**: ~311 ns / 2 allocs is the *rejection* path for `Execute`. The two allocs are `fmt.Errorf` wrapping the priority into `ErrRejected` (the error value plus the formatted string). Rejection only fires when the system is already overloaded, so the diagnostic-rich error costs nothing on the hot path. Use `TryExecute` or `Allow` for alloc-free rejection.
+- **TryExecute_Admit**: same 1 alloc / 48 B as `Execute` on the admit path — the extra `bool` return is free at the machine level.
+- **TryExecute_Admit_Parallel**: ~180 ns at 8 goroutines — same contention profile as `Execute_Admit_Parallel` on the shared `inflight` counter.
+- **TryExecute_Shed**: ~12 ns / 0 allocs — the alloc-free shed path. `TryExecute` increments `shed` and returns `(false, zero, nil)` without constructing `ErrRejected`; this is the right tool when callers branch on a boolean rather than `errors.Is`.
+- **TryExecute_Shed_Parallel**: same 0 allocs under contention — rejection is a single atomic increment with no heap traffic.
 - **Acquire**: 1 alloc / 16 B is the `Token` itself, which must escape to the caller. Everything else is the CAS reservation and counter work.
-- **Allow**: 0 allocs, ~6 ns — a single atomic load plus float math, no heap and no reservation. This is the cheapest way to ask "would this be admitted?" and is the right tool for edge rejection, at the cost of being a best-effort hint rather than a binding decision.
-- **Allocation floor**: the admit path's 1 alloc is architectural (the controller). `Allow` proves the underlying admission decision is alloc-free; the controller and token allocations exist only because those APIs hand an object back to the caller.
+- **Allow**: 0 allocs, ~4 ns — a single atomic load plus float math, no heap and no reservation. This is the cheapest way to ask "would this be admitted?" and is the right tool for edge rejection, at the cost of being a best-effort hint rather than a binding decision.
+- **Allocation floor**: the admit path's 1 alloc is architectural (the controller). `Allow` and `TryExecute` on the shed path prove the underlying admission decision is alloc-free; the controller and token allocations exist only because those APIs hand an object back to the caller.
 
 ## Quality
 
 
 | Metric         | Value                          |
 | -------------- | ------------------------------ |
-| Test functions | 35                             |
-| Benchmarks     | 6                              |
-| Fuzz targets   | 2                              |
-| Examples       | 4                              |
-| Coverage       | 100.0%                         |
+| Test functions | 51                             |
+| Benchmarks     | 10                             |
+| Fuzz targets   | 3                              |
+| Examples       | 5                              |
+| Coverage       | 98.3%                          |
 | Race detector  | All pass                       |
 | External deps  | 0 (panix; testify in dev only) |
 
@@ -368,13 +411,13 @@ A panicking callback surfaces as a `*panix.PanicError` returned by `Execute` (re
 
 ```text
 shedx/
-├── shedx.go            # package doc + Shedder + Execute[T] + Acquire/Token + admission
+├── shedx.go            # package doc + Shedder + Execute[T]/TryExecute[T] + Acquire/Token + admission
 ├── options.go          # config, Option, defaults, WithXxx
 ├── types.go            # Priority enum + ShedController + private execution impl
 ├── errors.go           # ErrRejected, ErrClosed, ErrNilFunc, ErrCancelled
 ├── shedx_test.go       # unit + table-driven tests
 ├── bench_test.go       # benchmarks (sequential + parallel)
-├── fuzz_test.go        # FuzzExecute, FuzzAcquireRelease — admission invariants
+├── fuzz_test.go        # FuzzExecute, FuzzTryExecute, FuzzAcquireRelease — admission invariants
 ├── example_test.go     # runnable GoDoc examples
 ├── footprint_test.go   # struct size guards
 └── README.md           # this file

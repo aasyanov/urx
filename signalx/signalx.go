@@ -47,8 +47,10 @@ var (
 )
 
 // OnShutdown registers a process-global shutdown hook. Hooks run in
-// registration order when [Wait] is called, before any hooks passed
-// directly to [Wait]. It is safe for concurrent use.
+// registration order on every [Wait] call, before any hooks passed directly
+// to that call. Register hooks once during process startup; do not rely on
+// them running exactly once if Wait is invoked concurrently. It is safe for
+// concurrent registration.
 func OnShutdown(fn func(ctx context.Context)) {
 	globalMu.Lock()
 	globalHooks = append(globalHooks, fn)
@@ -101,6 +103,10 @@ func Trap(parent context.Context, signals ...os.Signal) (context.Context, contex
 // registration order. Each hook is invoked with a context carrying the
 // configured shutdown timeout (default 15s, see [WithTimeout]) and is run
 // under panic recovery so a panicking hook cannot abort the rest.
+//
+// Call Wait once per shutdown sequence (typically from a single goroutine
+// after [Trap]). Concurrent Wait calls each run the full global hook list
+// independently.
 //
 // Wait returns nil when all hooks complete cleanly. It returns
 // [ErrShutdownTimeout] if the timeout elapses before every hook finishes,

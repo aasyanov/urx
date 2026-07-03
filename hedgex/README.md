@@ -2,7 +2,7 @@
 
 [CI](https://github.com/aasyanov/urx/actions/workflows/ci.yml)
 [Go Reference](https://pkg.go.dev/github.com/aasyanov/urx/hedgex)
-[License: MIT](https://opensource.org/licenses/MIT)
+[License: MIT](../LICENSE)
 
 A thread-safe request hedger that launches the same logical request as several copies with staggered delays and keeps the first success, cancelling the losers. It turns a fat latency tail into a tight one by racing a slow request against a fresh copy instead of waiting it out. Staggered fan-out, a controller for per-copy adaptation and voluntary withdrawal, panic recovery, and a zero-goroutine fast path when hedging is disabled. Go 1.24+. Zero external dependencies (depends only on the urx `panix` package; testify in tests only).
 
@@ -74,7 +74,7 @@ A service that fans out to a database, a cache, or a downstream RPC inherits tha
  ExecuteMulti[T]       WithMaxDelay          Cancel
    │                   WithOnHedge / WithOp
  lone? → runSync       │                    errors.go
- else  → dispatch      delays() schedule    ErrNoFunc/ErrAllFailed
+ else  → dispatch      delays() schedule    ErrNilFunc/ErrAllFailed
    │                   (linear → spread)     ErrCancelled
  panix.Safe(copy)
 ```
@@ -83,8 +83,8 @@ A service that fans out to a database, a cache, or a downstream RPC inherits tha
 
 ```text
 Execute(h, ctx, fn)            ExecuteMulti(h, ctx, fns)
-  │ fn == nil ? ─► ErrNoFunc      │ cap fns at maxParallel
-  │ fill maxParallel slots ───────┤ no non-nil entry ? ─► ErrNoFunc
+  │ fn == nil ? ─► ErrNilFunc      │ cap fns at maxParallel
+  │ fill maxParallel slots ───────┤ no non-nil entry ? ─► ErrNilFunc
                                   │ ctx already done ? ─► ErrCancelled
                                   │
                   ┌───────────────┴────────────────┐
@@ -292,7 +292,7 @@ s := h.Stats() // {Calls, Wins, Hedges, Failures}
 
 | Error          | Condition                                                                       |
 | -------------- | ------------------------------------------------------------------------------- |
-| `ErrNoFunc`    | `Execute` got a nil function, or `ExecuteMulti` got an empty / all-nil slice    |
+| `ErrNilFunc`    | `Execute` got a nil function, or `ExecuteMulti` got an empty / all-nil slice    |
 | `ErrAllFailed` | Every launched copy failed (or withdrew); wraps the first failure               |
 | `ErrCancelled` | The caller's context was cancelled before any copy succeeded; wraps `ctx.Err()` |
 
@@ -308,7 +308,7 @@ A panicking copy surfaces as a `*panix.PanicError` joined under `ErrAllFailed` (
 > **A delay set too low turns into a load multiplier.** If `WithDelay` is below the backend's *median*, almost every call hedges, multiplying load `MaxParallel`-fold for little tail benefit. Set the delay near the p95 you want to cut, not the median.
 
 > [!NOTE]
-> `**hedgex` does not impose a timeout.** It bounds the *number* of copies, not the total time. A request where every copy stalls runs until the context is cancelled. Wrap with `toutx` for a hard deadline.
+> **hedgex** does not impose a timeout.** It bounds the *number* of copies, not the total time. A request where every copy stalls runs until the context is cancelled. Wrap with `toutx` for a hard deadline.
 
 > [!NOTE]
 > **Losing copies are cancelled, not awaited.** When a winner returns, the other copies' context is cancelled and `Execute` returns immediately; it does not wait for the losers to observe cancellation. Ensure your function respects `ctx.Done()` so cancelled copies release their resources promptly.
@@ -319,7 +319,7 @@ A panicking copy surfaces as a `*panix.PanicError` joined under `ErrAllFailed` (
 
 ## Benchmarks
 
-> CPU: Intel i7-10510U · OS: Windows 10 · Go 1.26 · `-benchmem -count=3`
+> CPU: Intel i7-10510U · OS: Windows 10 · Go 1.24 · `-benchmem -count=3`
 
 
 | Benchmark                    | ns/op | B/op | allocs/op |
@@ -361,7 +361,7 @@ hedgex/
 ├── hedgex.go           # package doc + Hedger + Execute/ExecuteMulti + dispatch + sync fast path
 ├── options.go          # config, Option, defaults, WithXxx, delay-schedule constants
 ├── types.go            # HedgeController + private execution impl + HedgeFunc + result
-├── errors.go           # ErrNoFunc, ErrAllFailed, ErrCancelled
+├── errors.go           # ErrNilFunc, ErrAllFailed, ErrCancelled
 ├── hedgex_test.go      # unit + table-driven + concurrent + panic + withdrawal tests
 ├── bench_test.go       # benchmarks (sync, hedged, parallel, multi, delays)
 ├── fuzz_test.go        # FuzzExecute, FuzzDelays — termination + schedule invariants

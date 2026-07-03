@@ -228,6 +228,9 @@ func (c *Cache[K, V]) computeSingleCtx(ctx context.Context, key K, compute func(
 		if res.Err != nil {
 			return zero, res.Err
 		}
+		if c.closed.Load() {
+			return zero, ErrClosed
+		}
 		return res.Val.(V), nil
 	}
 }

@@ -1,5 +1,5 @@
 // Package envx provides typed environment-variable reading with injectable
-// lookup for industrial Go services.
+// lookup for production Go services.
 //
 // An [Env] reads variables through a configurable lookup function (defaults
 // to [os.LookupEnv]) and converts them to typed values via generic [Bind].

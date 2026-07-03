@@ -1,5 +1,5 @@
 // Package testx provides deterministic failure and latency simulation for
-// testing resilience patterns in industrial Go services.
+// testing resilience patterns in production Go services.
 //
 // A [Simulator] produces errors on demand according to a configurable
 // schedule. Use it to test retryx, circuitx, bulkx, and other resilience

@@ -213,14 +213,20 @@ func (wp *WorkerPool) SubmitWait(ctx context.Context, fn func(ctx context.Contex
 	}
 
 	// The task is queued. Wait for its result, but do not block forever if
-	// the pool shuts down before a worker picks it up.
+	// the pool shuts down before a worker picks it up. When shutdown wins the
+	// select race against a completed result, drain the buffered result first.
 	select {
 	case err := <-resultCh:
 		return err
-	case <-wp.done:
-		return errClosed(componentWorkerPool)
 	case <-ctx.Done():
 		return errCancelled(ctx.Err())
+	case <-wp.done:
+		select {
+		case err := <-resultCh:
+			return err
+		default:
+			return errClosed(componentWorkerPool)
+		}
 	}
 }
 

@@ -2,7 +2,7 @@
 
 [CI](https://github.com/aasyanov/urx/actions/workflows/ci.yml)
 [Go Reference](https://pkg.go.dev/github.com/aasyanov/urx/fallx)
-[License: MIT](https://opensource.org/licenses/MIT)
+[License: MIT](../LICENSE)
 
 A thread-safe fallback wrapper that turns a primary failure into a degraded-but-useful result. Three strategies — a static value, a fallback function, or a replayed cached success — plus a controller for branching on the primary error, a sharded LRU cache with TTL, and panic recovery. Go 1.24+. Zero external dependencies (depends only on the urx `panix` package; testify in tests only).
 
@@ -310,7 +310,7 @@ A panicking callback surfaces as a `*panix.PanicError`: a primary panic is handl
 ## Pitfalls
 
 > [!WARNING]
-> `**StrategyCached` only has something to replay after a success.** The very first call for a key — or the first after the entry expired — has an empty cache, so a failure there returns `ErrNoCached`. Use `Seed`/`SeedWithTTL` to warm critical keys, or pair cached with a static default in a composed fallback.
+> **StrategyCached** only has something to replay after a success.** The very first call for a key — or the first after the entry expired — has an empty cache, so a failure there returns `ErrNoCached`. Use `Seed`/`SeedWithTTL` to warm critical keys, or pair cached with a static default in a composed fallback.
 
 > [!WARNING]
 > **The cache key defaults to a single shared slot.** Without `WithKeyFunc` or `ExecuteWithKey`, every call uses `DefaultKey`, so all callers share one cached value. That is correct for a global resource (a feature-flag blob) but wrong for per-entity data — supply a key there or one user will replay another's response.

@@ -8,6 +8,26 @@ import (
 	"github.com/aasyanov/urx/circuitx"
 )
 
+// ExampleTryExecute shows the non-blocking variant rejecting a call when the
+// circuit is open, returning (false, zero, nil) instead of ErrOpen.
+func ExampleTryExecute() {
+	cb := circuitx.New(circuitx.WithMaxFailures(1))
+	ctx := context.Background()
+	boom := errors.New("downstream down")
+
+	_, _ = circuitx.Execute(cb, ctx,
+		func(context.Context, circuitx.CircuitController) (int, error) {
+			return 0, boom
+		})
+
+	ok, _, err := circuitx.TryExecute(cb, ctx,
+		func(context.Context, circuitx.CircuitController) (int, error) {
+			return 1, nil
+		})
+	fmt.Println(ok, err == nil)
+	// Output: false true
+}
+
 // ExampleExecute demonstrates a successful call through a closed breaker.
 func ExampleExecute() {
 	cb := circuitx.New(circuitx.WithMaxFailures(3))

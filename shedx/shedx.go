@@ -1,4 +1,4 @@
-// Package shedx provides priority-based load shedding for industrial Go
+// Package shedx provides priority-based load shedding for production Go
 // services.
 //
 // A [Shedder] tracks in-flight operations and rejects new ones when the system
@@ -25,8 +25,10 @@
 //
 // The callback receives a [ShedController] exposing the load snapshot at
 // admission time and a [ShedController.Shed] method to record graceful
-// degradation. For tracked admission without a callback, use [Acquire] and
-// release the returned [Token].
+// degradation. [TryExecute] is the non-blocking variant: when a request
+// would be shed it returns (false, zero, nil) instead of [ErrRejected]. For
+// tracked admission without a callback, use [Acquire] and release the returned
+// [Token].
 //
 // Each callback is wrapped with [github.com/aasyanov/urx/panix] for panic
 // recovery; a panicking function yields a [*panix.PanicError] instead of
@@ -45,9 +47,12 @@ import (
 )
 
 const (
-	// opExecute labels panics recovered while running an Execute callback and
+	// opExecute labels panics recovered while running an [Execute] callback and
 	// is the default operation name when none is configured.
 	opExecute = "shedx.Execute"
+
+	// opTryExecute labels panics recovered while running a [TryExecute] callback.
+	opTryExecute = "shedx.TryExecute"
 
 	// Progressive shedding cutoffs. overload is the fraction of the band above
 	// the threshold, in [0, 1]: a priority is admitted while overload is below
@@ -58,7 +63,7 @@ const (
 )
 
 // Shedder is a thread-safe, priority-based load shedder. Create one with [New],
-// admit work with [Execute] or [Acquire], inspect counters with
+// admit work with [Execute], [TryExecute], or [Acquire], inspect counters with
 // [Shedder.Stats], and release resources with [Shedder.Close].
 //
 // It is safe for concurrent use from multiple goroutines. All admission state
@@ -82,12 +87,12 @@ func New(opts ...Option) *Shedder {
 
 // Allow reports whether a request with the given priority would be admitted at
 // the current load. It does not track the request or mutate any counter; use
-// [Execute] or [Acquire] for tracked admission. Returns false once the shedder
+// [Execute], [TryExecute], or [Acquire] for tracked admission. Returns false once the shedder
 // is closed.
 //
 // Allow is a best-effort hint: it inspects the live in-flight count without
 // reserving a slot, so a concurrent admission may change the outcome before the
-// caller acts. Only [Execute] and [Acquire] enforce the capacity bound.
+// caller acts. Only [Execute], [TryExecute], and [Acquire] enforce the capacity bound.
 func (s *Shedder) Allow(priority Priority) bool {
 	if s.closed.Load() {
 		return false
@@ -107,13 +112,13 @@ type Token struct {
 // is closed and [ErrRejected] if the request is shed for its priority.
 //
 // Acquire is the building block for code that cannot use the callback form of
-// [Execute] (for example, when in-flight tracking must span multiple
+// [Execute] or [TryExecute] (for example, when in-flight tracking must span multiple
 // statements). The caller owns the returned token and must release it.
 func (s *Shedder) Acquire(priority Priority) (*Token, error) {
-	if s.closed.Load() {
-		return nil, ErrClosed
-	}
-	if _, ok := s.tryReserve(priority); !ok {
+	if _, ok, closed := s.tryReserve(priority); !ok {
+		if closed {
+			return nil, ErrClosed
+		}
 		s.shed.Add(1)
 		return nil, errRejected(priority)
 	}
@@ -128,15 +133,20 @@ func (s *Shedder) Acquire(priority Priority) (*Token, error) {
 // rollback, the in-flight counter is never transiently inflated past what is
 // admitted, so concurrent observers never see a count above the capacity bound.
 // The loop is lock-free and retries only under genuine contention on the slot.
-func (s *Shedder) tryReserve(priority Priority) (int64, bool) {
+// When the shedder is closed the loop exits with closed=true so callers return
+// [ErrClosed] rather than [ErrRejected].
+func (s *Shedder) tryReserve(priority Priority) (int64, bool, bool) {
 	for {
+		if s.closed.Load() {
+			return 0, false, true
+		}
 		cur := s.inflight.Load()
 		next := cur + 1
 		if !s.admits(priority, next) {
-			return 0, false
+			return 0, false, false
 		}
 		if s.inflight.CompareAndSwap(cur, next) {
-			return next, true
+			return next, true, false
 		}
 	}
 }
@@ -164,7 +174,7 @@ func (t *Token) Release() {
 // The callback receives the original ctx and a [ShedController] carrying the
 // load snapshot at admission time and a [ShedController.Shed] method to record
 // graceful degradation.
-func Execute[T any](s *Shedder, ctx context.Context, priority Priority, fn func(ctx context.Context, sc ShedController) (T, error)) (T, error) {
+func Execute[T any](s *Shedder, ctx context.Context, priority Priority, fn ShedFunc[T]) (T, error) {
 	var zero T
 	if s.closed.Load() {
 		return zero, ErrClosed
@@ -176,12 +186,56 @@ func Execute[T any](s *Shedder, ctx context.Context, priority Priority, fn func(
 		return zero, errCancelled(err)
 	}
 
-	n, ok := s.tryReserve(priority)
+	n, ok, closed := s.tryReserve(priority)
 	if !ok {
+		if closed {
+			return zero, ErrClosed
+		}
 		s.shed.Add(1)
 		return zero, errRejected(priority)
 	}
 	s.admitted.Add(1)
+	return runAfterAdmit(s, ctx, priority, n, s.cfg.opOrDefault(), fn)
+}
+
+// TryExecute attempts to run fn without blocking. If the request is admitted at
+// the current load the function executes and TryExecute returns (true, val, err).
+// If the request would be shed it returns (false, zero, nil) without invoking
+// fn and increments the shed counter.
+//
+// Returns (false, zero, [ErrClosed]) if the shedder is closed,
+// (false, zero, [ErrNilFunc]) if fn is nil, and (false, zero, [ErrCancelled])
+// when ctx is already cancelled (no slot consumed). As with [Execute], the
+// callback runs under [panix.Safe] and the in-flight slot is released even on
+// panic.
+func TryExecute[T any](s *Shedder, ctx context.Context, priority Priority, fn ShedFunc[T]) (bool, T, error) {
+	var zero T
+	if s.closed.Load() {
+		return false, zero, ErrClosed
+	}
+	if fn == nil {
+		return false, zero, ErrNilFunc
+	}
+	if err := ctx.Err(); err != nil {
+		return false, zero, errCancelled(err)
+	}
+
+	n, ok, closed := s.tryReserve(priority)
+	if !ok {
+		if closed {
+			return false, zero, ErrClosed
+		}
+		s.shed.Add(1)
+		return false, zero, nil
+	}
+	s.admitted.Add(1)
+	val, err := runAfterAdmit(s, ctx, priority, n, s.cfg.opOrDefaultTry(), fn)
+	return true, val, err
+}
+
+// runAfterAdmit executes fn after a slot has been reserved. The caller must
+// have incremented admitted; this helper decrements inflight on return.
+func runAfterAdmit[T any](s *Shedder, ctx context.Context, priority Priority, n int64, op string, fn ShedFunc[T]) (T, error) {
 	defer s.inflight.Add(-1)
 
 	sc := &execution{
@@ -191,7 +245,7 @@ func Execute[T any](s *Shedder, ctx context.Context, priority Priority, fn func(
 		capacity: s.cfg.capacity,
 	}
 
-	val, err := panix.Safe(s.cfg.opOrDefault(), func() (T, error) {
+	val, err := panix.Safe(op, func() (T, error) {
 		return fn(ctx, sc)
 	})
 	if sc.degraded {
@@ -215,7 +269,11 @@ func (s *Shedder) admits(priority Priority, inflight int64) bool {
 		return true
 	}
 
-	overload := (load - s.cfg.threshold) / (thresholdCeil - s.cfg.threshold)
+	band := thresholdCeil - s.cfg.threshold
+	if band <= 0 {
+		return false
+	}
+	overload := (load - s.cfg.threshold) / band
 	switch priority {
 	case PriorityLow:
 		return overload < cutoffLow
@@ -278,10 +336,10 @@ func (s *Shedder) ResetStats() {
 	s.degraded.Store(0)
 }
 
-// Close shuts the shedder down: subsequent [Execute] and [Acquire] calls return
-// [ErrClosed]. In-flight operations are unaffected and their tokens may still
-// be released. Close is idempotent and always returns nil; the error return
-// satisfies the common closer contract used across urx.
+// Close shuts the shedder down: subsequent [Execute], [TryExecute], and
+// [Acquire] calls return [ErrClosed]. In-flight operations are unaffected and
+// their tokens may still be released. Close is idempotent and always returns nil;
+// the error return satisfies the common closer contract used across urx.
 func (s *Shedder) Close() error {
 	s.closed.Store(true)
 	return nil

@@ -50,7 +50,10 @@ func FuzzMaxRequests(f *testing.F) {
 		if got < 0 {
 			t.Fatalf("MaxRequests(%d) at capacity %v returned negative %d", base, capacity, got)
 		}
-		if base > 0 && got > base {
+		if base > 0 && capacity <= 0 && got != 0 {
+			t.Fatalf("MaxRequests(%d) at zero capacity returned %d, want 0", base, got)
+		}
+		if base > 0 && capacity > 0 && got > base {
 			t.Fatalf("MaxRequests(%d)=%d exceeds base", base, got)
 		}
 	})
@@ -71,6 +74,28 @@ func FuzzExecute(f *testing.F) {
 			}
 			return 1, nil
 		})
+		_ = time.Now()
+	})
+}
+
+// FuzzTryExecute asserts that TryExecute never panics out and always returns a
+// usable (ok, value, error) triple for arbitrary admission capacity.
+func FuzzTryExecute(f *testing.F) {
+	f.Add(0.0)
+	f.Add(0.5)
+	f.Add(1.0)
+
+	f.Fuzz(func(t *testing.T, capacity float64) {
+		w := New(WithMinCapacity(capacity), WithMaxCapacity(1))
+		ok, _, err := TryExecute(w, context.Background(), func(_ context.Context, wc WarmupController) (int, error) {
+			if c := wc.Capacity(); c < 0 || c > 1 {
+				t.Fatalf("controller capacity out of range: %v", c)
+			}
+			return 1, nil
+		})
+		if ok && err != nil && err != ErrRejected {
+			t.Fatalf("unexpected error when ok=true: %v", err)
+		}
 		_ = time.Now()
 	})
 }

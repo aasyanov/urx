@@ -2,7 +2,7 @@
 
 [CI](https://github.com/aasyanov/urx/actions/workflows/ci.yml)
 [Go Reference](https://pkg.go.dev/github.com/aasyanov/urx/signalx)
-[License: MIT](https://opensource.org/licenses/MIT)
+[License: MIT](../LICENSE)
 
 Signal-driven context cancellation plus bounded, panic-safe shutdown hooks. Go 1.24+. Zero external dependencies (depends only on the urx `panix` package and the standard library; testify in tests only).
 
@@ -11,7 +11,7 @@ go get github.com/aasyanov/urx
 ```
 
 > [!IMPORTANT]
-> `**signalx` is a shutdown sequencer, not a process supervisor.** It trades the signal into a cancelled `context.Context` and then runs your teardown hooks once, in order, under a deadline. It does **not** restart your process, daemonize it, manage child processes, or re-deliver signals. Trap the signal with [`Trap`], run resources off the returned context, and drain them with [`Wait`].
+> **signalx** is a shutdown sequencer, not a process supervisor.** It trades the signal into a cancelled `context.Context` and then runs your teardown hooks once, in order, under a deadline. It does **not** restart your process, daemonize it, manage child processes, or re-deliver signals. Trap the signal with [`Trap`], run resources off the returned context, and drain them with [`Wait`].
 
 ## The Problem
 
@@ -38,6 +38,23 @@ Done by hand, every service re-implements the same fragile boilerplate: a `signa
 ❌ NOT a daemon manager (no forking, no PID files)
 ❌ NOT a lifecycle framework (it sequences teardown; it does not start things)
 ❌ NOT a signal multiplexer (one cancellation, not per-signal dispatch)
+```
+
+### Position in the urx Stack
+
+```text
+┌──────────────────────────────────────────────────────────┐
+│  main(): servers, pools, consumers started from ctx      │
+└────────────────────────┬─────────────────────────────────┘
+                         │ Trap → cancelled ctx
+┌────────────────────────▼─────────────────────────────────┐
+│  signalx  Trap · Wait · OnShutdown                       │
+└──────────────┬───────────────────────┬───────────────────┘
+               │                        │
+┌──────────────▼─────────┐   ┌──────────▼───────────────────┐
+│  panix.SafeVoid        │   │  os/signal · context         │
+│  (hook panic recovery) │   │  (SIGINT/SIGTERM → cancel)   │
+└────────────────────────┘   └──────────────────────────────┘
 ```
 
 `signalx` sits at the very top of an application: `main` traps the signal, and `Wait` orchestrates the shutdown of everything `main` started. It depends on `panix` for hook panic recovery and on nothing else.
@@ -271,7 +288,7 @@ Both are sentinel errors created with `errors.New`; compare with `errors.Is`. Wh
 > **Hooks must respect their context — the timeout does not forcibly kill them.** Hooks run synchronously in the caller's goroutine; `WithTimeout` cancels the context passed to each hook but cannot interrupt a hook that ignores it. A hook that blocks on a non-context-aware call (e.g. a `Close()` with no deadline) will hang `Wait` indefinitely. Always thread the hook's `ctx` into the operations it performs (`srv.Shutdown(ctx)`, `db.PingContext(ctx)`), or wrap a stubborn call in its own goroutine + `select`.
 
 > [!WARNING]
-> `**Wait(nil, …)` blocks forever.** A nil context is promoted to `context.Background()`, which is never done. Always pass the context returned by `Trap` (or another cancellable context).
+> **Wait(nil, …)** blocks forever.** A nil context is promoted to `context.Background()`, which is never done. Always pass the context returned by `Trap` (or another cancellable context).
 
 > [!WARNING]
 > **The timeout bounds the total drain, not each hook.** Ten hooks sharing a 15s budget must collectively finish in 15s. `ErrShutdownTimeout` is reported once the budget is exhausted, and any not-yet-started hooks are skipped. Size the timeout for the slowest realistic full drain, or split long-running teardown into its own watchdog.
@@ -280,10 +297,10 @@ Both are sentinel errors created with `errors.New`; compare with `errors.Is`. Wh
 > **A panicking hook is recovered, not propagated.** `Wait` records `ErrHookPanic` and continues with the next hook. Inspect the returned error after shutdown — do not assume a clean teardown just because the process did not crash.
 
 > [!WARNING]
-> `**OnShutdown` registers globally for the process lifetime.** Hooks accumulate across the registry until `ResetHooks` is called. In tests, always `ResetHooks()` (e.g. via `t.Cleanup`) to avoid cross-test contamination.
+> **OnShutdown** registers globally for the process lifetime.** Hooks accumulate across the registry until `ResetHooks` is called. In tests, always `ResetHooks()` (e.g. via `t.Cleanup`) to avoid cross-test contamination.
 
 > [!WARNING]
-> `**Trap`'s `CancelFunc` must be called.** Even though the watcher goroutine also exits on signal, leaking the cancel func leaks the derived context. Always `defer cancel()`.
+> **Trap**'s `CancelFunc` must be called.** Even though the watcher goroutine also exits on signal, leaking the cancel func leaks the derived context. Always `defer cancel()`.
 
 ## Safety and Concurrency
 
@@ -295,7 +312,7 @@ Both are sentinel errors created with `errors.New`; compare with `errors.Is`. Wh
 
 ## Benchmarks
 
-> CPU: Intel i7-10510U · OS: Windows 10 · Go 1.26 · `-benchmem -count=3`
+> CPU: Intel i7-10510U · OS: Windows 10 · Go 1.24 · `-benchmem -count=3`
 
 
 | Benchmark                  | ns/op | B/op | allocs/op |
@@ -310,9 +327,9 @@ Both are sentinel errors created with `errors.New`; compare with `errors.Is`. Wh
 
 ### Analysis
 
-- `**RunHook`: 25 ns, 0 allocs.** The per-hook execution path — `panix.SafeVoid` wrapping the hook — adds only the cost of a deferred `recover()` over a direct call, with zero heap escape on the happy path. This is the true hot operation and it is allocation-free.
-- `**OnShutdown`: 131 ns, 0 amortized allocs.** Registration is a mutex lock plus a slice append. The reported B/op (~42) is amortized slice-growth backing-array reallocation across the benchmark's append sequence; once the registry is sized, steady-state appends do not allocate. Registration happens at startup (cold path), so this cost is irrelevant to request latency.
-- `**Wait_`*: ~1,300–1,840 ns, 7–8 allocs.** These benchmarks intentionally include `context.WithCancel` + `cancel()` and the internal `context.WithTimeout` per iteration, because that is the realistic unit of work: one full drain. The allocation floor (7 allocs for the no-hook case) is dominated by the two context constructions (`WithCancel` for the driver, `WithTimeout` for `shutCtx`) and the channel/timer they create — not by `signalx` logic itself. Adding hooks barely moves the needle: `Wait_TenHooks` adds ~530 ns and the same 8 allocs as the single-hook case, because the hook slice is pre-sized with known capacity (`make([]…, 0, len(global)+len(hooks))`) and each hook runs allocation-free.
+- **RunHook**: 25 ns, 0 allocs.** The per-hook execution path — `panix.SafeVoid` wrapping the hook — adds only the cost of a deferred `recover()` over a direct call, with zero heap escape on the happy path. This is the true hot operation and it is allocation-free.
+- **OnShutdown**: 131 ns, 0 amortized allocs.** Registration is a mutex lock plus a slice append. The reported B/op (~42) is amortized slice-growth backing-array reallocation across the benchmark's append sequence; once the registry is sized, steady-state appends do not allocate. Registration happens at startup (cold path), so this cost is irrelevant to request latency.
+- **Wait_***: ~1,300–1,840 ns, 7–8 allocs.** These benchmarks intentionally include `context.WithCancel` + `cancel()` and the internal `context.WithTimeout` per iteration, because that is the realistic unit of work: one full drain. The allocation floor (7 allocs for the no-hook case) is dominated by the two context constructions (`WithCancel` for the driver, `WithTimeout` for `shutCtx`) and the channel/timer they create — not by `signalx` logic itself. Adding hooks barely moves the needle: `Wait_TenHooks` adds ~530 ns and the same 8 allocs as the single-hook case, because the hook slice is pre-sized with known capacity (`make([]…, 0, len(global)+len(hooks))`) and each hook runs allocation-free.
 - **Scaling.** `Wait_SingleHook_Parallel` matches the sequential number (~1,381 ns), confirming the mutex-guarded registry snapshot is not a contention point: the critical section is a single slice copy held for microseconds, and hook execution itself holds no lock.
 - **Allocation floor.** Shutdown is a once-per-process cold path; there is no value in driving `Wait` to 0 allocs. The architecturally meaningful number is `RunHook` at 0 allocs — the only operation that could conceivably run in a tight loop.
 
@@ -324,7 +341,7 @@ Both are sentinel errors created with `errors.New`; compare with `errors.Is`. Wh
 | Test functions        | 23                                                                            |
 | Table-driven subtests | 4                                                                             |
 | Benchmarks            | 6                                                                             |
-| Fuzz targets          | 0 (no untrusted byte input)                                                   |
+| Fuzz targets          | 1                                                     |
 | Examples              | 3                                                                             |
 | Coverage              | 100% (Linux/CI); 98.3% (Windows, signal-delivery tests are `//go:build unix`) |
 | Race detector         | All pass                                                                      |
@@ -341,6 +358,7 @@ signalx/
 ├── signalx_test.go       # Unit + table-driven + concurrency tests (cross-platform)
 ├── signalx_unix_test.go  # Real signal-delivery tests (//go:build unix)
 ├── bench_test.go         # 6 benchmarks: hook run, registration, drain, parallel
+├── fuzz_test.go          # FuzzWaitWith — hook drain + panic recovery
 ├── example_test.go       # 3 runnable GoDoc examples
 ├── footprint_test.go     # config struct size guard
 └── README.md             # This file

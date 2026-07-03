@@ -2,7 +2,7 @@
 
 [CI](https://github.com/aasyanov/urx/actions/workflows/ci.yml)
 [Go Reference](https://pkg.go.dev/github.com/aasyanov/urx/panix)
-[License: MIT](https://opensource.org/licenses/MIT)
+[License: MIT](../LICENSE)
 
 Deterministic panic-to-error conversion with captured stack traces. Go 1.24+. Zero external dependencies (testify in tests only).
 
@@ -41,11 +41,7 @@ defer func() {
 4. **Goroutine safety** — `SafeGo` launches panic-safe goroutines with a callback
 5. **Zero overhead on happy path** — no allocations when no panic occurs
 
-## Architectural Position: What `panix` Actually Does
-
-### Managed Object
-
-`panix` manages **a single function invocation** — it wraps one call in a `defer recover()` block and converts the recovered value into a typed error. It is:
+## Architectural Position
 
 ```text
 ✅ A panic-to-error converter for synchronous calls (Safe, SafeVoid)
@@ -342,19 +338,19 @@ if err != nil {
 ## Pitfalls
 
 > [!WARNING]
-> `**panic(nil)` in Go 1.21+** — since Go 1.21, `panic(nil)` wraps the value in `*runtime.PanicNilError`. The recovered value is NOT nil; it is the wrapper. `PanicError.Value` will be a `*runtime.PanicNilError`, not nil.
+> **panic(nil)** in Go 1.21+** — since Go 1.21, `panic(nil)` wraps the value in `*runtime.PanicNilError`. The recovered value is NOT nil; it is the wrapper. `PanicError.Value` will be a `*runtime.PanicNilError`, not nil.
 
 > [!WARNING]
-> `**SafeGo` is fire-and-forget** — there is no return value and no built-in wait mechanism. If the goroutine panics and `onError` is nil, the panic is silently recovered. Always provide an `onError` callback in production code.
+> **SafeGo** is fire-and-forget** — there is no return value and no built-in wait mechanism. If the goroutine panics and `onError` is nil, the panic is silently recovered. Always provide an `onError` callback in production code.
 
 > [!WARNING]
-> `**onError` runs in the panicking goroutine** — the callback passed to `SafeGo` executes in the same goroutine that panicked. If the callback itself panics, that panic is NOT recovered (it will crash the process). Keep `onError` simple: log, increment a counter, send to a channel.
+> **onError** runs in the panicking goroutine** — the callback passed to `SafeGo` executes in the same goroutine that panicked. If the callback itself panics, that panic is NOT recovered (it will crash the process). Keep `onError` simple: log, increment a counter, send to a channel.
 
 > [!WARNING]
 > **Stack traces are captured AFTER recovery** — the stack trace includes frames from `captureStack` → `recover` → `defer`, not the exact panic site. The panic origin is still visible in the trace but may be several frames deep.
 
 > [!WARNING]
-> `**Wrap` captures the function pointer, not a closure snapshot** — if the wrapped function closes over mutable state, that state may change between calls. This is by design (reusable wrapper), but can be surprising if you expect snapshot semantics.
+> **Wrap** captures the function pointer, not a closure snapshot** — if the wrapped function closes over mutable state, that state may change between calls. This is by design (reusable wrapper), but can be surprising if you expect snapshot semantics.
 
 ## Safety and Concurrency
 
@@ -366,7 +362,7 @@ if err != nil {
 
 ## Benchmarks
 
-> CPU: Intel i7-10510U · OS: Windows 10 · Go 1.26 · `-benchmem -count=3`
+> CPU: Intel i7-10510U · OS: Windows 10 · Go 1.24 · `-benchmem -count=3`
 
 
 | Benchmark               | ns/op  | B/op  | allocs/op |
@@ -389,10 +385,10 @@ if err != nil {
 - **Happy path (`Safe_NoPanic`): 32 ns, 0 allocs.** The deferred `recover()` adds approximately 25 ns over a raw function call. This is the cost of the safety net. The 0-allocation guarantee means `Safe` can be used on hot paths without GC pressure.
 - **Parallel scaling (`Safe_NoPanic_Parallel`): 10 ns/op.** Under 8-way parallelism, `Safe` scales linearly because there is no shared mutable state — each goroutine has its own deferred closure. The 3× speedup over sequential is expected from CPU cache line independence.
 - **Panic path (`Safe_Panic`): 43,600 ns, 2 allocs (4,160 B).** Dominated by `runtime.Stack` (4 KB buffer allocation + stack walk). The second allocation is the `PanicError` struct itself. This is 1,300× slower than the happy path — panics are exceptional by definition. The 4 KB allocation floor is architectural: `runtime.Stack` requires a pre-allocated buffer.
-- `**CaptureStack`: 13,300 ns, 1 alloc (4,096 B).** Pure `runtime.Stack` cost without the `recover()` overhead. This is the irreducible floor for any stack-capturing recovery mechanism.
-- `**SafeGo_NoPanic`: 2,600 ns, 1 alloc (64 B).** Goroutine launch overhead dominates. The single allocation is the goroutine stack segment. Suitable for background tasks; not appropriate for per-request hot loops.
-- `**SafeVoid_NoPanic`: 50 ns, 0 allocs.** ~18 ns overhead versus `Safe` due to the `struct{}` wrapping layer. Negligible in practice.
-- `**Wrap_NoPanic`: 35 ns, 0 allocs.** Identical to `Safe` — the wrapper is a thin closure, not an additional abstraction layer.
+- **CaptureStack**: 13,300 ns, 1 alloc (4,096 B).** Pure `runtime.Stack` cost without the `recover()` overhead. This is the irreducible floor for any stack-capturing recovery mechanism.
+- **SafeGo_NoPanic**: 2,600 ns, 1 alloc (64 B).** Goroutine launch overhead dominates. The single allocation is the goroutine stack segment. Suitable for background tasks; not appropriate for per-request hot loops.
+- **SafeVoid_NoPanic**: 50 ns, 0 allocs.** ~18 ns overhead versus `Safe` due to the `struct{}` wrapping layer. Negligible in practice.
+- **Wrap_NoPanic**: 35 ns, 0 allocs.** Identical to `Safe` — the wrapper is a thin closure, not an additional abstraction layer.
 - **Allocation floor:** On the panic path, 2 allocations (4,160 B) is the architectural minimum: 4,096 B for the stack buffer + 64 B for the `PanicError` struct. This cannot be reduced without sacrificing stack trace capture.
 
 ## Quality

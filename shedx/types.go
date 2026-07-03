@@ -46,10 +46,10 @@ func (p Priority) String() string {
 	}
 }
 
-// ShedController exposes the admission context to the [Execute] callback and
-// lets it report graceful degradation. The implementation is private; callers
+// ShedController exposes the admission context to the [Execute] and [TryExecute]
+// callback and lets it report graceful degradation. The implementation is private; callers
 // interact only through this interface. A ShedController is bound to a single
-// [Execute] call and must not be retained after the callback returns.
+// [Execute] or [TryExecute] call and must not be retained after the callback returns.
 //
 // Load shedding is decided at admission: by the time the callback runs the
 // request is already admitted. The controller therefore exposes the load
@@ -81,7 +81,7 @@ type ShedController interface {
 }
 
 // execution is the private implementation of [ShedController]. It is created
-// once per [Execute] call and accessed only from the callback goroutine, so it
+// once per [Execute] or [TryExecute] call and accessed only from the callback goroutine, so it
 // needs no synchronization.
 type execution struct {
 	priority Priority
@@ -109,7 +109,7 @@ func (e *execution) Shed() { e.degraded = true }
 // compile-time assertion that execution satisfies the public interface.
 var _ ShedController = (*execution)(nil)
 
-// ShedFunc is the unit of work run by [Execute]. It receives the call context
+// ShedFunc is the unit of work run by [Execute] and [TryExecute]. It receives the call context
 // and a [ShedController], and runs under panic recovery: a panicking function
 // becomes a [*panix.PanicError].
 type ShedFunc[T any] func(ctx context.Context, sc ShedController) (T, error)

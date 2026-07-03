@@ -2,7 +2,7 @@
 
 [CI](https://github.com/aasyanov/urx/actions/workflows/ci.yml)
 [Go Reference](https://pkg.go.dev/github.com/aasyanov/urx/ratex)
-[License: MIT](https://opensource.org/licenses/MIT)
+[License: MIT](../LICENSE)
 
 A thread-safe token-bucket rate limiter offering three layers — non-blocking `Allow`, blocking `Wait`, and a panic-safe `Execute` wrapper that hands the callback a `RateController`. Go 1.24+. Zero external dependencies (depends only on the urx `panix` package; testify in tests only).
 
@@ -271,7 +271,7 @@ A panicking function does not produce a sentinel — it returns a `*panix.PanicE
 > **The limiter is single-process.** Each `Limiter` tracks its own bucket in memory. For a cluster-wide limit, run a shared store (Redis, etc.) — `ratex` is the local enforcement layer, not a distributed coordinator.
 
 > [!NOTE]
-> `**SkipToken` refunds at most one token and rolls back one `Allowed` count.** Use it for genuine no-ops; calling it on real work undercounts your throughput statistics.
+> **SkipToken** refunds at most one token and rolls back one `Allowed` count.** Use it for genuine no-ops; calling it on real work undercounts your throughput statistics.
 
 ## Safety and Concurrency
 

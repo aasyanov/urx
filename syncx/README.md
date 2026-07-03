@@ -2,7 +2,7 @@
 
 [CI](https://github.com/aasyanov/urx/actions/workflows/ci.yml)
 [Go Reference](https://pkg.go.dev/github.com/aasyanov/urx/syncx)
-[License: MIT](https://opensource.org/licenses/MIT)
+[License: MIT](../LICENSE)
 
 Three generic concurrency primitives — a typed lazy initializer, a panic-safe error group, and a type-safe concurrent map with O(1) length. Go 1.24+. Zero external dependencies (depends only on the urx `panix` package; testify in tests only).
 
@@ -115,7 +115,7 @@ LoadOrStore: → if !loaded { len++ }
 Len():       atomic.Int64.Load()   (O(1))
 ```
 
-`Map` wraps `sync.Map` and adds compile-time `K`/`V` typing (no `any` casts in caller code). Length is maintained as a single `atomic.Int64`, incremented or decremented based on the `**loaded` result of each atomic `sync.Map` operation** — `Swap`, `LoadAndDelete`, and `LoadOrStore` each report definitively whether a prior entry existed, so the counter stays consistent under concurrent mutation without an extra mutex.
+`Map` wraps `sync.Map` and adds compile-time `K`/`V` typing (no `any` casts in caller code). Length is maintained as a single `atomic.Int64`, incremented or decremented based on the **loaded** result of each atomic `sync.Map` operation** — `Swap`, `LoadAndDelete`, and `LoadOrStore` each report definitively whether a prior entry existed, so the counter stays consistent under concurrent mutation without an extra mutex.
 
 ## Normative Contracts
 
@@ -309,16 +309,16 @@ A nil task function passed to `Group.Go` or `Group.TryGo` is ignored (no error, 
 ## Pitfalls
 
 > [!WARNING]
-> `**Lazy` does not cache failures.** A failing `init` is retried on the next `Get`. This is intentional (transient I/O should be retryable) but means a permanently-broken init will run on every call. Add your own backoff in the init function if needed.
+> **Lazy** does not cache failures.** A failing `init` is retried on the next `Get`. This is intentional (transient I/O should be retryable) but means a permanently-broken init will run on every call. Add your own backoff in the init function if needed.
 
 > [!WARNING]
 > **A `Group` must not be reused after `Wait`.** The derived context is cancelled by `Wait`, so tasks launched afterward run with an already-cancelled context. Create a fresh `Group` per fan-out.
 
 > [!WARNING]
-> `**Map.Range` is not a snapshot.** Like `sync.Map.Range`, it may observe concurrent insertions or deletions mid-iteration. `Len` taken before `Range` may differ from the number of entries visited.
+> **Map.Range** is not a snapshot.** Like `sync.Map.Range`, it may observe concurrent insertions or deletions mid-iteration. `Len` taken before `Range` may differ from the number of entries visited.
 
 > [!NOTE]
-> `**Map` is read-optimized.** It inherits `sync.Map`'s trade-offs: excellent for read-mostly or disjoint-key workloads, but a `map` guarded by a `sync.Mutex` can be faster for write-heavy shared keys.
+> **Map** is read-optimized.** It inherits `sync.Map`'s trade-offs: excellent for read-mostly or disjoint-key workloads, but a `map` guarded by a `sync.Mutex` can be faster for write-heavy shared keys.
 
 ## Safety and Concurrency
 
@@ -326,7 +326,7 @@ All three types are safe for concurrent use. `Lazy` serializes through a `sync.M
 
 ## Benchmarks
 
-> CPU: Intel i7-10510U · OS: Windows 10 · Go 1.26 · `-benchmem -count=1`
+> CPU: Intel i7-10510U · OS: Windows 10 · Go 1.24 · `-benchmem -count=1`
 
 
 | Benchmark         | ns/op | B/op | allocs/op |

@@ -11,9 +11,10 @@ const (
 	// When consecutive failures reach the configured threshold the breaker
 	// trips to [Open].
 	Closed State = iota
-	// Open is the tripped state: calls are rejected immediately with [ErrOpen]
-	// without invoking the function. After the reset timeout elapses the
-	// breaker moves to [HalfOpen] and admits a bounded number of probes.
+	// Open is the tripped state: calls are rejected immediately — [Execute]
+	// returns [ErrOpen], [TryExecute] returns (false, zero, nil) — without
+	// invoking the function. After the reset timeout elapses the breaker moves
+	// to [HalfOpen] and admits a bounded number of probes.
 	Open
 	// HalfOpen is the probing state: a limited number of probe calls are
 	// admitted to test whether the downstream has recovered. A probe success
@@ -44,11 +45,11 @@ func (s State) String() string {
 	}
 }
 
-// CircuitController exposes the admission context to the [Execute] callback and
-// lets it influence how the breaker treats the call's outcome. The
-// implementation is private; callers interact only through this interface. A
-// CircuitController is bound to a single [Execute] call and must not be retained
-// after the callback returns.
+// CircuitController exposes the admission context to the [Execute] and
+// [TryExecute] callbacks and lets it influence how the breaker treats the call's
+// outcome. The implementation is private; callers interact only through this
+// interface. A CircuitController is bound to a single [Execute] or [TryExecute]
+// call and must not be retained after the callback returns.
 //
 // The breaker decides admission before the callback runs: by the time the
 // callback executes the call has already been let through in either [Closed] or
@@ -85,16 +86,17 @@ type CircuitController interface {
 	Trip()
 }
 
-// CircuitFunc is the unit of work run by [Execute]. It receives the call context
+// CircuitFunc is the unit of work run by [Execute] and [TryExecute]. It receives the call context
 // and a [CircuitController], and runs under panic recovery: a panicking function
 // becomes a [*panix.PanicError] and is treated as a failure (subject to
 // [CircuitController.SkipFailure]).
 type CircuitFunc[T any] func(ctx context.Context, cc CircuitController) (T, error)
 
 // execution is the private implementation of [CircuitController]. One instance
-// is created per [Execute] call and accessed only from the goroutine running
-// the callback, so it needs no synchronization. The skipFailure and tripped
-// flags are read by the dispatch path after the callback returns.
+// is created per [Execute] or [TryExecute] call and accessed only from the
+// goroutine running the callback, so it needs no synchronization. The
+// skipFailure and tripped flags are read by the dispatch path after the
+// callback returns.
 type execution struct {
 	state       State
 	failures    int
@@ -136,7 +138,8 @@ type Stats struct {
 	// TotalFail is the cumulative number of calls counted as failures
 	// (excluding those suppressed by [CircuitController.SkipFailure]).
 	TotalFail uint64 `json:"total_failures"`
-	// Rejected is the cumulative number of calls rejected with [ErrOpen].
+	// Rejected is the cumulative number of calls rejected by [Execute] with
+	// [ErrOpen] or by [TryExecute] with (false, zero, nil).
 	Rejected uint64 `json:"rejected"`
 	// Trips is the cumulative number of transitions into [Open].
 	Trips uint64 `json:"trips"`

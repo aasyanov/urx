@@ -6,10 +6,10 @@ import (
 )
 
 var (
-	// ErrNoFunc is returned by [Execute] and [ExecuteMulti] when no function is
+	// ErrNilFunc is returned by [Execute] and [ExecuteMulti] when no function is
 	// supplied (a nil function for [Execute], an empty or all-nil slice for
 	// [ExecuteMulti]). Safe to compare with == or [errors.Is].
-	ErrNoFunc = errors.New("hedgex: no function provided")
+	ErrNilFunc = errors.New("hedgex: nil function")
 
 	// ErrAllFailed is returned when every hedge copy completed with an error
 	// and none succeeded. The joined error carries the first failure observed;

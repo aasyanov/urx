@@ -6,28 +6,29 @@ import (
 )
 
 var (
-	// ErrOpen is returned by [Execute] when the circuit is Open (or HalfOpen
+	// ErrOpen is returned by [Execute] when the circuit is [Open] (or [HalfOpen]
 	// with a probe already in flight) and the call is rejected without
-	// invoking fn. After the reset timeout elapses the circuit admits a single
-	// probe; concurrent callers continue to receive ErrOpen until the probe
-	// completes. Safe to compare with == or [errors.Is].
+	// invoking fn. [TryExecute] returns (false, zero, nil) in the same situation.
+	// After the reset timeout elapses the circuit admits a probe; concurrent
+	// callers continue to be rejected until the probe completes. Safe to compare
+	// with == or [errors.Is].
 	ErrOpen = errors.New("circuitx: circuit breaker is open")
 
-	// ErrNilFunc is returned by [Execute] when the supplied function is nil.
-	// Safe to compare with == or [errors.Is].
+	// ErrNilFunc is returned by [Execute] and [TryExecute] when the supplied
+	// function is nil. Safe to compare with == or [errors.Is].
 	ErrNilFunc = errors.New("circuitx: nil function")
 
-	// ErrClosed is returned by [Execute] after [Breaker.Close] has been called.
-	// It is distinct from the [Closed] circuit state: a closed [Breaker] is shut
-	// down for good, whereas the Closed state is the healthy operating mode.
-	// Safe to compare with == or [errors.Is].
+	// ErrClosed is returned by [Execute] and [TryExecute] after [Breaker.Close]
+	// has been called. It is distinct from the [Closed] circuit state: a closed
+	// [Breaker] is shut down for good, whereas the Closed state is the healthy
+	// operating mode. Safe to compare with == or [errors.Is].
 	ErrClosed = errors.New("circuitx: breaker is closed")
 
-	// ErrCancelled is returned by [Execute] when the supplied context is already
-	// cancelled (or its deadline has expired) at admission time, so the breaker
-	// state is left untouched and fn is never invoked. The joined error carries
-	// ctx.Err(); reach it with [errors.Unwrap] or test it with [errors.Is]. Safe
-	// to compare with == or [errors.Is].
+	// ErrCancelled is returned by [Execute] and [TryExecute] when the supplied
+	// context is already cancelled (or its deadline has expired) at admission
+	// time, so the breaker state is left untouched and fn is never invoked. The
+	// joined error carries ctx.Err(); reach it with [errors.Unwrap] or test it
+	// with [errors.Is]. Safe to compare with == or [errors.Is].
 	ErrCancelled = errors.New("circuitx: context cancelled")
 )
 

@@ -34,6 +34,23 @@ envx **is** the environment layer of a configuration pipeline: string env → ty
 - a reflection-based struct populator — bindings are explicit and type-checked at compile time;
 - a secrets manager — it reads strings, it does not fetch or decrypt them.
 
+### Position in the urx Stack
+
+```text
+┌──────────────────────────────────────────────────────────┐
+│  main(): assemble config from defaults + file + env + CLI │
+└────────────────────────┬─────────────────────────────────┘
+                         │ overlays typed fields
+┌────────────────────────▼─────────────────────────────────┐
+│  envx   Env · Bind[T] · BindTo · Validate                │
+└──────────────┬───────────────────────┬───────────────────┘
+               │                        │
+┌──────────────▼─────────┐   ┌──────────▼───────────────────┐
+│  cfgx (file defaults)  │   │  clix (flag overrides)       │
+│  Load → struct         │   │  parse → struct fields       │
+└────────────────────────┘   └──────────────────────────────┘
+```
+
 ## Architecture
 
 ```

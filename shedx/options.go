@@ -59,6 +59,15 @@ func (c config) opOrDefault() string {
 	return opExecute
 }
 
+// opOrDefaultTry returns the configured operation name, or [opTryExecute] when
+// none was set.
+func (c config) opOrDefaultTry() string {
+	if c.op != "" {
+		return c.op
+	}
+	return opTryExecute
+}
+
 // WithCapacity sets the maximum number of in-flight operations the shedder
 // tracks. Load is measured as inflight/capacity. Default: [DefaultCapacity].
 // Values <= 0 are ignored (the default is kept), and a final capacity below
@@ -83,7 +92,8 @@ func WithThreshold(t float64) Option {
 }
 
 // WithOp sets the logical operation name attached to panic reports raised by
-// the callback (e.g. "api.search", "db.query"). Default: "shedx.Execute".
+// the callback (e.g. "api.search", "db.query"). Default: [opExecute] for
+// [Execute] and [opTryExecute] for [TryExecute]. An empty name is ignored.
 func WithOp(op string) Option {
 	return func(c *config) {
 		if op != "" {

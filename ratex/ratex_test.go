@@ -12,6 +12,29 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// cancelAfterCtx returns a context whose [context.Context.Err] becomes
+// non-nil after the n-th call, enabling deterministic tests of the wait-loop
+// re-check points without relying on real timer scheduling.
+type cancelAfterCtx struct {
+	context.Context
+	calls atomic.Int32
+	after int32
+	err   error
+}
+
+func (c *cancelAfterCtx) Err() error {
+	if c.Context == nil {
+		c.Context = context.Background()
+	}
+	if c.err == nil {
+		c.err = context.Canceled
+	}
+	if c.calls.Add(1) >= c.after {
+		return c.err
+	}
+	return c.Context.Err()
+}
+
 // --- Construction & options ---
 
 func TestNew_Defaults(t *testing.T) {
@@ -153,6 +176,14 @@ func TestLimiter_WaitN_ImpossibleRequestCancellable(t *testing.T) {
 	require.ErrorIs(t, err, ErrCancelled)
 }
 
+func TestLimiter_WaitN_CancelAfterTimerFires(t *testing.T) {
+	l := New(WithRate(10), WithBurst(1))
+	require.True(t, l.Allow())
+
+	err := l.WaitN(&cancelAfterCtx{after: 2}, 1)
+	require.ErrorIs(t, err, ErrCancelled)
+}
+
 func TestLimiter_WaitN_NonPositiveTreatedAsOne(t *testing.T) {
 	l := New(WithRate(1), WithBurst(1))
 	require.NoError(t, l.WaitN(context.Background(), 0))
@@ -223,8 +254,68 @@ func TestExecute_CancelledWhileWaiting(t *testing.T) {
 	assert.False(t, called)
 }
 
+func TestAcquire_CancelledAfterTimerBeforeTake(t *testing.T) {
+	l := New(WithRate(100_000), WithBurst(1))
+	require.True(t, l.Allow())
+
+	ctx := &cancelAfterCtx{after: 2}
+
+	_, _, err := l.acquire(ctx)
+	require.ErrorIs(t, err, ErrCancelled)
+	assert.Equal(t, uint64(1), l.Stats().Allowed, "initial Allow only")
+}
+
+func TestAcquire_CancelledAfterTakeRefundsToken(t *testing.T) {
+	l := New(WithRate(1), WithBurst(1))
+	ctx := &cancelAfterCtx{after: 2}
+
+	_, _, err := l.acquire(ctx)
+	require.ErrorIs(t, err, ErrCancelled)
+	assert.InDelta(t, 1.0, l.Tokens(), 0.01, "cancelled acquire must refund the token")
+	s := l.Stats()
+	assert.Equal(t, uint64(1), s.Limited)
+	assert.Zero(t, s.Allowed)
+}
+
+func TestExecute_RejectsCancelledContextAfterTimer(t *testing.T) {
+	l := New(WithRate(10), WithBurst(1))
+	require.True(t, l.Allow())
+
+	ctx := &cancelAfterCtx{after: 2}
+	called := false
+	_, err := Execute(l, ctx,
+		func(context.Context, RateController) (int, error) {
+			called = true
+			return 1, nil
+		})
+	require.ErrorIs(t, err, ErrCancelled)
+	assert.False(t, called, "fn must not run after ctx cancelled post-timer")
+}
+
+func TestWaitN_RejectsCancelledContextAfterTimer(t *testing.T) {
+	l := New(WithRate(10), WithBurst(1))
+	require.True(t, l.Allow())
+
+	err := l.WaitN(&cancelAfterCtx{after: 2}, 1)
+	require.ErrorIs(t, err, ErrCancelled)
+	s := l.Stats()
+	assert.Equal(t, uint64(1), s.Limited)
+	assert.Equal(t, uint64(1), s.Allowed, "initial Allow only")
+}
+
+func TestWaitN_CancelledAfterTakeRefundsToken(t *testing.T) {
+	l := New(WithRate(1), WithBurst(1))
+
+	err := l.WaitN(&cancelAfterCtx{after: 2}, 1)
+	require.ErrorIs(t, err, ErrCancelled)
+	assert.InDelta(t, 1.0, l.Tokens(), 0.01)
+	s := l.Stats()
+	assert.Equal(t, uint64(1), s.Limited)
+	assert.Zero(t, s.Allowed)
+}
+
 func TestExecute_Waits(t *testing.T) {
-	l := New(WithRate(1000), WithBurst(1))
+	l := New(WithRate(0.0001), WithBurst(1))
 	require.True(t, l.Allow())
 
 	var waited bool
@@ -295,6 +386,57 @@ func TestTryExecute_NilFunc(t *testing.T) {
 	ok, _, err := TryExecute[int](l, context.Background(), nil)
 	require.ErrorIs(t, err, ErrNilFunc)
 	assert.False(t, ok)
+}
+
+func TestTryExecute_CancelledContextBeforeTake(t *testing.T) {
+	l := New(WithRate(1), WithBurst(1))
+	called := false
+	ok, _, err := TryExecute(l, testx.CancelledCtx(),
+		func(context.Context, RateController) (int, error) {
+			called = true
+			return 1, nil
+		})
+	require.ErrorIs(t, err, ErrCancelled)
+	assert.ErrorIs(t, err, context.Canceled)
+	assert.False(t, ok)
+	assert.False(t, called)
+	assert.InDelta(t, 1.0, l.Tokens(), 0.01, "cancelled call must not consume a token")
+}
+
+func TestTryExecute_CancelledContextBeforeTakeDoesNotCountLimited(t *testing.T) {
+	l := New(WithRate(1), WithBurst(1))
+	ctx := &cancelAfterCtx{after: 1}
+
+	called := false
+	ok, _, err := TryExecute(l, ctx,
+		func(context.Context, RateController) (int, error) {
+			called = true
+			return 1, nil
+		})
+	require.ErrorIs(t, err, ErrCancelled)
+	assert.False(t, ok)
+	assert.False(t, called)
+	assert.InDelta(t, 1.0, l.Tokens(), 0.01)
+	assert.Zero(t, l.Stats().Limited, "cancelled before take must not count as limited")
+}
+
+func TestTryExecute_CancelledAfterTakeRefundsToken(t *testing.T) {
+	l := New(WithRate(1), WithBurst(1))
+	ctx := &cancelAfterCtx{after: 2}
+
+	called := false
+	ok, _, err := TryExecute(l, ctx,
+		func(context.Context, RateController) (int, error) {
+			called = true
+			return 1, nil
+		})
+	require.ErrorIs(t, err, ErrCancelled)
+	assert.False(t, ok)
+	assert.False(t, called)
+	assert.InDelta(t, 1.0, l.Tokens(), 0.01)
+	s := l.Stats()
+	assert.Equal(t, uint64(1), s.Limited)
+	assert.Zero(t, s.Allowed)
 }
 
 func TestTryExecute_NeverWaited(t *testing.T) {

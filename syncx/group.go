@@ -61,6 +61,10 @@ func NewGroup(ctx context.Context, opts ...GroupOption) (*Group, context.Context
 //
 // The ctx passed to fn is the group's derived context: it is cancelled as
 // soon as any sibling task fails, allowing well-behaved tasks to abort early.
+//
+// Do not call Go from within a task when the group is at its concurrency
+// limit: the call blocks waiting for a free slot that only the running task
+// can release, causing a deadlock.
 func (g *Group) Go(fn func(ctx context.Context) error) {
 	if fn == nil {
 		return

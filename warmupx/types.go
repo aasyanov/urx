@@ -52,10 +52,10 @@ func (s Strategy) String() string {
 	}
 }
 
-// WarmupController provides per-call admission context and control to the
-// [Execute] callback. The implementation is private; callers interact only
-// through this interface. A WarmupController is bound to a single Execute call
-// and must not be retained after the callback returns.
+// WarmupController provides per-call admission context and control to
+// [Execute] and [TryExecute] callbacks. The implementation is private; callers
+// interact only through this interface. A WarmupController is bound to a single
+// Execute or TryExecute call and must not be retained after the callback returns.
 type WarmupController interface {
 	// Capacity returns the warmer capacity in [0, 1] at the moment the call was
 	// admitted. Use it to scale work to the instance's current readiness, for
@@ -70,16 +70,17 @@ type WarmupController interface {
 	Strategy() Strategy
 
 	// Reject signals that the admitted call must be treated as rejected
-	// regardless of its result: [Execute] discards the callback's return value
-	// and returns [ErrRejected]. Use it when the callback determines, after
+	// regardless of its result: [Execute] and admitted [TryExecute] discard the
+	// callback's return value and return [ErrRejected]. Use it when the callback
+	// determines, after
 	// admission, that the instance is not yet ready for the work. Safe to call
 	// multiple times.
 	Reject()
 }
 
 // execution is the private implementation of [WarmupController]. It is created
-// once per [Execute] call and accessed only from the callback goroutine, so it
-// needs no synchronization.
+// once per [Execute] or [TryExecute] call and accessed only from the callback
+// goroutine, so it needs no synchronization.
 type execution struct {
 	capacity float64
 	progress float64
@@ -102,7 +103,7 @@ func (e *execution) Reject() { e.rejected = true }
 // compile-time assertion that execution satisfies the public interface.
 var _ WarmupController = (*execution)(nil)
 
-// WarmupFunc is the unit of work run by [Execute]. It receives the call
-// context and a [WarmupController], and runs under panic recovery: a panicking
-// function becomes a [*panix.PanicError].
+// WarmupFunc is the unit of work run by [Execute] and [TryExecute]. It receives
+// the call context and a [WarmupController], and runs under panic recovery: a
+// panicking function becomes a [*panix.PanicError].
 type WarmupFunc[T any] func(ctx context.Context, wc WarmupController) (T, error)

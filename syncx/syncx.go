@@ -1,4 +1,4 @@
-// Package syncx provides generic concurrency primitives for industrial Go
+// Package syncx provides generic concurrency primitives for production Go
 // services: a typed lazy initializer, a panic-safe error group, and a
 // type-safe concurrent map.
 //

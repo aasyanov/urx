@@ -353,3 +353,82 @@ func TestComputeCtx_CancelledAfterMiss(t *testing.T) {
 	// post-compute path stores it; the context is only checked before compute.
 	require.NoError(t, err)
 }
+
+func TestCompute_CloseDuringDirectInsertDoesNotStore(t *testing.T) {
+	c := New[string, int]()
+	start := make(chan struct{})
+	release := make(chan struct{})
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		v := c.GetOrCompute("k", func() int {
+			close(start)
+			<-release
+			return 42
+		})
+		assert.Equal(t, 42, v)
+	}()
+
+	<-start
+	c.Close()
+	close(release)
+	wg.Wait()
+
+	assert.Equal(t, 0, c.Stats().Size, "closed cache must not retain ghost entries")
+}
+
+func TestComputeCtx_CloseDuringDirectInsertReturnsErrClosed(t *testing.T) {
+	c := New[string, int]()
+	start := make(chan struct{})
+	release := make(chan struct{})
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	var got int
+	var gotErr error
+	go func() {
+		defer wg.Done()
+		got, gotErr = c.GetOrComputeCtx(context.Background(), "k", func(context.Context) (int, error) {
+			close(start)
+			<-release
+			return 42, nil
+		})
+	}()
+
+	<-start
+	c.Close()
+	close(release)
+	wg.Wait()
+
+	require.ErrorIs(t, gotErr, ErrClosed)
+	assert.Equal(t, 0, got)
+	assert.Equal(t, 0, c.Stats().Size)
+}
+
+func TestComputeSingleCtx_CloseDuringComputeReturnsErrClosed(t *testing.T) {
+	c := New[string, int]()
+	start := make(chan struct{})
+	release := make(chan struct{})
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	var gotErr error
+	go func() {
+		defer wg.Done()
+		_, gotErr = c.GetOrComputeCtx(context.Background(), "k", func(context.Context) (int, error) {
+			close(start)
+			<-release
+			return 42, nil
+		}, WithSingleflight())
+	}()
+
+	<-start
+	c.Close()
+	close(release)
+	wg.Wait()
+
+	require.ErrorIs(t, gotErr, ErrClosed)
+	assert.Equal(t, 0, c.Stats().Size)
+}

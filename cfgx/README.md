@@ -32,9 +32,26 @@ cfgx **is** a codec boundary: `[]byte` ↔ struct, plus file I/O and a validatio
 - a configuration *framework* (no global registry, no live reload, no watch);
 - an environment reader — use `envx`;
 - a flag parser — use `clix`;
-- a schema/validation library — implement [`Validator`] using `validx`.
+- a schema/validation library — implement [`Validator`] on your config struct.
 
 It is the deliberately small piece the other layers build on.
+
+### Position in the urx Stack
+
+```text
+┌──────────────────────────────────────────────────────────┐
+│  main(): defaults → file → env → CLI → validated struct  │
+└────────────────────────┬─────────────────────────────────┘
+                         │ file ↔ struct
+┌────────────────────────▼─────────────────────────────────┐
+│  cfgx   Load/Parse/Save · YAML/JSON/TOML · Validator      │
+└──────────────┬───────────────────────┬───────────────────┘
+               │                        │
+┌──────────────▼─────────┐   ┌──────────▼───────────────────┐
+│  envx (env overlay)    │   │  clix (flag overlay)         │
+│  BindTo shared fields  │   │  flags → shared fields       │
+└────────────────────────┘   └──────────────────────────────┘
+```
 
 ## Architecture
 

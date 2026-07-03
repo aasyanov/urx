@@ -1,4 +1,4 @@
-// Package quotax provides per-key rate limiting for industrial Go services.
+// Package quotax provides per-key rate limiting for production Go services.
 //
 // A [Quota] maintains an independent token-bucket rate limiter for each key
 // (user ID, IP address, API key, tenant, ...). Keys are distributed across
@@ -220,10 +220,20 @@ func (q *Quota) WaitN(ctx context.Context, key string, n int) error {
 	}
 
 	for {
+		if err := ctx.Err(); err != nil {
+			q.limited.Add(1)
+			return errCancelled(err)
+		}
+
 		// Refresh the access stamp each iteration so a key blocked for longer
 		// than the eviction TTL is never swept out from under an active waiter.
 		b.touch()
 		if b.limiter.AllowN(n) {
+			if err := ctx.Err(); err != nil {
+				b.limiter.Release(float64(n))
+				q.limited.Add(1)
+				return errCancelled(err)
+			}
 			q.allowed.Add(1)
 			return nil
 		}
@@ -235,6 +245,10 @@ func (q *Quota) WaitN(ctx context.Context, key string, n int) error {
 			q.limited.Add(1)
 			return errCancelled(ctx.Err())
 		case <-timer.C:
+			if err := ctx.Err(); err != nil {
+				q.limited.Add(1)
+				return errCancelled(err)
+			}
 		}
 	}
 }

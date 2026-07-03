@@ -2,7 +2,7 @@
 
 [CI](https://github.com/aasyanov/urx/actions/workflows/ci.yml)
 [Go Reference](https://pkg.go.dev/github.com/aasyanov/urx/quotax)
-[License: MIT](https://opensource.org/licenses/MIT)
+[License: MIT](../LICENSE)
 
 Per-key token-bucket rate limiting: each key (user, IP, API key, tenant) gets its own independent bucket, keys are sharded to spread lock contention, and inactive keys are evicted automatically so memory stays bounded. Offers non-blocking `Allow`, blocking `Wait`, and a panic-safe `Execute` wrapper that hands the callback a `QuotaController`. Go 1.24+. Zero external dependencies (depends only on the urx `ratex` and `panix` packages; testify in tests only).
 
@@ -311,13 +311,13 @@ val, err := quotax.Execute(q, ctx, userID,
 > **A request larger than `burst` can never succeed.** `WaitN(ctx, key, n)` with `n > burst` blocks until the context is cancelled, because the key's bucket can never hold that many tokens. Size your burst accordingly.
 
 > [!WARNING]
-> `**WithMaxKeys` protects memory but degrades new keys.** Once the cap is hit, every *new* key is rejected (existing keys keep working). Pair it with a generous eviction TTL so idle keys free slots, and watch `OnMaxKeys` to detect cap saturation.
+> **WithMaxKeys** protects memory but degrades new keys.** Once the cap is hit, every *new* key is rejected (existing keys keep working). Pair it with a generous eviction TTL so idle keys free slots, and watch `OnMaxKeys` to detect cap saturation.
 
 > [!NOTE]
 > **Eviction is periodic, not immediate.** A key is reclaimed on the next sweep after its TTL elapses, so `KeyCount` can briefly exceed the steady-state working set. Use `ForceEviction` in tests for determinism.
 
 > [!NOTE]
-> `**quotax` is single-process.** Each `Quota` tracks its keys in memory. For a cluster-wide per-key limit, run a shared store — `quotax` is the local enforcement layer, not a distributed coordinator.
+> **quotax** is single-process.** Each `Quota` tracks its keys in memory. For a cluster-wide per-key limit, run a shared store — `quotax` is the local enforcement layer, not a distributed coordinator.
 
 ## Safety and Concurrency
 

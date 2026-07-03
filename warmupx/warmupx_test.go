@@ -351,6 +351,7 @@ func TestWarmer_MaxRequests(t *testing.T) {
 		{"tiny rounds up to one", 0.01, 100, 1},
 		{"zero base", 1.0, 0, 0},
 		{"negative base", 1.0, -5, 0},
+		{"zero capacity", 0, 100, 0},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -358,6 +359,11 @@ func TestWarmer_MaxRequests(t *testing.T) {
 			assert.Equal(t, tt.want, w.MaxRequests(tt.base))
 		})
 	}
+}
+
+func TestWarmer_WaitForCompletion_NeverStarted(t *testing.T) {
+	w := New()
+	require.NoError(t, w.WaitForCompletion(context.Background()))
 }
 
 func TestWarmer_WaitForCompletion(t *testing.T) {
@@ -447,6 +453,9 @@ func TestExecute_PropagatesError(t *testing.T) {
 		return 0, sentinel
 	})
 	require.ErrorIs(t, err, sentinel)
+	s := w.Stats()
+	assert.Equal(t, int64(0), s.Allowed)
+	assert.Equal(t, int64(0), s.Rejected)
 }
 
 func TestExecute_ControllerReject(t *testing.T) {
@@ -457,6 +466,9 @@ func TestExecute_ControllerReject(t *testing.T) {
 	})
 	require.ErrorIs(t, err, ErrRejected)
 	assert.Empty(t, got)
+	s := w.Stats()
+	assert.Equal(t, int64(0), s.Allowed)
+	assert.Equal(t, int64(1), s.Rejected)
 }
 
 func TestExecute_RecoversPanic(t *testing.T) {
@@ -466,6 +478,9 @@ func TestExecute_RecoversPanic(t *testing.T) {
 	})
 	pe := testx.RequirePanicError(t, err, opExecute)
 	assert.Equal(t, "handler crashed", pe.Value)
+	s := w.Stats()
+	assert.Equal(t, int64(0), s.Allowed)
+	assert.Equal(t, int64(0), s.Rejected)
 }
 
 func TestExecute_ContextVisibleToCallback(t *testing.T) {
@@ -476,6 +491,92 @@ func TestExecute_ContextVisibleToCallback(t *testing.T) {
 		assert.Equal(t, "v", c.Value(ctxKey{}))
 		return 0, nil
 	})
+	require.NoError(t, err)
+}
+
+// --- TryExecute ---
+
+func TestTryExecute_RunsWhenAdmitted(t *testing.T) {
+	w := New(WithMinCapacity(1), WithMaxCapacity(1))
+	ok, got, err := TryExecute(w, context.Background(), func(_ context.Context, wc WarmupController) (string, error) {
+		assert.InDelta(t, 1.0, wc.Capacity(), 1e-9)
+		return "ok", nil
+	})
+	require.NoError(t, err)
+	assert.True(t, ok)
+	assert.Equal(t, "ok", got)
+	assert.Equal(t, int64(1), w.Stats().Allowed)
+}
+
+func TestTryExecute_SkipsWhenRejected(t *testing.T) {
+	w := New(WithMinCapacity(0), WithMaxCapacity(1))
+	var called atomic.Bool
+	ok, _, err := TryExecute(w, context.Background(), func(_ context.Context, _ WarmupController) (int, error) {
+		called.Store(true)
+		return 1, nil
+	})
+	require.NoError(t, err)
+	assert.False(t, ok)
+	assert.False(t, called.Load(), "callback must not run when rejected")
+	assert.Equal(t, int64(1), w.Stats().Rejected)
+}
+
+func TestTryExecute_NilFunc(t *testing.T) {
+	w := New(WithMinCapacity(1), WithMaxCapacity(1))
+	ok, _, err := TryExecute[int](w, context.Background(), nil)
+	require.ErrorIs(t, err, ErrNilFunc)
+	assert.False(t, ok)
+}
+
+func TestTryExecute_PropagatesError(t *testing.T) {
+	w := New(WithMinCapacity(1), WithMaxCapacity(1))
+	sentinel := errors.New("boom")
+	ok, _, err := TryExecute(w, context.Background(), func(_ context.Context, _ WarmupController) (int, error) {
+		return 0, sentinel
+	})
+	require.True(t, ok)
+	require.ErrorIs(t, err, sentinel)
+	s := w.Stats()
+	assert.Equal(t, int64(0), s.Allowed)
+	assert.Equal(t, int64(0), s.Rejected)
+}
+
+func TestTryExecute_ControllerReject(t *testing.T) {
+	w := New(WithMinCapacity(1), WithMaxCapacity(1))
+	ok, got, err := TryExecute(w, context.Background(), func(_ context.Context, wc WarmupController) (string, error) {
+		wc.Reject()
+		return "discarded", nil
+	})
+	require.True(t, ok, "fn ran before late reject")
+	require.ErrorIs(t, err, ErrRejected)
+	assert.Empty(t, got)
+	s := w.Stats()
+	assert.Equal(t, int64(0), s.Allowed)
+	assert.Equal(t, int64(1), s.Rejected)
+}
+
+func TestTryExecute_RecoversPanic(t *testing.T) {
+	w := New(WithMinCapacity(1), WithMaxCapacity(1))
+	ok, _, err := TryExecute(w, context.Background(), func(_ context.Context, _ WarmupController) (int, error) {
+		panic("handler crashed")
+	})
+	require.True(t, ok, "fn ran before panicking")
+	pe := testx.RequirePanicError(t, err, opTryExecute)
+	assert.Equal(t, "handler crashed", pe.Value)
+	s := w.Stats()
+	assert.Equal(t, int64(0), s.Allowed)
+	assert.Equal(t, int64(0), s.Rejected)
+}
+
+func TestTryExecute_ContextVisibleToCallback(t *testing.T) {
+	w := New(WithMinCapacity(1), WithMaxCapacity(1))
+	type ctxKey struct{}
+	ctx := context.WithValue(context.Background(), ctxKey{}, "v")
+	ok, _, err := TryExecute(w, ctx, func(c context.Context, _ WarmupController) (int, error) {
+		assert.Equal(t, "v", c.Value(ctxKey{}))
+		return 0, nil
+	})
+	require.True(t, ok)
 	require.NoError(t, err)
 }
 
@@ -605,6 +706,17 @@ func TestWarmer_ConcurrentExecute(t *testing.T) {
 	w := New(WithMinCapacity(0.5), WithMaxCapacity(0.5))
 	testx.HammerVoid(50, 200, func() {
 		_, _ = Execute(w, context.Background(), func(_ context.Context, _ WarmupController) (int, error) {
+			return 1, nil
+		})
+	})
+	s := w.Stats()
+	assert.Equal(t, int64(50*200), s.Allowed+s.Rejected)
+}
+
+func TestWarmer_ConcurrentTryExecute(t *testing.T) {
+	w := New(WithMinCapacity(0.5), WithMaxCapacity(0.5))
+	testx.HammerVoid(50, 200, func() {
+		_, _, _ = TryExecute(w, context.Background(), func(_ context.Context, _ WarmupController) (int, error) {
 			return 1, nil
 		})
 	})

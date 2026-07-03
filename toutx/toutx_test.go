@@ -136,9 +136,26 @@ func TestExecute_ControllerExposesBudget(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestExecute_ControllerDeadlineMatchesContext(t *testing.T) {
+	const budget = 200 * time.Millisecond
+	_, err := Execute(context.Background(), budget,
+		func(ctx context.Context, tc TimeoutController) (int, error) {
+			ctxDeadline, ok := ctx.Deadline()
+			require.True(t, ok)
+			assert.Equal(t, ctxDeadline.UnixNano(), tc.Deadline().UnixNano())
+			return 0, nil
+		})
+	require.NoError(t, err)
+}
+
 func TestExecution_RemainingClampsToZero(t *testing.T) {
 	// start far in the past with a tiny timeout => deadline already passed.
-	e := &execution{start: time.Now().Add(-time.Hour), timeout: time.Second}
+	start := time.Now().Add(-time.Hour)
+	e := &execution{
+		startUnix:    start.UnixNano(),
+		timeout:      time.Second,
+		deadlineUnix: start.Add(time.Second).UnixNano(),
+	}
 	assert.Equal(t, time.Duration(0), e.Remaining())
 }
 

@@ -57,6 +57,21 @@ func ExampleExecute_degrade() {
 	// Output: fresh
 }
 
+// ExampleTryExecute shows the non-blocking variant: when the request would be
+// shed TryExecute returns ok=false without an error.
+func ExampleTryExecute() {
+	s := shedx.New(shedx.WithCapacity(1), shedx.WithThreshold(0.5))
+	defer func() { _ = s.Close() }()
+
+	tok, _ := s.Acquire(shedx.PriorityCritical)
+	defer tok.Release()
+
+	ok, _, err := shedx.TryExecute(s, context.Background(), shedx.PriorityLow,
+		func(context.Context, shedx.ShedController) (int, error) { return 1, nil })
+	fmt.Println(ok, err == nil)
+	// Output: false true
+}
+
 // ExampleShedder_Acquire demonstrates manual admission with a Token for code
 // that cannot use the callback form.
 func ExampleShedder_Acquire() {

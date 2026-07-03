@@ -20,6 +20,9 @@ const (
 	// is the default operation name when [WithOp] is not set.
 	opExecute = "circuitx.Execute"
 
+	// opTryExecute labels panics recovered while running a [TryExecute] callback.
+	opTryExecute = "circuitx.TryExecute"
+
 	// minMaxFailures is the floor [New] enforces: a non-positive threshold
 	// degrades to a single failure rather than a breaker that never trips.
 	minMaxFailures = 1
@@ -75,6 +78,15 @@ func (c config) opOrDefault() string {
 	return opExecute
 }
 
+// opOrDefaultTry returns the configured operation name, or [opTryExecute] when
+// none was set.
+func (c config) opOrDefaultTry() string {
+	if c.op != "" {
+		return c.op
+	}
+	return opTryExecute
+}
+
 // WithMaxFailures sets the number of consecutive failures that trips the
 // breaker from [Closed] to [Open]. A success in [Closed] resets the count to
 // zero, so it counts a run of back-to-back failures, not a lifetime total.
@@ -101,9 +113,10 @@ func WithResetTimeout(d time.Duration) Option {
 // WithHalfOpenMax sets how many probe calls may run concurrently in [HalfOpen]
 // before the breaker decides to close or re-open. A single probe (the default)
 // is the safest: it admits exactly one call to test recovery and rejects the
-// rest with [ErrOpen]. A larger budget lets several probes run at once to reach
-// a verdict faster at the cost of more load on a possibly-unhealthy downstream.
-// Default: [DefaultHalfOpenMax]. Values < 1 are floored to 1.
+// rest with [ErrOpen] or, for [TryExecute], (false, zero, nil). A larger budget
+// lets several probes run at once to reach a verdict faster at the cost of more
+// load on a possibly-unhealthy downstream. Default: [DefaultHalfOpenMax]. Values
+// < 1 are floored to 1.
 func WithHalfOpenMax(n int) Option {
 	return func(c *config) {
 		if n > 0 {
@@ -123,8 +136,8 @@ func WithOnStateChange(fn func(from, to State)) Option {
 }
 
 // WithOp sets the logical operation name attached to panic reports raised by
-// the callback (e.g. "api.charge", "db.query"). Default: "circuitx.Execute". An
-// empty name is ignored.
+// the callback (e.g. "api.charge", "db.query"). Default: [opExecute] for
+// [Execute] and [opTryExecute] for [TryExecute]. An empty name is ignored.
 func WithOp(op string) Option {
 	return func(c *config) {
 		if op != "" {

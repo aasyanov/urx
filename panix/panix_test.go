@@ -6,6 +6,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -333,6 +334,24 @@ func TestSafeGo_Concurrent(t *testing.T) {
 	mu.Unlock()
 
 	assert.Equal(t, 10, got, "every 5th goroutine (0,5,10,...,45) should panic")
+}
+
+func TestSafeGo_OnErrorPanicDoesNotEscape(t *testing.T) {
+	done := make(chan struct{})
+	SafeGo(context.Background(), "op", func(context.Context) {
+		panic("task panic")
+	}, func(context.Context, error) {
+		panic("handler panic")
+	})
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("SafeGo must not leak a panicking onError handler")
+	}
 }
 
 // ---------------------------------------------------------------------------

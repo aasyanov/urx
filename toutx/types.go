@@ -32,12 +32,13 @@ type TimeoutController interface {
 
 // execution is the private implementation of [TimeoutController]. It is created
 // once per [Execute] call and accessed only from the callback goroutine, so it
-// needs no synchronization. The deadline is derived from start+timeout rather
-// than stored, keeping the struct to a single [time.Time].
+// needs no synchronization. Instants are stored as Unix nanoseconds so the
+// struct stays within the package footprint budget.
 type execution struct {
-	op      string
-	timeout time.Duration
-	start   time.Time
+	op           string
+	timeout      time.Duration
+	startUnix    int64
+	deadlineUnix int64
 }
 
 // Op implements [TimeoutController].
@@ -47,10 +48,12 @@ func (e *execution) Op() string { return e.op }
 func (e *execution) Timeout() time.Duration { return e.timeout }
 
 // Deadline implements [TimeoutController].
-func (e *execution) Deadline() time.Time { return e.start.Add(e.timeout) }
+func (e *execution) Deadline() time.Time { return time.Unix(0, e.deadlineUnix) }
 
 // Elapsed implements [TimeoutController].
-func (e *execution) Elapsed() time.Duration { return time.Since(e.start) }
+func (e *execution) Elapsed() time.Duration {
+	return time.Since(time.Unix(0, e.startUnix))
+}
 
 // Remaining implements [TimeoutController].
 func (e *execution) Remaining() time.Duration {

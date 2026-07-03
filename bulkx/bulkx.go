@@ -1,5 +1,5 @@
 // Package bulkx provides a thread-safe concurrency limiter (bulkhead) for
-// industrial Go services.
+// production Go services.
 //
 // A [Bulkhead] caps the number of operations that may execute concurrently,
 // isolating a slow or failing dependency so it cannot exhaust the resources of
@@ -294,10 +294,11 @@ func (b *Bulkhead) ResetStats() {
 }
 
 // Close shuts the bulkhead down: subsequent [Execute], [TryExecute], and
-// [Bulkhead.Acquire] calls return [ErrClosed]. In-flight operations are
-// unaffected and their slots are released normally. Close is idempotent and
-// always returns nil; the error return satisfies the common closer contract
-// used across urx.
+// [Bulkhead.Acquire] calls return [ErrClosed]. Goroutines blocked waiting for
+// a slot on the slow path are released immediately with [ErrClosed]. In-flight
+// operations are unaffected and their slots are released normally. Close is
+// idempotent and always returns nil; the error return satisfies the common
+// closer contract used across urx.
 func (b *Bulkhead) Close() error {
 	b.closed.Store(true)
 	b.closeOnce.Do(func() { close(b.closedCh) })

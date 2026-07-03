@@ -1,11 +1,12 @@
-// Package circuitx provides a thread-safe circuit breaker for industrial Go
+// Package circuitx provides a thread-safe circuit breaker for production Go
 // services.
 //
 // A [Breaker] monitors failures and moves between three states: [Closed]
 // (healthy), [Open] (tripped), and [HalfOpen] (probing). While Closed, calls
 // pass through and consecutive failures are counted; when the count reaches the
 // configured threshold the breaker trips Open and rejects calls immediately
-// with [ErrOpen], shedding load from a failing downstream. After a reset
+// with [ErrOpen] from [Execute] or (false, zero, nil) from [TryExecute], shedding
+// load from a failing downstream. After a reset
 // timeout it moves to HalfOpen and admits a bounded number of probe calls; a
 // probe success closes the breaker, a probe failure re-opens it.
 //
@@ -24,7 +25,9 @@
 //
 // Because Go methods cannot have type parameters, the primary entry point is the
 // package-level generic function [Execute], taking the [Breaker] as its first
-// argument. The callback receives a [CircuitController] exposing the circuit
+// argument. [TryExecute] is the non-blocking variant: when the circuit rejects
+// a call it returns (false, zero, nil) instead of [ErrOpen]. The callback
+// receives a [CircuitController] exposing the circuit
 // state and failure count at admission time, a [CircuitController.SkipFailure]
 // method to keep business errors from tripping the breaker, and a
 // [CircuitController.Trip] method to force the breaker open early.
@@ -48,7 +51,7 @@ import (
 )
 
 // Breaker is a thread-safe circuit breaker. Create one with [New], run work with
-// the package-level [Execute], inspect the circuit with [Breaker.State],
+// the package-level [Execute] or [TryExecute], inspect the circuit with [Breaker.State],
 // [Breaker.Failures], or [Breaker.Stats], force it back to [Closed] with
 // [Breaker.Reset], and release it with [Breaker.Close].
 //
@@ -85,7 +88,7 @@ func New(opts ...Option) *Breaker {
 // reset timeout has elapsed, State promotes it to [HalfOpen] (firing the
 // [WithOnStateChange] hook) and returns [HalfOpen]; the compare-and-swap ensures
 // only one caller drives the transition. State does not consume a probe slot —
-// that happens in [Execute].
+// that happens in [Execute] and [TryExecute].
 func (b *Breaker) State() State {
 	s := State(b.state.Load())
 	if s != Open {
@@ -127,7 +130,7 @@ func (b *Breaker) Reset() {
 }
 
 // Stats returns a snapshot of breaker statistics. It is safe to call
-// concurrently with [Execute]; counters are read independently and may reflect a
+// concurrently with [Execute] and [TryExecute]; counters are read independently and may reflect a
 // call in progress.
 func (b *Breaker) Stats() Stats {
 	return Stats{
@@ -150,7 +153,7 @@ func (b *Breaker) ResetStats() {
 	b.trips.Store(0)
 }
 
-// Close shuts the breaker down: subsequent [Execute] calls return [ErrClosed].
+// Close shuts the breaker down: subsequent [Execute] and [TryExecute] calls return [ErrClosed].
 // Close is idempotent and always returns nil; the error return satisfies the
 // common closer contract used across urx. It does not reset counters, so a
 // final [Breaker.Stats] snapshot remains available for inspection.
@@ -197,18 +200,66 @@ func Execute[T any](b *Breaker, ctx context.Context, fn CircuitFunc[T]) (T, erro
 		return zero, errCancelled(err)
 	}
 
-	state := b.State()
+	state, ok := b.tryAdmit()
+	if !ok {
+		return zero, ErrOpen
+	}
+	return executeRun(b, ctx, b.cfg.opOrDefault(), state, fn)
+}
+
+// TryExecute attempts to run fn without blocking. If the circuit admits the call
+// the function executes and TryExecute returns (true, val, err). If the circuit
+// is [Open] — or [HalfOpen] with the probe budget already in use — it returns
+// (false, zero, nil) without invoking fn and counts a rejection.
+//
+// Returns (false, zero, [ErrClosed]) if the breaker is closed,
+// (false, zero, [ErrNilFunc]) if fn is nil, and (false, zero, [ErrCancelled])
+// if ctx is already cancelled (the circuit is left untouched). When admitted,
+// fn runs under [panix.Safe] with the same outcome semantics as [Execute].
+func TryExecute[T any](b *Breaker, ctx context.Context, fn CircuitFunc[T]) (bool, T, error) {
+	var zero T
+	if b.closed.Load() {
+		return false, zero, ErrClosed
+	}
+	if fn == nil {
+		return false, zero, ErrNilFunc
+	}
+	if err := ctx.Err(); err != nil {
+		return false, zero, errCancelled(err)
+	}
+
+	state, ok := b.tryAdmit()
+	if !ok {
+		return false, zero, nil
+	}
+	val, err := executeRun(b, ctx, b.cfg.opOrDefaultTry(), state, fn)
+	return true, val, err
+}
+
+// tryAdmit evaluates circuit admission after guard checks. It returns the state
+// at admission and whether the call was let through. A rejection increments
+// the rejected counter.
+func (b *Breaker) tryAdmit() (state State, ok bool) {
+	state = b.State()
 	if state == Open {
 		b.rejected.Add(1)
-		return zero, ErrOpen
+		return state, false
 	}
 
 	if state == HalfOpen {
-		// Admit at most halfOpenMax concurrent probes; reject the rest.
 		if !b.tryAdmitProbe() {
 			b.rejected.Add(1)
-			return zero, ErrOpen
+			return state, false
 		}
+	}
+	return state, true
+}
+
+// executeRun runs fn after admission and settles the outcome on the breaker.
+// The caller must have already passed guard checks and won admission via tryAdmit.
+func executeRun[T any](b *Breaker, ctx context.Context, op string, state State, fn CircuitFunc[T]) (T, error) {
+	var zero T
+	if state == HalfOpen {
 		defer b.halfOpenInflight.Add(-1)
 	}
 
@@ -218,7 +269,7 @@ func Execute[T any](b *Breaker, ctx context.Context, fn CircuitFunc[T]) (T, erro
 		maxFailures: b.cfg.maxFailures,
 	}
 
-	val, err := panix.Safe(b.cfg.opOrDefault(), func() (T, error) {
+	val, err := panix.Safe(op, func() (T, error) {
 		return fn(ctx, cc)
 	})
 
@@ -228,15 +279,12 @@ func Execute[T any](b *Breaker, ctx context.Context, fn CircuitFunc[T]) (T, erro
 		return zero, err
 	}
 
-	// A skipped failure (or success) that nonetheless asked to Trip opens the
-	// circuit without counting toward the failure total.
 	if cc.tripped {
 		b.openFrom(state)
 		return val, err
 	}
 
 	if err != nil {
-		// skipFailure suppressed counting; surface the error unchanged.
 		return val, err
 	}
 

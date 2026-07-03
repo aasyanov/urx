@@ -237,8 +237,10 @@ func WithDecreaseRatio(r float64) Option {
 	}
 }
 
-// WithTargetLatency sets the latency [Vegas] treats as the operating point.
-// Default: [DefaultTargetLatency]. Values <= 0 are ignored.
+// WithTargetLatency sets the round-trip latency [Vegas] treats as the operating
+// point when scaling the queue target band. Default: [DefaultTargetLatency].
+// Values <= 0 are ignored. When target latency is at or below the observed
+// minimum RTT the band falls back to limit·tolerance.
 func WithTargetLatency(d time.Duration) Option {
 	return func(c *config) {
 		if d > 0 {

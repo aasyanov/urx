@@ -1,5 +1,5 @@
 // Package warmupx provides gradual capacity ramp-up (slow start) with
-// probabilistic admission control for industrial Go services.
+// probabilistic admission control for production Go services.
 //
 // A [Warmer] increases its admission capacity from a minimum to a maximum over
 // a configurable duration following one of four strategies — [Linear],
@@ -18,6 +18,9 @@
 //	out, err := warmupx.Execute(w, ctx, func(ctx context.Context, wc warmupx.WarmupController) (Result, error) {
 //	    return serve(ctx, wc.Capacity())
 //	})
+//
+// [TryExecute] is the non-blocking variant: when probabilistic admission fails
+// it returns (false, zero, nil) instead of [ErrRejected].
 //
 // The [Execute] callback receives a [WarmupController] exposing the capacity
 // and progress at admission time plus a [WarmupController.Reject] control, so a
@@ -45,12 +48,15 @@ import (
 // opExecute labels panics recovered while running an [Execute] callback.
 const opExecute = "warmupx.Execute"
 
+// opTryExecute labels panics recovered while running a [TryExecute] callback.
+const opTryExecute = "warmupx.TryExecute"
+
 // Warmer provides gradual capacity ramp-up with probabilistic admission
 // control. It is safe for concurrent use from multiple goroutines.
 //
 // Create one with [New], begin ramping with [Warmer.Start], and gate work with
-// [Warmer.Allow], [Warmer.AllowOrError], or [Execute]. Call [Warmer.Stop] to
-// halt the ramp.
+// [Warmer.Allow], [Warmer.AllowOrError], [Execute], or [TryExecute]. Call
+// [Warmer.Stop] to halt the ramp.
 type Warmer struct {
 	cfg config
 
@@ -183,7 +189,11 @@ func (w *Warmer) Progress() float64 {
 // fraction c of calls return true. It updates the allowed/rejected counters
 // reported by [Warmer.Stats].
 func (w *Warmer) Allow() bool {
-	if rand.Float64() < w.Capacity() {
+	w.mu.RLock()
+	capacity := w.capacity
+	w.mu.RUnlock()
+
+	if rand.Float64() < capacity {
 		w.allowed.Add(1)
 		return true
 	}
@@ -207,18 +217,25 @@ func (w *Warmer) AllowOrError() error {
 	return errRejected(capacity, progress)
 }
 
-// MaxRequests scales a base limit by the current capacity, rounding up so a
-// non-zero capacity always yields at least one permitted request. Returns 0
-// when baseLimit <= 0.
+// MaxRequests scales a base limit by the current capacity, rounding up. Returns
+// at least 1 when baseLimit > 0 and capacity > 0. Returns 0 when baseLimit <= 0
+// or capacity == 0.
 func (w *Warmer) MaxRequests(baseLimit int) int {
 	if baseLimit <= 0 {
 		return 0
 	}
-	return int(math.Ceil(float64(baseLimit) * w.Capacity()))
+	capacity := w.Capacity()
+	if capacity <= 0 {
+		return 0
+	}
+	return int(math.Ceil(float64(baseLimit) * capacity))
 }
 
 // WaitForCompletion blocks until the warmup completes or ctx is cancelled.
 // It returns nil on completion or ctx.Err() if the context is cancelled first.
+//
+// If warmup has never been started, it returns nil immediately because there is
+// no active ramp to wait on.
 //
 // A warmer halted with [Warmer.Stop] before completion never completes, so a
 // waiter unblocks only when ctx is cancelled. A subsequent [Warmer.Start]
@@ -227,6 +244,10 @@ func (w *Warmer) MaxRequests(baseLimit int) int {
 func (w *Warmer) WaitForCompletion(ctx context.Context) error {
 	w.mu.RLock()
 	if w.complete {
+		w.mu.RUnlock()
+		return nil
+	}
+	if !w.warming && w.start.IsZero() {
 		w.mu.RUnlock()
 		return nil
 	}
@@ -252,34 +273,75 @@ func (w *Warmer) WaitForCompletion(ctx context.Context) error {
 // On admission fn receives the call context and a [WarmupController] exposing
 // the capacity and progress at admission time. fn runs under [panix.Safe]; a
 // panic becomes a [*panix.PanicError]. If fn calls [WarmupController.Reject],
-// Execute discards fn's result and returns [ErrRejected].
+// Execute discards fn's result, returns [ErrRejected], and counts the call as
+// rejected rather than allowed.
 func Execute[T any](w *Warmer, ctx context.Context, fn func(ctx context.Context, wc WarmupController) (T, error)) (T, error) {
 	var zero T
 	if fn == nil {
 		return zero, ErrNilFunc
 	}
 
+	capacity, progress, strategy, ok := w.tryAdmit()
+	if !ok {
+		return zero, errRejected(capacity, progress)
+	}
+	return executeRun(w, ctx, opExecute, capacity, progress, strategy, fn)
+}
+
+// TryExecute attempts to run fn using the same probabilistic admission as
+// [Execute]. If the call is admitted the function executes and TryExecute
+// returns (true, val, err). If the call is rejected it returns (false, zero, nil)
+// without invoking fn and increments the rejected counter.
+//
+// Returns (false, zero, [ErrNilFunc]) if fn is nil. When admitted, fn runs under
+// [panix.Safe] with the same outcome semantics as [Execute], including
+// [WarmupController.Reject] and panic recovery.
+func TryExecute[T any](w *Warmer, ctx context.Context, fn func(ctx context.Context, wc WarmupController) (T, error)) (bool, T, error) {
+	var zero T
+	if fn == nil {
+		return false, zero, ErrNilFunc
+	}
+
+	capacity, progress, strategy, ok := w.tryAdmit()
+	if !ok {
+		return false, zero, nil
+	}
+	val, err := executeRun(w, ctx, opTryExecute, capacity, progress, strategy, fn)
+	return true, val, err
+}
+
+// tryAdmit reads warmer state and applies probabilistic admission. It returns
+// the capacity and progress observed at the decision point, the configured
+// strategy, and whether the call was admitted.
+func (w *Warmer) tryAdmit() (capacity, progress float64, strategy Strategy, ok bool) {
 	w.mu.RLock()
-	capacity, progress := w.capacity, w.progressLocked()
-	strategy := w.cfg.strategy
+	capacity, progress = w.capacity, w.progressLocked()
+	strategy = w.cfg.strategy
 	w.mu.RUnlock()
 
 	if rand.Float64() >= capacity {
 		w.rejected.Add(1)
-		return zero, errRejected(capacity, progress)
+		return capacity, progress, strategy, false
 	}
-	w.allowed.Add(1)
+	return capacity, progress, strategy, true
+}
 
+// executeRun runs fn after admission and settles counters. The caller must
+// have already passed guard checks and won admission via tryAdmit.
+func executeRun[T any](w *Warmer, ctx context.Context, op string, capacity, progress float64, strategy Strategy, fn func(ctx context.Context, wc WarmupController) (T, error)) (T, error) {
+	var zero T
 	wc := &execution{capacity: capacity, progress: progress, strategy: strategy}
-	val, err := panix.Safe(opExecute, func() (T, error) {
+	val, err := panix.Safe(op, func() (T, error) {
 		return fn(ctx, wc)
 	})
 	if err != nil {
 		return zero, err
 	}
 	if wc.rejected {
+		w.rejected.Add(1)
 		return zero, errRejected(capacity, progress)
 	}
+	w.allowed.Add(1)
 	return val, nil
 }
 

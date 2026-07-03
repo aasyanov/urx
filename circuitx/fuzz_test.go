@@ -69,3 +69,54 @@ func FuzzExecute(f *testing.F) {
 		}
 	})
 }
+
+// FuzzTryExecute drives TryExecute through the same state-machine invariants as
+// FuzzExecute, asserting the boolean admission flag matches whether fn could run.
+func FuzzTryExecute(f *testing.F) {
+	f.Add([]byte{})
+	f.Add([]byte{0, 1, 0, 1})
+	f.Add([]byte{1, 1, 1, 1})
+
+	f.Fuzz(func(t *testing.T, data []byte) {
+		cb := New(
+			WithMaxFailures(3),
+			WithResetTimeout(time.Millisecond),
+			WithHalfOpenMax(2),
+		)
+		ctx := context.Background()
+
+		for _, bset := range data {
+			fail := bset&1 == 1
+			skip := bset&2 == 2
+			trip := bset&4 == 4
+
+			ran := false
+			ok, _, _ := TryExecute(cb, ctx, func(_ context.Context, cc CircuitController) (int, error) {
+				ran = true
+				_ = cc.State()
+				_ = cc.Failures()
+				_ = cc.MaxFailures()
+				if skip {
+					cc.SkipFailure()
+				}
+				if trip {
+					cc.Trip()
+				}
+				if fail {
+					return 0, errBoom
+				}
+				return 1, nil
+			})
+
+			if ok != ran {
+				t.Fatalf("ok=%v but fn ran=%v", ok, ran)
+			}
+
+			switch cb.State() {
+			case Closed, Open, HalfOpen:
+			default:
+				t.Fatalf("invalid state: %v", cb.State())
+			}
+		}
+	})
+}

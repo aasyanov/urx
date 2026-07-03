@@ -2,7 +2,7 @@
 
 [CI](https://github.com/aasyanov/urx/actions/workflows/ci.yml)
 [Go Reference](https://pkg.go.dev/github.com/aasyanov/urx/toutx)
-[License: MIT](https://opensource.org/licenses/MIT)
+[License: MIT](../LICENSE)
 
 A generic timeout wrapper that runs a function under a deadline-scoped context, distinguishes a fired deadline from parent cancellation, recovers panics, and hands the callback a `TimeoutController` for self-throttling. Go 1.24+. Zero external dependencies (depends only on the urx `panix` package; testify in tests only).
 
@@ -11,7 +11,7 @@ go get github.com/aasyanov/urx
 ```
 
 > [!IMPORTANT]
-> `**toutx` enforces a deadline on the *caller*, not on the *callee*.** When the timeout fires, `Execute` returns immediately with `ErrDeadlineExceeded`, but the function goroutine keeps running until it observes its cancelled context. A function that ignores `ctx.Done()` will leak a goroutine. Always honour the context inside the callback.
+> **toutx** enforces a deadline on the *caller*, not on the *callee*.** When the timeout fires, `Execute` returns immediately with `ErrDeadlineExceeded`, but the function goroutine keeps running until it observes its cancelled context. A function that ignores `ctx.Done()` will leak a goroutine. Always honour the context inside the callback.
 
 ## The Problem
 
@@ -257,7 +257,7 @@ A panicking function does not produce a sentinel — it returns a `*panix.PanicE
 > **Option precedence is "positional timeout wins".** The `timeout` argument to `Execute` (when > 0) overrides `WithTimeout` and `WithTimer`. Pass `0` to defer entirely to options or a `Timer`.
 
 > [!NOTE]
-> `**ErrDeadlineExceeded` vs `context.DeadlineExceeded`.** When the *parent* context carries a deadline that expires first, `toutx` reports `ErrCancelled` wrapping `context.DeadlineExceeded`. `ErrDeadlineExceeded` is reserved for the timeout *this* call imposed.
+> **ErrDeadlineExceeded** vs `context.DeadlineExceeded`.** When the *parent* context carries a deadline that expires first, `toutx` reports `ErrCancelled` wrapping `context.DeadlineExceeded`. `ErrDeadlineExceeded` is reserved for the timeout *this* call imposed.
 
 ## Safety and Concurrency
 
@@ -265,7 +265,7 @@ A panicking function does not produce a sentinel — it returns a `*panix.PanicE
 
 ## Benchmarks
 
-> CPU: Intel i7-10510U · OS: Windows 10 · Go 1.26 · `-benchmem -count=1`
+> CPU: Intel i7-10510U · OS: Windows 10 · Go 1.24 · `-benchmem -count=1`
 
 
 | Benchmark             | ns/op | B/op | allocs/op |

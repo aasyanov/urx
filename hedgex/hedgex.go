@@ -1,5 +1,5 @@
 // Package hedgex provides request hedging (speculative execution) for reducing
-// tail latency in industrial Go services.
+// tail latency in production Go services.
 //
 // A [Hedger] launches the same logical request as several copies with staggered
 // delays and keeps the first successful result; the remaining in-flight copies
@@ -85,7 +85,7 @@ func (h *Hedger) MaxDelay() time.Duration { return h.cfg.maxDelay }
 // cannot be generic, Execute is a package-level function taking the [Hedger] as
 // its first argument.
 //
-// Execute returns [ErrNoFunc] if fn is nil, [ErrCancelled] if ctx is cancelled
+// Execute returns [ErrNilFunc] if fn is nil, [ErrCancelled] if ctx is cancelled
 // before any copy succeeds, and [ErrAllFailed] (wrapping the first failure) if
 // every copy fails. Each copy runs under [panix.Safe], so a panic surfaces as a
 // [*panix.PanicError] handled like any other copy failure.
@@ -97,7 +97,7 @@ func Execute[T any](h *Hedger, ctx context.Context, fn HedgeFunc[T]) (T, error) 
 	if fn == nil {
 		h.calls.Add(1)
 		h.failures.Add(1)
-		return zero, ErrNoFunc
+		return zero, ErrNilFunc
 	}
 	// Fast path: with a single copy there is nothing to race, so skip the
 	// fan-out slice entirely and run inline (see runSync).
@@ -121,7 +121,7 @@ func Execute[T any](h *Hedger, ctx context.Context, fn HedgeFunc[T]) (T, error) 
 // len(fns) is capped at [WithMaxParallel]; a nil entry within the cap is skipped
 // (its slot never launches). fns is not retained after ExecuteMulti returns.
 //
-// ExecuteMulti returns [ErrNoFunc] if fns is empty or every in-cap entry is nil,
+// ExecuteMulti returns [ErrNilFunc] if fns is empty or every in-cap entry is nil,
 // [ErrCancelled] if ctx is cancelled before any copy succeeds, and [ErrAllFailed]
 // (wrapping the first failure) if every launched copy fails. Use it to hedge
 // across heterogeneous backends (primary vs. replica vs. cache) rather than the
@@ -135,7 +135,7 @@ func ExecuteMulti[T any](h *Hedger, ctx context.Context, fns []HedgeFunc[T]) (T,
 	}
 	if !anyNonNil(fns) {
 		h.failures.Add(1)
-		return zero, ErrNoFunc
+		return zero, ErrNilFunc
 	}
 	if err := ctx.Err(); err != nil {
 		h.failures.Add(1)

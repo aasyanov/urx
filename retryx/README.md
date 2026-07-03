@@ -2,7 +2,7 @@
 
 [CI](https://github.com/aasyanov/urx/actions/workflows/ci.yml)
 [Go Reference](https://pkg.go.dev/github.com/aasyanov/urx/retryx)
-[License: MIT](https://opensource.org/licenses/MIT)
+[License: MIT](../LICENSE)
 
 A generic retry engine that re-executes a function with exponential backoff, decorrelating jitter, context-aware cancellation, per-attempt control, and panic recovery. Go 1.24+. Zero external dependencies (depends only on the urx `panix` package; testify in tests only).
 
@@ -289,7 +289,7 @@ A panicking attempt that exhausts the budget surfaces as `ErrExhausted` wrapping
 > **The default retries everything.** Without `WithRetryIf`, permanent failures (validation, auth) burn the full attempt budget. Always classify errors in production.
 
 > [!NOTE]
-> `**retryx` does not impose a per-attempt deadline.** A single attempt can block indefinitely if `fn` ignores `ctx`. Wrap each attempt with `toutx.Execute` for a hard per-try timeout.
+> **retryx** does not impose a per-attempt deadline.** A single attempt can block indefinitely if `fn` ignores `ctx`. Wrap each attempt with `toutx.Execute` for a hard per-try timeout.
 
 > [!NOTE]
 > **Jitter can exceed `maxBackoff` slightly.** Because jitter is applied after the cap, a delay can reach up to `1.5 × maxBackoff`. This is intentional decorrelation, not a bug.
@@ -300,7 +300,7 @@ A panicking attempt that exhausts the budget surfaces as `ErrExhausted` wrapping
 
 ## Benchmarks
 
-> CPU: Intel i7-10510U · OS: Windows 10 · Go 1.26 · `-benchmem -count=1`
+> CPU: Intel i7-10510U · OS: Windows 10 · Go 1.24 · `-benchmem -count=1`
 
 
 | Benchmark               | ns/op  | B/op | allocs/op |

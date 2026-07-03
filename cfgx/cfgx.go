@@ -1,5 +1,5 @@
 // Package cfgx loads and saves configuration files in YAML, JSON, or TOML
-// format for industrial Go services.
+// format for production Go services.
 //
 // cfgx owns exactly one step in the configuration pipeline: decoding a file
 // (or byte slice) into a struct and encoding it back. It deliberately does

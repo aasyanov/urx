@@ -1,5 +1,5 @@
 // Package ratex provides a thread-safe token-bucket rate limiter for
-// industrial Go services.
+// production Go services.
 //
 // A [Limiter] controls how many operations per unit of time are admitted.
 // Tokens accrue at a sustained rate up to a burst capacity; each admitted
@@ -176,6 +176,11 @@ func (l *Limiter) WaitN(ctx context.Context, n int) error {
 		}
 		l.mu.Unlock()
 		if ok {
+			if err := ctx.Err(); err != nil {
+				l.refund(need)
+				l.countLimited()
+				return errCancelled(err)
+			}
 			return nil
 		}
 
@@ -186,6 +191,10 @@ func (l *Limiter) WaitN(ctx context.Context, n int) error {
 			l.countLimited()
 			return errCancelled(ctx.Err())
 		case <-timer.C:
+			if err := ctx.Err(); err != nil {
+				l.countLimited()
+				return errCancelled(err)
+			}
 		}
 	}
 }
@@ -257,11 +266,16 @@ func Execute[T any](l *Limiter, ctx context.Context, fn func(ctx context.Context
 // available the function executes and TryExecute returns (true, val, err). If
 // no token is available it returns (false, zero, nil) without executing fn.
 //
-// Returns (false, zero, [ErrNilFunc]) if fn is nil.
+// Returns (false, zero, [ErrNilFunc]) if fn is nil, or (false, zero,
+// [ErrCancelled]) when ctx is already done — including after a token was taken
+// but before fn runs, in which case the token is refunded.
 func TryExecute[T any](l *Limiter, ctx context.Context, fn func(ctx context.Context, rc RateController) (T, error)) (bool, T, error) {
 	var zero T
 	if fn == nil {
 		return false, zero, ErrNilFunc
+	}
+	if err := ctx.Err(); err != nil {
+		return false, zero, errCancelled(err)
 	}
 
 	l.mu.Lock()
@@ -274,6 +288,12 @@ func TryExecute[T any](l *Limiter, ctx context.Context, fn func(ctx context.Cont
 	l.mu.Unlock()
 	if !ok {
 		return false, zero, nil
+	}
+
+	if err := ctx.Err(); err != nil {
+		l.refund(1)
+		l.countLimited()
+		return false, zero, errCancelled(err)
 	}
 
 	val, err := run(l, ctx, opTryExecute, false, remaining, fn)
@@ -295,6 +315,11 @@ func (l *Limiter) acquire(ctx context.Context) (waited bool, remaining float64, 
 	}
 	l.mu.Unlock()
 	if ok {
+		if err := ctx.Err(); err != nil {
+			l.refund(1)
+			l.countLimited()
+			return false, 0, errCancelled(err)
+		}
 		return false, rem, nil
 	}
 
@@ -306,6 +331,10 @@ func (l *Limiter) acquire(ctx context.Context) (waited bool, remaining float64, 
 			l.countLimited()
 			return false, 0, errCancelled(ctx.Err())
 		case <-timer.C:
+			if err := ctx.Err(); err != nil {
+				l.countLimited()
+				return false, 0, errCancelled(err)
+			}
 		}
 
 		l.mu.Lock()
@@ -315,6 +344,11 @@ func (l *Limiter) acquire(ctx context.Context) (waited bool, remaining float64, 
 		}
 		l.mu.Unlock()
 		if ok {
+			if err := ctx.Err(); err != nil {
+				l.refund(1)
+				l.countLimited()
+				return false, 0, errCancelled(err)
+			}
 			return true, rem, nil
 		}
 	}
@@ -347,6 +381,12 @@ func (l *Limiter) refund(n float64) {
 		l.allowed--
 	}
 	l.mu.Unlock()
+}
+
+// Release returns n tokens to the bucket and reverses the admission counter
+// for a previously consumed request that is being aborted.
+func (l *Limiter) Release(n float64) {
+	l.refund(n)
 }
 
 // --- Accessors ---

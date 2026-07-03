@@ -112,6 +112,12 @@ func TestWithOp(t *testing.T) {
 	assert.Equal(t, opExecute, New().cfg.opOrDefault())
 }
 
+func TestWithOp_TryDefault(t *testing.T) {
+	assert.Equal(t, opTryExecute, New().cfg.opOrDefaultTry())
+	assert.Equal(t, "api.charge", New(WithOp("api.charge")).cfg.opOrDefaultTry())
+	assert.Equal(t, opTryExecute, New(WithOp("")).cfg.opOrDefaultTry())
+}
+
 // TestNewConfig_FloorsInvalidValues exercises the defensive floors in newConfig
 // directly. The public WithXxx options already reject invalid values, so these
 // floors are a second belt reachable only by an option that writes a raw
@@ -306,6 +312,20 @@ func TestExecute_SkipFailureNotCounted(t *testing.T) {
 	assert.Equal(t, uint64(0), b.Stats().TotalFail)
 }
 
+func TestExecute_SkipFailureReturnsValue(t *testing.T) {
+	b := New(WithMaxFailures(2))
+	ctx := context.Background()
+
+	got, err := Execute(b, ctx, func(_ context.Context, cc CircuitController) (int, error) {
+		cc.SkipFailure()
+		return 42, errBoom
+	})
+	require.ErrorIs(t, err, errBoom)
+	assert.Equal(t, 42, got)
+	assert.Equal(t, Closed, b.State())
+	assert.Equal(t, uint64(0), b.Stats().TotalFail)
+}
+
 // --- Controller: Trip ---
 
 func TestExecute_TripForcesOpenOnSuccess(t *testing.T) {
@@ -369,6 +389,157 @@ func TestExecute_PanicBecomesCountedFailure(t *testing.T) {
 	require.ErrorAs(t, err, &pe)
 	assert.Equal(t, "test.op", pe.Op)
 	assert.Equal(t, Open, b.State(), "a panic counts as a failure and trips the breaker")
+}
+
+// --- TryExecute ---
+
+func TestTryExecute_RunsWhenClosed(t *testing.T) {
+	b := New()
+	ok, got, err := TryExecute(b, context.Background(), ok(42))
+	require.NoError(t, err)
+	assert.True(t, ok)
+	assert.Equal(t, 42, got)
+}
+
+func TestTryExecute_RejectsWhenOpen(t *testing.T) {
+	b := New(WithMaxFailures(1))
+	ctx := context.Background()
+
+	_, _ = Execute(b, ctx, fail[int]())
+	require.Equal(t, Open, b.State())
+
+	called := false
+	ok, _, err := TryExecute(b, ctx, func(context.Context, CircuitController) (int, error) {
+		called = true
+		return 0, nil
+	})
+	require.NoError(t, err)
+	assert.False(t, ok)
+	assert.False(t, called, "fn must not run while Open")
+	assert.Equal(t, uint64(1), b.Stats().Rejected)
+}
+
+func TestTryExecute_HalfOpenBudgetRejectsExtraProbes(t *testing.T) {
+	b := New(WithMaxFailures(1), WithResetTimeout(20*time.Millisecond), WithHalfOpenMax(1))
+	ctx := context.Background()
+
+	_, _ = Execute(b, ctx, fail[int]())
+	testx.Eventually(t, func() bool { return b.State() == HalfOpen }, time.Second)
+
+	release := make(chan struct{})
+	entered := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		_, err := Execute(b, ctx, func(context.Context, CircuitController) (int, error) {
+			close(entered)
+			<-release
+			return 1, nil
+		})
+		done <- err
+	}()
+
+	<-entered
+	ok, _, err := TryExecute(b, ctx, ok(2))
+	require.NoError(t, err)
+	assert.False(t, ok, "second concurrent probe is rejected")
+
+	close(release)
+	require.NoError(t, <-done)
+}
+
+func TestTryExecute_NilFunc(t *testing.T) {
+	b := New()
+	ok, _, err := TryExecute[int](b, context.Background(), nil)
+	require.ErrorIs(t, err, ErrNilFunc)
+	assert.False(t, ok)
+}
+
+func TestTryExecute_Cancelled(t *testing.T) {
+	b := New()
+	ok, _, err := TryExecute(b, testx.CancelledCtx(), ok(1))
+	require.ErrorIs(t, err, ErrCancelled)
+	require.ErrorIs(t, err, context.Canceled)
+	assert.False(t, ok)
+}
+
+func TestTryExecute_ReturnsErrCancelledOnExpiredDeadline(t *testing.T) {
+	b := New()
+	ok, _, err := TryExecute(b, testx.ExpiredCtx(), ok(1))
+	require.ErrorIs(t, err, ErrCancelled)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	assert.False(t, ok)
+}
+
+func TestTryExecute_PropagatesError(t *testing.T) {
+	b := New()
+	ok, _, err := TryExecute(b, context.Background(), fail[int]())
+	require.True(t, ok)
+	require.ErrorIs(t, err, errBoom)
+}
+
+func TestTryExecute_SkipFailureNotCounted(t *testing.T) {
+	b := New(WithMaxFailures(2))
+	ctx := context.Background()
+
+	for range 5 {
+		ok, _, err := TryExecute(b, ctx, func(_ context.Context, cc CircuitController) (int, error) {
+			cc.SkipFailure()
+			return 0, errBoom
+		})
+		require.True(t, ok)
+		require.ErrorIs(t, err, errBoom)
+	}
+	assert.Equal(t, Closed, b.State())
+	assert.Equal(t, uint64(0), b.Stats().TotalFail)
+}
+
+func TestTryExecute_TripForcesOpenOnSuccess(t *testing.T) {
+	b := New(WithMaxFailures(100))
+	ctx := context.Background()
+
+	ok, got, err := TryExecute(b, ctx, func(_ context.Context, cc CircuitController) (int, error) {
+		cc.Trip()
+		return 7, nil
+	})
+	require.True(t, ok)
+	require.NoError(t, err)
+	assert.Equal(t, 7, got)
+	assert.Equal(t, Open, b.State())
+}
+
+func TestTryExecute_AfterClose(t *testing.T) {
+	b := New()
+	require.NoError(t, b.Close())
+
+	called := false
+	ok, _, err := TryExecute(b, context.Background(), func(context.Context, CircuitController) (int, error) {
+		called = true
+		return 0, nil
+	})
+	require.ErrorIs(t, err, ErrClosed)
+	assert.False(t, ok)
+	assert.False(t, called)
+}
+
+func TestTryExecute_PanicBecomesCountedFailure(t *testing.T) {
+	b := New(WithMaxFailures(1), WithOp("test.try"))
+	ctx := context.Background()
+
+	ok, _, err := TryExecute(b, ctx, func(context.Context, CircuitController) (int, error) {
+		panic("kaboom")
+	})
+	require.True(t, ok, "fn ran before panicking")
+	testx.RequirePanicError(t, err, "test.try")
+	assert.Equal(t, Open, b.State())
+}
+
+func TestTryExecute_DefaultOpPanicLabel(t *testing.T) {
+	b := New(WithMaxFailures(1))
+	ok, _, err := TryExecute(b, context.Background(), func(context.Context, CircuitController) (int, error) {
+		panic("kaboom")
+	})
+	require.True(t, ok)
+	testx.RequirePanicError(t, err, opTryExecute)
 }
 
 // --- Guard clauses ---
@@ -607,10 +778,13 @@ func TestExecute_RaceSafe(t *testing.T) {
 		_, _ = Execute(b, ctx, func(context.Context, CircuitController) (int, error) {
 			return 1, sim.Call()
 		})
+		_, _, _ = TryExecute(b, ctx, func(context.Context, CircuitController) (int, error) {
+			return 1, sim.Call()
+		})
 	})
 	// The breaker must remain in a coherent state and counters must add up.
 	s := b.Stats()
-	assert.Equal(t, uint64(50*200), s.Successes+s.TotalFail+s.Rejected)
+	assert.Equal(t, uint64(50*200*2), s.Successes+s.TotalFail+s.Rejected)
 }
 
 // TestExecute_SuccessNeverUnTripsUnderRace hammers the breaker with a heavy

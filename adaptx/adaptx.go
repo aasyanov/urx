@@ -1,4 +1,4 @@
-// Package adaptx provides adaptive concurrency limiting for industrial Go
+// Package adaptx provides adaptive concurrency limiting for production Go
 // services.
 //
 // A [Limiter] discovers a backend's safe concurrency on its own. It starts at a
@@ -324,7 +324,8 @@ func (l *Limiter) InFlight() int {
 // --- Lifecycle ---
 
 // CloseWithTimeout shuts the limiter down, waiting up to timeout for in-flight
-// operations to drain before returning. Subsequent [Limiter.Acquire],
+// operations to drain before returning. Blocked [Limiter.Acquire] waiters are
+// released immediately with [ErrClosed]. Subsequent [Limiter.Acquire],
 // [Limiter.TryAcquire], [Execute], and [TryExecute] calls return [ErrClosed].
 // A zero or negative timeout returns immediately without waiting. Close is
 // idempotent: the second and later calls return [ErrClosed].

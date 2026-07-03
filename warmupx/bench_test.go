@@ -61,6 +61,28 @@ func BenchmarkExecute_Parallel(b *testing.B) {
 	})
 }
 
+func BenchmarkTryExecute(b *testing.B) {
+	w := New(WithMinCapacity(1), WithMaxCapacity(1))
+	ctx := context.Background()
+	fn := func(_ context.Context, _ WarmupController) (int, error) { return 1, nil }
+	b.ResetTimer()
+	for b.Loop() {
+		_, _, _ = TryExecute(w, ctx, fn)
+	}
+}
+
+func BenchmarkTryExecute_Parallel(b *testing.B) {
+	w := New(WithMinCapacity(1), WithMaxCapacity(1))
+	ctx := context.Background()
+	fn := func(_ context.Context, _ WarmupController) (int, error) { return 1, nil }
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			_, _, _ = TryExecute(w, ctx, fn)
+		}
+	})
+}
+
 func BenchmarkWarmer_Stats(b *testing.B) {
 	w := New()
 	w.Start()

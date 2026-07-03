@@ -307,6 +307,16 @@ func TestSleep_CompletesAfterDelay(t *testing.T) {
 	assert.GreaterOrEqual(t, time.Since(start), 10*time.Millisecond)
 }
 
+func TestSleep_CancelledStopsTimer(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	err := sleep(ctx, time.Hour)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	assert.Less(t, time.Since(start), time.Second, "cancel must not wait out the full delay")
+}
+
 // --- isRetryable ---
 
 func TestIsRetryable(t *testing.T) {

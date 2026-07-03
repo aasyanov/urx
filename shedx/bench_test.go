@@ -47,6 +47,66 @@ func BenchmarkExecute_Shed(b *testing.B) {
 	}
 }
 
+func BenchmarkTryExecute_Admit(b *testing.B) {
+	s := New(WithCapacity(1_000_000))
+	defer func() { _ = s.Close() }()
+	ctx := context.Background()
+	fn := func(context.Context, ShedController) (int, error) { return 1, nil }
+
+	b.ResetTimer()
+	for b.Loop() {
+		_, _, _ = TryExecute(s, ctx, PriorityNormal, fn)
+	}
+}
+
+func BenchmarkTryExecute_Admit_Parallel(b *testing.B) {
+	s := New(WithCapacity(1_000_000))
+	defer func() { _ = s.Close() }()
+	ctx := context.Background()
+	fn := func(context.Context, ShedController) (int, error) { return 1, nil }
+
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			_, _, _ = TryExecute(s, ctx, PriorityNormal, fn)
+		}
+	})
+}
+
+func BenchmarkTryExecute_Shed(b *testing.B) {
+	// Rejection path — measured with TryExecute to avoid ErrRejected allocation
+	// in the benchmark loop.
+	s := New(WithCapacity(1), WithThreshold(0.5))
+	defer func() { _ = s.Close() }()
+	tok, _ := s.Acquire(PriorityCritical)
+	defer tok.Release()
+
+	ctx := context.Background()
+	fn := func(context.Context, ShedController) (int, error) { return 1, nil }
+
+	b.ResetTimer()
+	for b.Loop() {
+		_, _, _ = TryExecute(s, ctx, PriorityNormal, fn)
+	}
+}
+
+func BenchmarkTryExecute_Shed_Parallel(b *testing.B) {
+	s := New(WithCapacity(1), WithThreshold(0.5))
+	defer func() { _ = s.Close() }()
+	tok, _ := s.Acquire(PriorityCritical)
+	defer tok.Release()
+
+	ctx := context.Background()
+	fn := func(context.Context, ShedController) (int, error) { return 1, nil }
+
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			_, _, _ = TryExecute(s, ctx, PriorityNormal, fn)
+		}
+	})
+}
+
 func BenchmarkAcquire(b *testing.B) {
 	s := New(WithCapacity(1_000_000))
 	defer func() { _ = s.Close() }()

@@ -73,6 +73,23 @@ func ExampleWarmer_MaxRequests() {
 	// permitted: 50
 }
 
+// ExampleTryExecute shows the non-blocking variant: when probabilistic
+// admission fails TryExecute returns ok=false without an error.
+func ExampleTryExecute() {
+	w := warmupx.New(
+		warmupx.WithMinCapacity(0),
+		warmupx.WithMaxCapacity(1),
+	)
+
+	ok, _, err := warmupx.TryExecute(w, context.Background(),
+		func(_ context.Context, _ warmupx.WarmupController) (int, error) {
+			return 1, nil
+		})
+
+	fmt.Println(ok, err == nil)
+	// Output: false true
+}
+
 // ExampleWarmupController_Reject shows a callback using the WarmupController
 // to reject an admitted call when the instance is not ready for heavy work.
 func ExampleWarmupController_Reject() {

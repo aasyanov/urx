@@ -2,7 +2,7 @@
 
 [CI](https://github.com/aasyanov/urx/actions/workflows/ci.yml)
 [Go Reference](https://pkg.go.dev/github.com/aasyanov/urx/healthx)
-[License: MIT](https://opensource.org/licenses/MIT)
+[License: MIT](../LICENSE)
 
 A concurrent health-check registry that aggregates named component checks into Kubernetes-style liveness and readiness probes, each check bounded by a per-check timeout and run under panic recovery. Go 1.24+. Zero external dependencies (depends only on the urx `panix` package; testify in tests only).
 
@@ -35,6 +35,23 @@ Hand-rolled health endpoints repeatedly get this wrong: blocking liveness probes
 ❌ NOT a dependency supervisor (does not restart or reconnect components)
 ❌ NOT a circuit breaker (use circuitx to stop calling a failing dependency)
 ❌ NOT a uptime/alerting service (it answers a probe; alerting lives elsewhere)
+```
+
+### Position in the urx Stack
+
+```text
+┌──────────────────────────────────────────────────────────┐
+│  service code: HTTP server, orchestrator probes           │
+└────────────────────────┬─────────────────────────────────┘
+                         │
+┌────────────────────────▼─────────────────────────────────┐
+│  healthx  Checker · Liveness/Readiness · HTTP handlers   │
+└──────────────┬───────────────────────┬───────────────────┘
+               │                        │
+┌──────────────▼─────────┐   ┌──────────▼───────────────────┐
+│  panix.SafeVoid        │   │  context · sync · net/http   │
+│  (panic → down status) │   │  (per-check timeout)         │
+└────────────────────────┘   └──────────────────────────────┘
 ```
 
 Each check runs through `[panix](../panix)` so a panicking check is converted to a `StatusDown` component instead of crashing the process serving the probe.
@@ -260,7 +277,7 @@ Both are sentinel errors created with `errors.New`; the messages stored in `Comp
 > **Check functions should respect their context.** Each check receives a context with the per-check timeout. A check that ignores `ctx` and blocks anyway is still reported `StatusDown` (via the bounded-collection backstop, after `checkTimeout + 100ms`), and `Readiness` returns on time — but the underlying goroutine keeps running until its blocking call finally returns, pinning that goroutine and its resources. Always thread the context into your I/O (`db.PingContext(ctx)`, not `db.Ping()`) so the goroutine is released promptly.
 
 > [!WARNING]
-> `**Readiness` allocates per check.** It spawns one goroutine and one timeout context per registered check. This is appropriate for probe-frequency calls (seconds apart), not for a hot request path. Do not call `Readiness` per inbound request.
+> **Readiness** allocates per check.** It spawns one goroutine and one timeout context per registered check. This is appropriate for probe-frequency calls (seconds apart), not for a hot request path. Do not call `Readiness` per inbound request.
 
 ## Safety and Concurrency
 
@@ -272,7 +289,7 @@ Both are sentinel errors created with `errors.New`; the messages stored in `Comp
 
 ## Benchmarks
 
-> CPU: Intel i7-10510U · OS: Windows 10 · Go 1.26 · `-benchmem -count=3`
+> CPU: Intel i7-10510U · OS: Windows 10 · Go 1.24 · `-benchmem -count=3`
 
 
 | Benchmark                       | ns/op  | B/op  | allocs/op |
@@ -286,11 +303,11 @@ Both are sentinel errors created with `errors.New`; the messages stored in `Comp
 
 ### Analysis
 
-- `**Liveness`: ~2 ns, 0 allocs.** A single `atomic.Bool` load plus building a small stack `Report`. This is the architectural floor and the reason liveness can be polled aggressively — it is effectively free.
-- `**Readiness_NoChecks`: ~75 ns, 1 alloc.** The one allocation is the `time.Since` duration formatting (`Duration.String`). With no checks there is no goroutine fan-out, so this is the fixed overhead of producing a `Report`.
-- `**Readiness_OneCheck`: ~3,200 ns, 16 allocs.** Dominated by the per-check machinery: a `context.WithTimeout` (timer + cancel), one goroutine, the result channel, the `panix.SafeVoid` deferred frame, and the components map, plus the one-per-call collection-deadline `time.Timer` that backstops context-ignoring checks. This is the cost of *bounded, panic-safe, concurrent, non-wedgeable* checking.
-- `**Readiness_TenChecks`: ~18,800 ns, 81 allocs.** Latency grows sub-linearly with check count because the checks run **concurrently** (the no-op checks here are CPU-bound, so they still serialise on the scheduler; real I/O-bound checks overlap fully and wall-clock latency approaches the single slowest check). The per-call collection timer is a fixed ~3-alloc overhead amortised across all checks; the rest grows ~linearly as each check adds its own context, goroutine, and map entry.
-- `**Readiness_Parallel`: ~2,440 ns for 4 checks.** Multiple concurrent `Readiness` callers scale well — there is no shared mutable state on the hot path beyond the `RLock` snapshot and atomic counters, so contention is minimal.
+- **Liveness**: ~2 ns, 0 allocs.** A single `atomic.Bool` load plus building a small stack `Report`. This is the architectural floor and the reason liveness can be polled aggressively — it is effectively free.
+- **Readiness_NoChecks**: ~75 ns, 1 alloc.** The one allocation is the `time.Since` duration formatting (`Duration.String`). With no checks there is no goroutine fan-out, so this is the fixed overhead of producing a `Report`.
+- **Readiness_OneCheck**: ~3,200 ns, 16 allocs.** Dominated by the per-check machinery: a `context.WithTimeout` (timer + cancel), one goroutine, the result channel, the `panix.SafeVoid` deferred frame, and the components map, plus the one-per-call collection-deadline `time.Timer` that backstops context-ignoring checks. This is the cost of *bounded, panic-safe, concurrent, non-wedgeable* checking.
+- **Readiness_TenChecks**: ~18,800 ns, 81 allocs.** Latency grows sub-linearly with check count because the checks run **concurrently** (the no-op checks here are CPU-bound, so they still serialise on the scheduler; real I/O-bound checks overlap fully and wall-clock latency approaches the single slowest check). The per-call collection timer is a fixed ~3-alloc overhead amortised across all checks; the rest grows ~linearly as each check adds its own context, goroutine, and map entry.
+- **Readiness_Parallel**: ~2,440 ns for 4 checks.** Multiple concurrent `Readiness` callers scale well — there is no shared mutable state on the hot path beyond the `RLock` snapshot and atomic counters, so contention is minimal.
 - **Allocation floor.** `Liveness` is 0 allocs by design. `Readiness`'s per-check allocations are the architectural minimum for giving each check an independent timeout, an isolated goroutine, and a panic boundary; removing them would mean giving up the timeout, the concurrency, or the panic safety.
 
 ## Quality
@@ -300,7 +317,7 @@ Both are sentinel errors created with `errors.New`; the messages stored in `Comp
 | -------------- | ----------------------------------------------- |
 | Test functions | 26                                              |
 | Benchmarks     | 5                                               |
-| Fuzz targets   | 0 (no untrusted byte input)                     |
+| Fuzz targets   | 2                                               |
 | Examples       | 2                                               |
 | Coverage       | 100.0%                                          |
 | Race detector  | All pass                                        |
@@ -318,6 +335,7 @@ healthx/
 ├── errors.go           # ErrUnhealthy, ErrTimeout + wrappers
 ├── healthx_test.go     # Unit + table-driven + HTTP + concurrency tests
 ├── bench_test.go       # 5 benchmarks: liveness + readiness sizes + parallel
+├── fuzz_test.go        # FuzzReadiness, FuzzReadinessWithFailingCheck
 ├── example_test.go     # 2 runnable GoDoc examples
 ├── footprint_test.go   # Struct size guards
 └── README.md           # This file

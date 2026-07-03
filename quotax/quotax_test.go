@@ -13,6 +13,29 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// cancelAfterCtx returns a context whose [context.Context.Err] becomes
+// non-nil after the n-th call, enabling deterministic tests of the wait-loop
+// re-check points without relying on real timer scheduling.
+type cancelAfterCtx struct {
+	context.Context
+	calls atomic.Int32
+	after int32
+	err   error
+}
+
+func (c *cancelAfterCtx) Err() error {
+	if c.Context == nil {
+		c.Context = context.Background()
+	}
+	if c.err == nil {
+		c.err = context.Canceled
+	}
+	if c.calls.Add(1) >= c.after {
+		return c.err
+	}
+	return c.Context.Err()
+}
+
 func TestNew_Defaults(t *testing.T) {
 	q := New()
 	defer q.Close()
@@ -179,6 +202,19 @@ func TestQuota_WaitN_Cancelled(t *testing.T) {
 
 	err := q.WaitN(ctx, "k", 1)
 	require.ErrorIs(t, err, ErrCancelled)
+}
+
+func TestQuota_WaitN_CancelAfterTimerFires(t *testing.T) {
+	q := New(WithRate(10), WithBurst(1))
+	defer q.Close()
+
+	require.True(t, q.Allow("k"))
+
+	err := q.WaitN(&cancelAfterCtx{after: 2}, "k", 1)
+	require.ErrorIs(t, err, ErrCancelled)
+	s := q.Stats()
+	assert.Equal(t, int64(1), s.Limited)
+	assert.Equal(t, int64(1), s.Allowed, "initial Allow only")
 }
 
 func TestQuota_Wait_AlreadyCancelled(t *testing.T) {

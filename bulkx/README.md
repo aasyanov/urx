@@ -2,7 +2,7 @@
 
 [CI](https://github.com/aasyanov/urx/actions/workflows/ci.yml)
 [Go Reference](https://pkg.go.dev/github.com/aasyanov/urx/bulkx)
-[License: MIT](https://opensource.org/licenses/MIT)
+[License: MIT](../LICENSE)
 
 A thread-safe bulkhead that caps the number of operations running concurrently, isolating a slow or failing dependency so it cannot drain the resources of the whole process. Blocking and non-blocking admission, a bounded wait with timeout, a controller for load-aware degradation, and panic recovery. Go 1.24+. Zero external dependencies (depends only on the urx `panix` package; testify in tests only).
 
@@ -125,7 +125,7 @@ The `BulkController` handed to the callback carries the occupancy snapshot taken
 | Panic safety         | A panicking callback becomes a `*panix.PanicError`, slot still freed                                      |
 | Admission purity     | `Allow` reports a best-effort decision without mutating any counter or slot                               |
 | Token release        | `Token.Release` is idempotent; a double release never drives active negative or double-frees a slot       |
-| Close semantics      | After `Close`, `Execute`/`TryExecute`/`Acquire` return `ErrClosed`; in-flight work is unaffected          |
+| Close semantics      | After `Close`, new admissions return `ErrClosed`; blocked slow-path waiters wake immediately; in-flight work is unaffected |
 | Idempotent close     | `Close` is safe to call repeatedly and always returns nil                                                 |
 | Controller scope     | A `BulkController` is valid only during its callback; do not retain it                                    |
 
@@ -295,7 +295,7 @@ A panicking callback surfaces as a `*panix.PanicError` returned by `Execute`/`Tr
 > **Sizing concurrency wrong defeats the purpose.** `WithMaxConcurrent` must reflect the concurrency the *downstream* can sustain, not your accept queue. A bulkhead sized to 10× the real limit admits everything and isolates nothing.
 
 > [!NOTE]
-> `**bulkx` bounds concurrency, not request rate.** A flood of fast operations can churn through the slots without ever filling them. For requests-per-second limiting, use `ratex`; combine the two for both axes.
+> **bulkx** bounds concurrency, not request rate.** A flood of fast operations can churn through the slots without ever filling them. For requests-per-second limiting, use `ratex`; combine the two for both axes.
 
 > [!NOTE]
 > **No priorities.** Every caller competes for the same slots equally. If you need to shed low-priority traffic first while protecting critical traffic, use `shedx`.
@@ -306,7 +306,7 @@ A panicking callback surfaces as a `*panix.PanicError` returned by `Execute`/`Tr
 
 ## Benchmarks
 
-> CPU: Intel i7-10510U · OS: Windows 10 · Go 1.26 · `-benchmem` (best of 3)
+> CPU: Intel i7-10510U · OS: Windows 10 · Go 1.24 · `-benchmem` (best of 3)
 
 
 | Benchmark        | ns/op | B/op | allocs/op |

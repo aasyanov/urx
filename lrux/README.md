@@ -40,6 +40,23 @@ Without a purpose-built cache, each call site re-implements an LRU list, a TTL s
 ❌ NOT an unbounded memo table (set a capacity or TTL)
 ```
 
+### Position in the urx Stack
+
+```text
+┌──────────────────────────────────────────────────────────┐
+│  service code: caches, memo tables, session stores         │
+└────────────────────────┬─────────────────────────────────┘
+                         │
+┌────────────────────────▼─────────────────────────────────┐
+│  lrux   Cache[K,V] · ShardedCache · Compute (singleflight)│
+└──────────────┬───────────────────────┬───────────────────┘
+               │                        │
+┌──────────────▼─────────┐   ┌──────────▼───────────────────┐
+│  golang.org/x/sync     │   │  sync · hash/maphash         │
+│  (singleflight.Group)  │   │  (sharded locks, LRU list)   │
+└────────────────────────┘   └──────────────────────────────┘
+```
+
 ## Architecture
 
 ```text
@@ -310,10 +327,10 @@ func keepAlive(id string) bool {
 > **An uncapped cache grows forever.** `New[K, V]()` with no `WithCapacity` and no `WithTTL` is an unbounded map with LRU bookkeeping. For any long-lived cache, set a capacity or a TTL plus a cleanup interval.
 
 > [!WARNING]
-> `**Range` holds the lock.** The callback passed to `Range` runs while the cache lock is held, so it must not call back into the same cache (deadlock) or block. For non-blocking iteration, use `Snapshot` and iterate the result.
+> **Range** holds the lock.** The callback passed to `Range` runs while the cache lock is held, so it must not call back into the same cache (deadlock) or block. For non-blocking iteration, use `Snapshot` and iterate the result.
 
 > [!WARNING]
-> `**Len` counts unswept expired entries.** `Len` is O(1) but includes entries whose TTL has elapsed yet have not been accessed or swept. Use `LenValid` for an exact live count (O(n)).
+> **Len** counts unswept expired entries.** `Len` is O(1) but includes entries whose TTL has elapsed yet have not been accessed or swept. Use `LenValid` for an exact live count (O(n)).
 
 > [!WARNING]
 > **Call `Close`.** A cache created with a cleanup interval owns a background goroutine. Failing to `Close` it leaks that goroutine for the lifetime of the process.

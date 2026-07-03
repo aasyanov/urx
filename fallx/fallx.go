@@ -1,5 +1,5 @@
 // Package fallx provides fallback strategies for graceful degradation in
-// industrial Go services.
+// production Go services.
 //
 // A [Fallback] wraps a primary operation and produces an alternative result
 // when the primary fails, turning a hard failure into a degraded-but-useful

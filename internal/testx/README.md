@@ -42,7 +42,7 @@ for i := 0; i < 100; i++ { ... }
 4. **Context factories** — `CancelledCtx`, `ExpiredCtx`, `TimedCtx`, `DeadlineCtx`
 5. **Concurrency stress** — `Hammer`, `HammerNoError`, `HammerVoid`, `HammerIndexed`
 
-## Architectural Position: What `testx` Actually Does
+## Architectural Position
 
 ```text
 ✅ Deterministic failure simulation (Simulator, LatencySim)
@@ -365,10 +365,10 @@ func TestBulkhead_DoubleClose(t *testing.T) {
 > **Pattern mode uses a mutex** — the pattern index is protected by `sync.Mutex`. Under extreme concurrency (>10k goroutines), this can become a bottleneck. For pure throughput stress tests, prefer `FailAlways` or `FailEveryN` which are lock-free.
 
 > [!WARNING]
-> `**LatencySim` uses `time.After`** — each call allocates a timer. For benchmarks, prefer `Simulator` (zero-delay) and test latency behavior separately.
+> **LatencySim** uses `time.After** — each call allocates a timer. For benchmarks, prefer **Simulator` (zero-delay) and test latency behavior separately.
 
 > [!NOTE]
-> `**ExpiredCtx` releases its cancel function** — the internal cancel func is invoked before returning, so no timer resource leaks. The returned context still reports `context.DeadlineExceeded` (the deadline-exceeded status is latched and not overwritten by the cancel).
+> **ExpiredCtx** releases its cancel function** — the internal cancel func is invoked before returning, so no timer resource leaks. The returned context still reports `context.DeadlineExceeded` (the deadline-exceeded status is latched and not overwritten by the cancel).
 
 ## Safety and Concurrency
 

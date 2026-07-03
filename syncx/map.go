@@ -100,12 +100,10 @@ func (m *Map[K, V]) Len() int {
 	return int(m.len.Load())
 }
 
-// Clear removes all entries from the map.
+// Clear removes all entries from the map and resets [Map.Len] to zero.
+// Concurrent stores may add entries while Clear runs; those entries remain
+// after Clear returns and Len is adjusted by the usual store/delete paths.
 func (m *Map[K, V]) Clear() {
-	m.m.Range(func(k, _ any) bool {
-		if _, loaded := m.m.LoadAndDelete(k); loaded {
-			m.len.Add(-1)
-		}
-		return true
-	})
+	m.m.Clear()
+	m.len.Store(0)
 }
