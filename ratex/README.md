@@ -218,7 +218,7 @@ if !ok {
 | `DefaultBurst`       | `const DefaultBurst = 20`                                                                                           | Default bucket capacity when [WithBurst] is omitted         |
 | `ErrCancelled`       | `var ErrCancelled error`                                                                                            | Context cancelled or deadline expired before admission      |
 | `ErrNilFunc`         | `var ErrNilFunc error`                                                                                              | Nil callback passed to [Execute] or [TryExecute]            |
-| `New`                | `func New(opts ...Option) *Limiter`                                                                                 | Create a limiter; non-positive rate/burst clamped to floors |
+| `New`                | `func New(opts ...Option) *Limiter`                                                                                 | Create a limiter; non-positive rate → DefaultRate, burst floored to 1 |
 | `Limiter.Allow`      | `func (l *Limiter) Allow() bool`                                                                                    | Non-blocking: admit one request, consume one token          |
 | `Limiter.AllowN`     | `func (l *Limiter) AllowN(n int) bool`                                                                              | Non-blocking: admit n requests atomically                   |
 | `Limiter.Wait`       | `func (l *Limiter) Wait(ctx context.Context) error`                                                                 | Block until one token is available or ctx done              |
@@ -236,7 +236,7 @@ if !ok {
 | `RateController`     | `type RateController interface`                                                                                     | Per-call controller passed to [Execute]/[TryExecute]        |
 | `RateFunc`           | `type RateFunc[T any] func(ctx context.Context, rc RateController) (T, error)`                                      | Callback type for [Execute] and [TryExecute]                |
 | `Stats`              | `type Stats struct { Rate, Burst, Tokens, Allowed, Limited }`                                                       | Point-in-time limiter snapshot                              |
-| `WithRate`           | `func WithRate(r float64) Option`                                                                                   | Set sustained req/s; values ≤ 0 ignored, floor 1 in [New]   |
+| `WithRate`           | `func WithRate(r float64) Option`                                                                                   | Set sustained req/s; values ≤ 0 ignored; fractional rates kept |
 | `WithBurst`          | `func WithBurst(n int) Option`                                                                                      | Set bucket capacity; values below 1 raised to 1 in [New]    |
 
 
@@ -257,7 +257,7 @@ if !ok {
 
 | Option         | Default             | Description                                                  |
 | -------------- | ------------------- | ------------------------------------------------------------ |
-| `WithRate(r)`  | `DefaultRate` (10)  | Sustained tokens added per second; `r ≤ 0` ignored, floor 1  |
+| `WithRate(r)`  | `DefaultRate` (10)  | Sustained tokens added per second; `r ≤ 0` ignored; fractional rates preserved |
 | `WithBurst(n)` | `DefaultBurst` (20) | Maximum tokens the bucket can hold; values below 1 are raised to 1 in [New] |
 
 

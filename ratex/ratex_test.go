@@ -72,7 +72,7 @@ func TestWithRate(t *testing.T) {
 		{"custom", WithRate(250), 250},
 		{"zero ignored", WithRate(0), DefaultRate},
 		{"negative ignored", WithRate(-5), DefaultRate},
-		{"fractional", WithRate(0.5), minRate},
+		{"fractional", WithRate(0.5), 0.5},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -108,9 +108,9 @@ func TestWithBurst(t *testing.T) {
 	}
 }
 
-func TestNewConfig_FloorsRateBelowMin(t *testing.T) {
+func TestNewConfig_PreservesFractionalRate(t *testing.T) {
 	l := New(WithRate(0.5))
-	assert.Equal(t, minRate, l.Rate())
+	assert.Equal(t, 0.5, l.Rate())
 }
 
 func TestLimiter_Delay_ReturnsMinWhenTokensAlreadyAvailable(t *testing.T) {
@@ -454,7 +454,9 @@ func TestWaitN_CancelledAfterTakeRefundsToken(t *testing.T) {
 }
 
 func TestExecute_Waits(t *testing.T) {
-	l := New(WithRate(0.0001), WithBurst(1))
+	// Moderate rate so the refill wait finishes quickly while still forcing
+	// Waited()=true after the burst token is spent.
+	l := New(WithRate(100), WithBurst(1))
 	require.True(t, l.Allow())
 
 	var waited bool

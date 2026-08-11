@@ -5,26 +5,44 @@
 *.so
 *.dylib
 
-# Test artifacts
-testdata/
+# Test binaries / profiles
 *.test
-*.out
 *.prof
+*.coverprofile
+benchmark.txt
+quality.result
+quality.ps1
+quality.sh
+
+# Coverage artifacts (never commit; keep *_test.go source)
+*.out
 cover.out
+coverage.out
 coverage.txt
 coverprofile
-cover
-coverage
+*-cov
+*-coverage
+*-coverage.out
+*coverage.out
 coverage_*
-*cover
 *.cover
-profile
-quality.result
+/cov
+/cover
+/coverage
+cov/
+cover/
+coverage/
 
-# Cursor
+# Profiles / ad-hoc reports
+profiles/
+a-report-*.md
+dist/
+
+# Fuzz corpus (large)
+**/testdata/fuzz/
+
+# Cursor / IDE
 .cursor/
-
-# IDE
 .idea/
 .vscode/
 *.swp
@@ -35,8 +53,5 @@ quality.result
 .DS_Store
 Thumbs.db
 
-# Go workspace
+# Go
 vendor/
-
-# Build
-dist/

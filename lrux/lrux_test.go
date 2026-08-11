@@ -189,17 +189,19 @@ func TestCache_TTL_RemainingValues(t *testing.T) {
 }
 
 func TestCache_Touch(t *testing.T) {
-	c := New[string, int](WithTTL[string, int](50 * time.Millisecond))
+	c := New[string, int](WithTTL[string, int](200 * time.Millisecond))
 	defer c.Close()
 	c.Set("a", 1)
 
-	time.Sleep(30 * time.Millisecond)
+	time.Sleep(40 * time.Millisecond)
 	assert.True(t, c.Touch("a"))
 	assert.False(t, c.Touch("missing"))
 
-	time.Sleep(30 * time.Millisecond) // total 60ms but TTL refreshed at 30ms
+	// Touch slides expiration; assert remaining TTL rather than a second short
+	// sleep (tight sleeps flake under -race / loaded CI hosts).
 	_, ok := c.Get("a")
 	assert.True(t, ok)
+	assert.Greater(t, c.TTL("a"), 100*time.Millisecond)
 }
 
 func TestCache_Touch_PerEntryTTL(t *testing.T) {

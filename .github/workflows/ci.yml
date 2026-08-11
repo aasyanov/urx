@@ -106,10 +106,25 @@ jobs:
         shell: bash
         run: go test -bench=Benchmark -benchmem -count=3 -run='^$' -timeout=30m ./... | tee benchmark.txt
 
+      - name: Sample pprof (single-package modules only)
+        if: matrix.os == 'windows-latest'
+        shell: bash
+        run: |
+          if ls ./*.go >/dev/null 2>&1; then
+            go test -run='^$' -bench=Benchmark -benchmem -count=1 -cpuprofile=cpu.prof -memprofile=mem.prof -timeout=30m .
+            go tool pprof -top -nodecount=20 cpu.prof
+            go tool pprof -top -alloc_space -nodecount=20 mem.prof
+          else
+            echo "Multi-package module — root pprof skipped; benches still ran via ./..."
+          fi
+
       - name: Upload benchmark results
         uses: actions/upload-artifact@v7
         with:
           name: benchmark-${{ matrix.os }}
-          path: benchmark.txt
+          path: |
+            benchmark.txt
+            cpu.prof
+            mem.prof
           retention-days: 90
-          if-no-files-found: error
+          if-no-files-found: warn

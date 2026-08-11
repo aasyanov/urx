@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.0] — 2026-08-11
+
+### Changed
+- Removed local `quality.ps1` / `quality.sh` wrappers; quality bar is CI + gate commands (`go test` / `golangci-lint` / pprof). Published docs must be English-only.
+- Ship-kit unified with org canon: identical `.gitignore`, `.golangci.yml`, MIT `LICENSE`, and `.github/workflows/ci.yml` (lint + OS×Go matrix + fuzz discover + bench/pprof on main).
+- Root README gate table aligned with canon (Gate M + Gates 0–5, coverage ship bar ≥90%).
+- `lrux`: `TestCache_Touch` no longer relies on a second tight sleep after TTL slide (flake under `-race` / loaded hosts).
+
+### Breaking
+
+- **`ratex` / `quotax`:** fractional rates below 1.0 req/s are now honored. Previously `newConfig` floored any positive rate `< 1` to `1.0`, which broke slow limits (e.g. `0.2` for `rate_ms=5000`, or `10/60 ≈ 0.167` req/s). Non-positive rates still fall back to `DefaultRate`; burst still floors at 1.
+
 ## [1.4.0] — 2026-07-03
 
 Complete greenfield rewrite. **There is no migration path from ≤1.3.0** — no deprecated shims, no compatibility layer, no migration guide. Treat 1.4.0 as a new library that reuses familiar package names and the same module path (`github.com/aasyanov/urx`).
@@ -281,6 +293,7 @@ Initial public release.
 - `gopkg.in/yaml.v3`
 - `github.com/BurntSushi/toml`
 
+[1.5.0]: https://github.com/aasyanov/urx/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/aasyanov/urx/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/aasyanov/urx/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/aasyanov/urx/compare/v1.1.0...v1.2.0

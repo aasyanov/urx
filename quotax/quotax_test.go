@@ -59,7 +59,7 @@ func TestWithRate(t *testing.T) {
 		{"custom", WithRate(250), 250},
 		{"zero ignored", WithRate(0), DefaultRate},
 		{"negative ignored", WithRate(-5), DefaultRate},
-		{"fractional floored", WithRate(0.5), minRate},
+		{"fractional", WithRate(0.5), 0.5},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -171,12 +171,12 @@ func TestWithEvictionInterval(t *testing.T) {
 	}
 }
 
-func TestNewConfig_FloorsRateBelowMin(t *testing.T) {
+func TestNewConfig_PreservesFractionalRate(t *testing.T) {
 	q := New(WithRate(0.5))
 	defer q.Close()
-	assert.Equal(t, minRate, q.cfg.rate)
+	assert.Equal(t, 0.5, q.cfg.rate)
 	b := q.getOrCreate(q.shardFor("k"), "k")
-	assert.Equal(t, minRate, b.limiter.Rate())
+	assert.Equal(t, 0.5, b.limiter.Rate())
 }
 
 func TestQuota_Allow_PerKeyIsolation(t *testing.T) {
@@ -731,7 +731,9 @@ func TestQuota_WaitDelay_UsesLimiterRate(t *testing.T) {
 	require.True(t, b.limiter.AllowN(5))
 	d := q.waitDelay(b, 5)
 	assert.Greater(t, d, minWaitDelay)
-	assert.LessOrEqual(t, d, 6*time.Second)
+	// 5 tokens at 0.5/s ≈ 10s; allow a little slack for timing math.
+	assert.GreaterOrEqual(t, d, 9*time.Second)
+	assert.LessOrEqual(t, d, 11*time.Second)
 }
 
 func TestQuota_GetOrCreate_ReturnsExisting(t *testing.T) {

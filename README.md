@@ -392,8 +392,8 @@ Reject paths are optimized: e.g. `shedx.TryExecute` when shedding returns **0 al
 Run benchmarks locally:
 
 ```powershell
-./quality.ps1          # Windows — full pipeline, writes quality.result
-./quality.sh           # Linux/macOS
+go test -race -count=1 ./... && golangci-lint run ./...   # local Gate 2–5 commands
+# CI: .github/workflows/ci.yml (lint + matrix + fuzz + bench)
 ```
 
 Or per package:
@@ -417,28 +417,29 @@ Each package README documents its allocation floor and bottleneck in a **Benchma
 
 ## Development and Quality
 
-URX uses a **gate pipeline** — sequential quality gates, each including checks from all previous gates:
+URX uses a **gate pipeline** — craft gates 0–5 plus Gate M (mission proof). Production-ready means Gate M ✅ and Gate 5 ✅.
 
 | Gate | Checks |
 | ---- | ------ |
+| M | Mission proof tables (`pkg-*.mdc`) with `file:TestName` evidence; `go test -race` |
 | 0 | `go build ./...` |
-| 1 | + `go vet`, `golangci-lint` |
-| 2 | + `go test -race` |
-| 3 | + benchmarks |
-| 4 | + GoDoc + README complete |
-| 5 | + fuzz, coverage ≥95%, CI green |
+| 1 | `go test -race -count=1 ./...` |
+| 2 | `go vet` + `golangci-lint run ./...` |
+| 3 | Benchmarks (`-benchmem`); pprof on hot paths when claiming alloc floors |
+| 4 | GoDoc + Examples + package READMEs honest vs exports |
+| 5 | Fuzz (≥30s per target in CI), coverage ≥90%, CI green |
 
-**Repository quality bar (1.4.0 release):**
+**Repository quality bar:**
 
 | Metric | Value |
 | ------ | ----- |
 | Public packages | 20 |
-| Statement coverage | **98.6%** (with `-race`) |
+| Statement coverage | ≥90% ship bar (CI); measured **98.5%** with `-race` |
 | `golangci-lint` | 0 issues |
 | Fuzz targets | 52 across packages |
-| CI | Go 1.26 on Ubuntu (see [.github/workflows/ci.yml](.github/workflows/ci.yml)) |
+| CI | Lint + OS×Go 1.24–1.26 test matrix + fuzz discover + bench on `main` ([ci.yml](.github/workflows/ci.yml)) |
 
-Contributing workflow: bring one package to Gate 5 per focused change — audit, fix structure and implementation, write tests (unit, concurrent, fuzz), benchmarks, GoDoc, and package README.
+Contributing workflow: bring one package to Gate M+5 per focused change — audit, fix structure and implementation, write tests (unit, concurrent, fuzz), benchmarks, GoDoc, and package README.
 
 ---
 
@@ -476,7 +477,6 @@ urx/
 ├── internal/testx/          # private test helpers
 ├── .github/workflows/       # CI
 ├── .golangci.yml
-├── quality.ps1 · quality.sh # full local quality run
 ├── CHANGELOG.md
 ├── go.mod · go.sum
 └── README.md                # this file — module overview

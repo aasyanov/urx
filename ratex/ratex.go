@@ -75,8 +75,9 @@ type Limiter struct {
 }
 
 // New creates a [Limiter] with the given options applied on top of sensible
-// defaults ([DefaultRate] req/s, burst [DefaultBurst]). A non-positive rate or
-// burst is clamped to its floor so the returned limiter is always usable.
+// defaults ([DefaultRate] req/s, burst [DefaultBurst]). A non-positive rate
+// falls back to [DefaultRate]; a non-positive burst is clamped to 1 so the
+// returned limiter is always usable. Positive fractional rates are preserved.
 func New(opts ...Option) *Limiter {
 	cfg := newConfig(opts)
 	return &Limiter{

@@ -10,10 +10,6 @@ const (
 	// rate.
 	DefaultBurst = 20
 
-	// minRate is the floor [New] enforces: a non-positive rate degrades to one
-	// token per second so the bucket always refills.
-	minRate = 1.0
-
 	// minBurst is the floor [New] enforces: a non-positive burst degrades to a
 	// single-token bucket.
 	minBurst = 1
@@ -29,8 +25,9 @@ type config struct {
 }
 
 // newConfig resolves the effective configuration: defaults first, then options
-// in order, with the rate and burst floors applied last so the bucket is
-// always usable.
+// in order, with the burst floor applied last so the bucket is always usable.
+// Positive fractional rates are preserved; only a non-positive rate falls back
+// to [DefaultRate].
 func newConfig(opts []Option) config {
 	cfg := config{
 		rate:  DefaultRate,
@@ -39,8 +36,8 @@ func newConfig(opts []Option) config {
 	for _, opt := range opts {
 		opt(&cfg)
 	}
-	if cfg.rate < minRate {
-		cfg.rate = minRate
+	if cfg.rate <= 0 {
+		cfg.rate = DefaultRate
 	}
 	if cfg.burst < minBurst {
 		cfg.burst = minBurst
@@ -50,8 +47,8 @@ func newConfig(opts []Option) config {
 
 // WithRate sets the sustained rate in requests per second — the long-run
 // average number of tokens added to the bucket each second.
-// Default: [DefaultRate]. Values <= 0 are ignored; values below the [minRate]
-// floor are raised to [minRate] when [New] resolves the final configuration.
+// Default: [DefaultRate]. Values <= 0 are ignored. Positive fractional rates
+// (e.g. 0.2 for one request every 5 seconds) are preserved as-is.
 func WithRate(r float64) Option {
 	return func(c *config) {
 		if r > 0 {

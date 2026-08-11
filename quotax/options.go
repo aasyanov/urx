@@ -29,9 +29,6 @@ const (
 	// tracked keys is unbounded.
 	unlimitedKeys = 0
 
-	// minRate is the floor [newConfig] enforces so per-key buckets always refill.
-	minRate = 1.0
-
 	// minBurst is the floor [newConfig] enforces so every per-key bucket holds
 	// at least one token.
 	minBurst = 1
@@ -54,8 +51,9 @@ type config struct {
 }
 
 // newConfig resolves the effective configuration: defaults first, then each
-// option applied in order, with the per-key rate and burst floors applied last
-// so every created bucket matches [ratex.Limiter] semantics.
+// option applied in order, with the per-key burst floor applied last so every
+// created bucket matches [ratex.Limiter] semantics. Positive fractional rates
+// are preserved; only a non-positive rate falls back to [DefaultRate].
 func newConfig(opts []Option) config {
 	cfg := config{
 		rate:             DefaultRate,
@@ -68,8 +66,8 @@ func newConfig(opts []Option) config {
 	for _, opt := range opts {
 		opt(&cfg)
 	}
-	if cfg.rate < minRate {
-		cfg.rate = minRate
+	if cfg.rate <= 0 {
+		cfg.rate = DefaultRate
 	}
 	if cfg.burst < minBurst {
 		cfg.burst = minBurst
@@ -78,9 +76,9 @@ func newConfig(opts []Option) config {
 }
 
 // WithRate sets the sustained rate in requests per second applied to each key's
-// token bucket. Default: [DefaultRate]. Values <= 0 are ignored; values below
-// the [minRate] floor are raised to [minRate] when [New] resolves the final
-// configuration.
+// token bucket. Default: [DefaultRate]. Values <= 0 are ignored. Positive
+// fractional rates (e.g. 0.2 for one request every 5 seconds) are preserved
+// as-is.
 func WithRate(r float64) Option {
 	return func(c *config) {
 		if r > 0 {

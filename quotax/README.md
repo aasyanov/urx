@@ -283,7 +283,7 @@ val, err := quotax.Execute(q, ctx, userID,
 
 | Option                    | Default                        | Description                                        |
 | ------------------------- | ------------------------------ | -------------------------------------------------- |
-| `WithRate(r)`             | `DefaultRate` (10)             | Per-key sustained tokens/s; `r ≤ 0` ignored; values below `minRate` (1.0) are raised |
+| `WithRate(r)`             | `DefaultRate` (10)             | Per-key sustained tokens/s; `r ≤ 0` ignored; fractional rates preserved |
 | `WithBurst(n)`            | `DefaultBurst` (20)            | Per-key bucket capacity; values below `minBurst` (1) are raised                      |
 | `WithShards(n)`           | `DefaultShards` (64)           | Internal shard count; `n ≤ 0` ignored              |
 | `WithMaxKeys(n)`          | `0` (unlimited)                | Hard cap on tracked keys; `n < 0` ignored          |

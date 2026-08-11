@@ -8,19 +8,21 @@ import (
 
 // FuzzAllowN drives a limiter built from fuzzed rate/burst parameters with a
 // fuzzed sequence of AllowN calls, asserting the core invariants: New never
-// panics, the limiter always honours its floors, AllowN never admits more than
-// the bucket holds, and a failed AllowN consumes nothing.
+// panics, the limiter always has a positive rate and honours the burst floor,
+// AllowN never admits more than the bucket holds, and a failed AllowN consumes
+// nothing.
 func FuzzAllowN(f *testing.F) {
 	f.Add(10.0, 20, 1)
 	f.Add(0.0, 0, 5)
 	f.Add(-3.0, -1, 100)
+	f.Add(0.5, 1, 1)
 	f.Add(1e9, 1000, 0)
 
 	f.Fuzz(func(t *testing.T, rate float64, burst, n int) {
 		l := New(WithRate(rate), WithBurst(burst))
 
-		if l.Rate() < minRate {
-			t.Fatalf("rate %v below floor %v", l.Rate(), minRate)
+		if l.Rate() <= 0 {
+			t.Fatalf("rate %v is not positive", l.Rate())
 		}
 		if l.Burst() < minBurst {
 			t.Fatalf("burst %d below floor %d", l.Burst(), minBurst)
