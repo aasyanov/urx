@@ -7,8 +7,9 @@
 // configured threshold the breaker trips Open and rejects calls immediately
 // with [ErrOpen] from [Execute] or (false, zero, nil) from [TryExecute], shedding
 // load from a failing downstream. After a reset
-// timeout it moves to HalfOpen and admits a bounded number of probe calls; a
-// probe success closes the breaker, a probe failure re-opens it.
+// timeout it moves to HalfOpen and admits a bounded number of probe calls;
+// consecutive probe successes close the breaker (see [WithSuccessThreshold]),
+// and a probe failure re-opens it.
 //
 //	cb := circuitx.New(
 //	    circuitx.WithMaxFailures(5),
@@ -64,7 +65,8 @@ type Breaker struct {
 	state            atomic.Uint32 // current State
 	failures         atomic.Int32  // consecutive failures in Closed
 	lastOpen         atomic.Int64  // UnixNano of the last Open transition
-	halfOpenInflight atomic.Int32  // probes currently admitted in HalfOpen
+	halfOpenInflight   atomic.Int32 // probes currently admitted in HalfOpen
+	halfOpenSuccesses  atomic.Int32 // consecutive probe successes in HalfOpen
 
 	successes atomic.Uint64
 	totalFail atomic.Uint64
@@ -100,6 +102,7 @@ func (b *Breaker) State() State {
 	}
 	if b.state.CompareAndSwap(uint32(Open), uint32(HalfOpen)) {
 		b.halfOpenInflight.Store(0)
+		b.halfOpenSuccesses.Store(0)
 		b.fireStateChange(Open, HalfOpen)
 		return HalfOpen
 	}
@@ -125,6 +128,7 @@ func (b *Breaker) Reset() {
 	b.mu.Lock()
 	b.failures.Store(0)
 	b.halfOpenInflight.Store(0)
+	b.halfOpenSuccesses.Store(0)
 	prev := State(b.state.Swap(uint32(Closed)))
 	b.mu.Unlock()
 	if prev != Closed {
@@ -320,9 +324,10 @@ func executeRun[T any](b *Breaker, ctx context.Context, op string, state State, 
 	return val, nil
 }
 
-// recordSuccess settles a successful call. A probe success in [HalfOpen] heals
-// the breaker to [Closed]; a success in [Closed] clears any accumulated
-// consecutive failures. The state-changing work happens under the transition
+// recordSuccess settles a successful call. Consecutive probe successes in
+// [HalfOpen] heal the breaker to [Closed] once [WithSuccessThreshold] is
+// reached; a success in [Closed] clears any accumulated consecutive failures.
+// The state-changing work happens under the transition
 // mutex and is re-checked against the live state, so a success can never clobber
 // a trip that a concurrent failure committed between admission and settlement:
 // when the live state is [Open] the success is ignored and the breaker stays
@@ -338,7 +343,13 @@ func (b *Breaker) recordSuccess() {
 	b.mu.Lock()
 	switch State(b.state.Load()) {
 	case HalfOpen:
-		// Probe succeeded: the downstream has recovered.
+		count := b.halfOpenSuccesses.Add(1)
+		if int(count) < b.cfg.successThreshold {
+			b.mu.Unlock()
+			return
+		}
+		// Enough consecutive probe successes: the downstream has recovered.
+		b.halfOpenSuccesses.Store(0)
 		b.failures.Store(0)
 		b.state.Store(uint32(Closed))
 		b.mu.Unlock()
@@ -387,6 +398,10 @@ func (b *Breaker) recordFailure(forced bool) {
 		// Below threshold in Closed: record the failure, stay closed.
 		b.mu.Unlock()
 		return
+	}
+
+	if live == HalfOpen {
+		b.halfOpenSuccesses.Store(0)
 	}
 
 	// Trip: forced, a probe failure in HalfOpen, or the threshold was reached.

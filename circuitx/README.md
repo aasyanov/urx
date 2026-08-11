@@ -96,14 +96,14 @@ The hot path is lock-free: admission reads `state`, `failures`, and `halfOpenInf
    ┌─────────┐ ───────────────────────────────► ┌──────┐
    │ Closed  │       or cc.Trip()               │ Open │
    └─────────┘ ◄─────────────────────────────── └──────┘
-        ▲   probe success                          │
-        │   (HalfOpen → Closed)                    │ resetTimeout elapsed
-        │                                          ▼
+        ▲   consecutive probe successes            │
+        │   >= successThreshold                    │ resetTimeout elapsed
+        │   (HalfOpen → Closed)                    ▼
         │                                    ┌──────────┐
-        └──────────── probe success ──────── │ HalfOpen │
+        └──────────── probe successes ────── │ HalfOpen │
                                              └──────────┘
                           probe failure ──────►  Open
-                     (any single probe re-opens)
+                     (resets success counter; any probe re-opens)
 ```
 
 A call flows through `[Execute](#api)` or `[TryExecute](#api)` like this:
@@ -112,7 +112,7 @@ A call flows through `[Execute](#api)` or `[TryExecute](#api)` like this:
 2. **Admission.** Read the state. In `Open`, reject — `[Execute](#api)` returns `[ErrOpen](#errors)`, `[TryExecute](#api)` returns `(false, zero, nil)`. In `HalfOpen`, atomically reserve one of `halfOpenMax` probe slots — if the budget is exhausted, reject the same way. In `Closed`, always admit.
 3. **Lazy promotion.** Reading the state while `Open` checks whether `resetTimeout` has elapsed since the trip; if so, a single compare-and-swap promotes `Open → HalfOpen` and fires the hook. No background goroutine or timer is needed.
 4. **Run.** `fn` runs under `[panix.Safe](../panix)`; a panic becomes a `*panix.PanicError` treated as a failure.
-5. **Record.** On success, reset to a clean `Closed` if we were probing or carrying failures. On failure (not suppressed by `SkipFailure`), increment the consecutive count and trip to `Open` if the threshold is reached, the failure was a `HalfOpen` probe, or the callback called `Trip`. The callback's return value is always passed through together with any error.
+5. **Record.** On success in `Closed`, clear the failure counter. On success in `HalfOpen`, increment the consecutive probe-success counter and heal to `Closed` only once it reaches `successThreshold` (default 1). On failure (not suppressed by `SkipFailure`), increment the consecutive failure count and trip to `Open` if the failure threshold is reached, the failure was a `HalfOpen` probe (which also resets the probe-success counter), or the callback called `Trip`. The callback's return value is always passed through together with any error.
 
 ```text
 TryExecute(b, ctx, fn)
@@ -134,17 +134,18 @@ TryExecute(b, ctx, fn)
 ### State transitions (precise)
 
 
-| From       | Event                                                        | To         | Notes                                                      |
-| ---------- | ------------------------------------------------------------ | ---------- | ---------------------------------------------------------- |
-| `Closed`   | failure, count `< maxFailures`                               | `Closed`   | counter incremented                                        |
-| `Closed`   | failure, count `>= maxFailures`                              | `Open`     | trip recorded, timer started                               |
-| `Closed`   | `cc.Trip()`                                                  | `Open`     | forced regardless of count                                 |
-| `Closed`   | success                                                      | `Closed`   | counter reset to 0                                         |
-| `Open`     | call rejected                                                | `Open`     | `Execute` → `ErrOpen`; `TryExecute` → `(false, zero, nil)` |
-| `Open`     | `resetTimeout` elapsed (on `State()`/`Execute`/`TryExecute`) | `HalfOpen` | one CAS, hook fires; `Stats()` does **not** promote        |
-| `HalfOpen` | probe success                                                | `Closed`   | counter reset, breaker healed                              |
-| `HalfOpen` | probe failure or `Trip()`                                    | `Open`     | re-opened immediately, timer restarted                     |
-| `HalfOpen` | probe budget exhausted                                       | `HalfOpen` | extra callers rejected (`ErrOpen` or `(false, zero, nil)`) |
+| From       | Event                                                        | To         | Notes                                                         |
+| ---------- | ------------------------------------------------------------ | ---------- | ------------------------------------------------------------- |
+| `Closed`   | failure, count `< maxFailures`                               | `Closed`   | counter incremented                                           |
+| `Closed`   | failure, count `>= maxFailures`                              | `Open`     | trip recorded, timer started                                  |
+| `Closed`   | `cc.Trip()`                                                  | `Open`     | forced regardless of count                                    |
+| `Closed`   | success                                                      | `Closed`   | counter reset to 0                                            |
+| `Open`     | call rejected                                                | `Open`     | `Execute` → `ErrOpen`; `TryExecute` → `(false, zero, nil)`    |
+| `Open`     | `resetTimeout` elapsed (on `State()`/`Execute`/`TryExecute`) | `HalfOpen` | one CAS, hook fires; `Stats()` does **not** promote           |
+| `HalfOpen` | probe success (count >= successThreshold)                    | `Closed`   | counter reset, breaker healed                                 |
+| `HalfOpen` | probe success (count < successThreshold)                     | `HalfOpen` | consecutive success counter incremented                       |
+| `HalfOpen` | probe failure or `Trip()`                                    | `Open`     | success counter reset, re-opened immediately, timer restarted |
+| `HalfOpen` | probe budget exhausted                                       | `HalfOpen` | extra callers rejected (`ErrOpen` or `(false, zero, nil)`)    |
 
 
 
@@ -156,6 +157,7 @@ TryExecute(b, ctx, fn)
 | ------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Open rejects without `fn`       | A call rejected in `Open` or budget-exhausted `HalfOpen` never invokes `fn`; `Execute` returns `ErrOpen`, `TryExecute` returns `(false, zero, nil)`. |
 | Probe budget                    | At most `WithHalfOpenMax` callbacks run concurrently in `HalfOpen`; the rest are rejected the same way.                                              |
+| Heal threshold                  | `HalfOpen → Closed` requires `WithSuccessThreshold` consecutive probe successes; a probe failure resets that counter and re-opens.                   |
 | Non-blocking reject             | `TryExecute` returns `(false, zero, nil)` when the circuit rejects — rejection is a return value, not `ErrOpen`.                                     |
 | Single trip per edge            | Concurrent failures that cross the threshold record exactly one trip and fire the hook once.                                                         |
 | `SkipFailure` excludes counting | A skipped failure reaches the caller unchanged but never increments the failure count or trips.                                                      |
@@ -325,13 +327,14 @@ return use(resp)
 ## Configuration
 
 
-| Option                                       | Default                                        | Description                                                                                   |
-| -------------------------------------------- | ---------------------------------------------- | --------------------------------------------------------------------------------------------- |
-| `WithMaxFailures(n int)`                     | `5`                                            | Consecutive failures that trip `Closed → Open`. Values `< 1` floored to 1.                    |
-| `WithResetTimeout(d time.Duration)`          | `10s`                                          | How long `Open` lasts before a probe is admitted. Values `<= 0` ignored.                      |
-| `WithHalfOpenMax(n int)`                     | `1`                                            | Concurrent probes admitted in `HalfOpen`. Values `< 1` floored to 1.                          |
-| `WithOnStateChange(fn func(from, to State))` | none                                           | Hook fired on each transition (not by `Stats`). Must not block or panic.                      |
-| `WithOp(op string)`                          | `"circuitx.Execute"` / `"circuitx.TryExecute"` | Operation label attached to panic reports (`TryExecute` defaults to `"circuitx.TryExecute"`). |
+| Option                                       | Default                                        | Description                                                                                                        |
+| -------------------------------------------- | ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| `WithMaxFailures(n int)`                     | `5`                                            | Consecutive failures that trip `Closed → Open`. Values `< 1` floored to 1.                                         |
+| `WithResetTimeout(d time.Duration)`          | `10s`                                          | How long `Open` lasts before a probe is admitted. Values `<= 0` ignored.                                           |
+| `WithHalfOpenMax(n int)`                     | `1`                                            | Concurrent probes admitted in `HalfOpen`. Values `< 1` floored to 1.                                               |
+| `WithSuccessThreshold(n int)`                | `1`                                            | Consecutive probe successes in `HalfOpen` required to heal to `Closed`. Values `<= 0` ignored; `< 1` floored to 1. |
+| `WithOnStateChange(fn func(from, to State))` | none                                           | Hook fired on each transition (not by `Stats`). Must not block or panic.                                           |
+| `WithOp(op string)`                          | `"circuitx.Execute"` / `"circuitx.TryExecute"` | Operation label attached to panic reports (`TryExecute` defaults to `"circuitx.TryExecute"`).                      |
 
 
 
@@ -381,14 +384,14 @@ Three environments, two hardware classes, two operating systems. All values are 
 ### Environments
 
 
-|            | Laptop                      | CI Server (Linux)     | CI Server (Windows)   |
-| ---------- | --------------------------- | --------------------- | --------------------- |
-| CPU | Intel Core i7-10510U, 4C/8T | Intel Xeon 6973P-C | AMD EPYC 7763 |
-| TDP        | 15W (mobile, throttles)     | 280W (server, stable) | server, stable        |
-| OS         | Windows 10                  | Ubuntu                | Windows Server 2022   |
-| Go         | 1.26.2                      | 1.26                  | 1.26                  |
-| GOMAXPROCS | 8                           | 4                     | 4                     |
-| Runs       | 3 (`-count=3`)              | 3 (`-count=3`)        | 3 (`-count=3`)        |
+|            | Laptop                      | CI Server (Linux)     | CI Server (Windows) |
+| ---------- | --------------------------- | --------------------- | ------------------- |
+| CPU        | Intel Core i7-10510U, 4C/8T | Intel Xeon 6973P-C    | AMD EPYC 7763       |
+| TDP        | 15W (mobile, throttles)     | 280W (server, stable) | server, stable      |
+| OS         | Windows 10                  | Ubuntu                | Windows Server 2022 |
+| Go         | 1.26.2                      | 1.26                  | 1.26                |
+| GOMAXPROCS | 8                           | 4                     | 4                   |
+| Runs       | 3 (`-count=3`)              | 3 (`-count=3`)        | 3 (`-count=3`)      |
 
 
 
@@ -398,16 +401,16 @@ Three environments, two hardware classes, two operating systems. All values are 
 
 | Benchmark                  | What it measures                   | Laptop      | Linux       | Windows     | B/op | allocs/op |
 | -------------------------- | ---------------------------------- | ----------- | ----------- | ----------- | ---- | --------- |
-| Execute_Closed             | Success through healthy breaker    | 47.7 ns     | **28.1 ns** | 52.8 ns | 32 | 1 |
-| Execute_Closed_Parallel    | Closed execute, parallel           | 44.9 ns     | 55.0 ns | **52.0 ns** | 32 | 1 |
-| Execute_Open               | Reject before callback (open)      | 30.9 ns     | 47.5 ns | **27.2 ns** | 0 | 0 |
-| Execute_Open_Parallel      | Open reject, parallel              | 29.7 ns     | 51.3 ns | **21.9 ns** | 0 | 0 |
-| TryExecute_Closed          | Non-blocking closed path           | 48.0 ns     | **27.5 ns** | 53.0 ns | 32 | 1 |
-| TryExecute_Open            | Non-blocking open reject           | 31.1 ns     | 48.5 ns | **27.7 ns** | 0 | 0 |
-| TryExecute_Open_Parallel   | Open reject, parallel              | 30.1 ns     | 52.0 ns | **22.2 ns** | 0 | 0 |
-| TryExecute_Closed_Parallel | Closed try, parallel               | 45.0 ns     | 55.9 ns | **40.5 ns** | 32 | 1 |
-| State                      | Atomic state read (+ lazy promote) | **1.8 ns**  | 1.0 ns | 2.3 ns | 0 | 0 |
-| Stats                      | Lock-free counter snapshot         | **1.4 ns*** | 7.0 ns | 11.8 ns | 0 | 0 |
+| Execute_Closed             | Success through healthy breaker    | 47.7 ns     | **28.1 ns** | 52.8 ns     | 32   | 1         |
+| Execute_Closed_Parallel    | Closed execute, parallel           | 44.9 ns     | 55.0 ns     | **52.0 ns** | 32   | 1         |
+| Execute_Open               | Reject before callback (open)      | 30.9 ns     | 47.5 ns     | **27.2 ns** | 0    | 0         |
+| Execute_Open_Parallel      | Open reject, parallel              | 29.7 ns     | 51.3 ns     | **21.9 ns** | 0    | 0         |
+| TryExecute_Closed          | Non-blocking closed path           | 48.0 ns     | **27.5 ns** | 53.0 ns     | 32   | 1         |
+| TryExecute_Open            | Non-blocking open reject           | 31.1 ns     | 48.5 ns     | **27.7 ns** | 0    | 0         |
+| TryExecute_Open_Parallel   | Open reject, parallel              | 30.1 ns     | 52.0 ns     | **22.2 ns** | 0    | 0         |
+| TryExecute_Closed_Parallel | Closed try, parallel               | 45.0 ns     | 55.9 ns     | **40.5 ns** | 32   | 1         |
+| State                      | Atomic state read (+ lazy promote) | **1.8 ns**  | 1.0 ns      | 2.3 ns      | 0    | 0         |
+| Stats                      | Lock-free counter snapshot         | **1.4 ns*** | 7.0 ns      | 11.8 ns     | 0    | 0         |
 
 
  Laptop `Stats` is an outlier vs CI (~11 ns on both servers) — likely turbo + very short loop on the first run; treat CI numbers as the stable baseline.

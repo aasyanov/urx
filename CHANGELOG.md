@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.1] — 2026-08-11
+
+### Added
+
+- **`circuitx`:** `WithSuccessThreshold(n)` — consecutive probe successes in `HalfOpen` required to heal to `Closed` (default `1`, same as before). Probe failure resets the counter and re-opens immediately. Values `<= 0` ignored; resolved config floors below 1 to 1.
+
 ## [1.5.0] — 2026-08-11
 
 ### Changed
@@ -294,6 +300,7 @@ Initial public release.
 - `gopkg.in/yaml.v3`
 - `github.com/BurntSushi/toml`
 
+[1.5.1]: https://github.com/aasyanov/urx/compare/v1.5.0...v1.5.1
 [1.5.0]: https://github.com/aasyanov/urx/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/aasyanov/urx/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/aasyanov/urx/compare/v1.2.0...v1.3.0

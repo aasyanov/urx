@@ -17,8 +17,9 @@ const (
 	// to [HalfOpen] and admits a bounded number of probes.
 	Open
 	// HalfOpen is the probing state: a limited number of probe calls are
-	// admitted to test whether the downstream has recovered. A probe success
-	// closes the breaker; a probe failure re-opens it.
+	// admitted to test whether the downstream has recovered. Consecutive probe
+	// successes (see [WithSuccessThreshold]) heal to [Closed]; any probe
+	// failure re-opens the breaker.
 	HalfOpen
 )
 

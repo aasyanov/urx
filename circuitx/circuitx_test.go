@@ -58,6 +58,7 @@ func TestNew_Defaults(t *testing.T) {
 	assert.Equal(t, DefaultMaxFailures, b.cfg.maxFailures)
 	assert.Equal(t, DefaultResetTimeout, b.cfg.resetTimeout)
 	assert.Equal(t, DefaultHalfOpenMax, b.cfg.halfOpenMax)
+	assert.Equal(t, DefaultSuccessThreshold, b.cfg.successThreshold)
 	assert.Equal(t, Closed, b.State())
 	assert.Equal(t, 0, b.Failures())
 }
@@ -106,6 +107,12 @@ func TestWithHalfOpenMax(t *testing.T) {
 	assert.Equal(t, DefaultHalfOpenMax, New(WithHalfOpenMax(-1)).cfg.halfOpenMax)
 }
 
+func TestWithSuccessThreshold(t *testing.T) {
+	assert.Equal(t, 2, New(WithSuccessThreshold(2)).cfg.successThreshold)
+	assert.Equal(t, DefaultSuccessThreshold, New(WithSuccessThreshold(0)).cfg.successThreshold)
+	assert.Equal(t, DefaultSuccessThreshold, New(WithSuccessThreshold(-1)).cfg.successThreshold)
+}
+
 func TestWithOp(t *testing.T) {
 	assert.Equal(t, "api.charge", New(WithOp("api.charge")).cfg.opOrDefault())
 	assert.Equal(t, opExecute, New(WithOp("")).cfg.opOrDefault())
@@ -142,11 +149,13 @@ func TestNewConfig_FloorsInvalidValues(t *testing.T) {
 		c.maxFailures = -5
 		c.resetTimeout = -time.Second
 		c.halfOpenMax = 0
+		c.successThreshold = 0
 	}
 	cfg := newConfig([]Option{bad})
 	assert.Equal(t, minMaxFailures, cfg.maxFailures)
 	assert.Equal(t, DefaultResetTimeout, cfg.resetTimeout)
 	assert.Equal(t, minHalfOpenMax, cfg.halfOpenMax)
+	assert.Equal(t, minSuccessThreshold, cfg.successThreshold)
 }
 
 // --- Closed-state behavior ---
@@ -238,6 +247,61 @@ func TestExecute_HalfOpenProbeSuccessCloses(t *testing.T) {
 	assert.Equal(t, 99, got)
 	assert.Equal(t, Closed, b.State(), "probe success closes the circuit")
 	assert.Equal(t, 0, b.Failures())
+}
+
+func TestExecute_HalfOpenSuccessThreshold2(t *testing.T) {
+	b := New(
+		WithMaxFailures(1),
+		WithResetTimeout(20*time.Millisecond),
+		WithSuccessThreshold(2),
+	)
+	ctx := context.Background()
+
+	_, _ = Execute(b, ctx, fail[int]())
+	require.Equal(t, Open, b.State())
+
+	testx.Eventually(t, func() bool { return b.State() == HalfOpen }, time.Second)
+
+	got, err := Execute(b, ctx, ok(1))
+	require.NoError(t, err)
+	assert.Equal(t, 1, got)
+	assert.Equal(t, HalfOpen, b.State(), "first probe success stays HalfOpen when threshold is 2")
+
+	got, err = Execute(b, ctx, ok(2))
+	require.NoError(t, err)
+	assert.Equal(t, 2, got)
+	assert.Equal(t, Closed, b.State(), "second consecutive probe success closes the circuit")
+	assert.Equal(t, 0, b.Failures())
+}
+
+func TestExecute_HalfOpenSuccessThreshold2FailureResetsCounter(t *testing.T) {
+	b := New(
+		WithMaxFailures(1),
+		WithResetTimeout(20*time.Millisecond),
+		WithSuccessThreshold(2),
+	)
+	ctx := context.Background()
+
+	_, _ = Execute(b, ctx, fail[int]())
+	testx.Eventually(t, func() bool { return b.State() == HalfOpen }, time.Second)
+
+	_, err := Execute(b, ctx, ok(1))
+	require.NoError(t, err)
+	assert.Equal(t, HalfOpen, b.State())
+
+	_, err = Execute(b, ctx, fail[int]())
+	require.ErrorIs(t, err, errBoom)
+	assert.Equal(t, Open, b.State(), "probe failure re-opens and resets success counter")
+
+	testx.Eventually(t, func() bool { return b.State() == HalfOpen }, time.Second)
+
+	_, err = Execute(b, ctx, ok(1))
+	require.NoError(t, err)
+	assert.Equal(t, HalfOpen, b.State(), "must accumulate two successes again after failure")
+
+	_, err = Execute(b, ctx, ok(2))
+	require.NoError(t, err)
+	assert.Equal(t, Closed, b.State())
 }
 
 func TestExecute_HalfOpenProbeFailureReopens(t *testing.T) {

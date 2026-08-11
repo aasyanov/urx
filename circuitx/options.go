@@ -16,6 +16,11 @@ const (
 	// [HalfOpen], applied when [WithHalfOpenMax] is not supplied.
 	DefaultHalfOpenMax = 1
 
+	// DefaultSuccessThreshold is the number of consecutive probe successes in
+	// [HalfOpen] required to heal to [Closed], applied when
+	// [WithSuccessThreshold] is not supplied.
+	DefaultSuccessThreshold = 1
+
 	// opExecute labels panics recovered while running an [Execute] callback and
 	// is the default operation name when [WithOp] is not set.
 	opExecute = "circuitx.Execute"
@@ -29,6 +34,9 @@ const (
 
 	// minHalfOpenMax is the floor [New] enforces on the probe budget.
 	minHalfOpenMax = 1
+
+	// minSuccessThreshold is the floor [New] enforces on the heal threshold.
+	minSuccessThreshold = 1
 )
 
 // Option configures a [Breaker] created by [New].
@@ -36,11 +44,12 @@ type Option func(*config)
 
 // config holds resolved breaker parameters.
 type config struct {
-	maxFailures   int
-	resetTimeout  time.Duration
-	halfOpenMax   int
-	onStateChange func(from, to State)
-	op            string
+	maxFailures      int
+	resetTimeout     time.Duration
+	halfOpenMax      int
+	successThreshold int
+	onStateChange    func(from, to State)
+	op               string
 }
 
 // newConfig resolves the effective configuration: defaults first, then options
@@ -48,9 +57,10 @@ type config struct {
 // an invalid option can never produce an unusable breaker.
 func newConfig(opts []Option) config {
 	cfg := config{
-		maxFailures:  DefaultMaxFailures,
-		resetTimeout: DefaultResetTimeout,
-		halfOpenMax:  DefaultHalfOpenMax,
+		maxFailures:      DefaultMaxFailures,
+		resetTimeout:     DefaultResetTimeout,
+		halfOpenMax:      DefaultHalfOpenMax,
+		successThreshold: DefaultSuccessThreshold,
 	}
 	for _, opt := range opts {
 		if opt != nil {
@@ -65,6 +75,9 @@ func newConfig(opts []Option) config {
 	}
 	if cfg.halfOpenMax < minHalfOpenMax {
 		cfg.halfOpenMax = minHalfOpenMax
+	}
+	if cfg.successThreshold < minSuccessThreshold {
+		cfg.successThreshold = minSuccessThreshold
 	}
 	return cfg
 }
@@ -121,6 +134,19 @@ func WithHalfOpenMax(n int) Option {
 	return func(c *config) {
 		if n > 0 {
 			c.halfOpenMax = n
+		}
+	}
+}
+
+// WithSuccessThreshold sets how many consecutive probe successes in [HalfOpen]
+// are required before the breaker heals to [Closed]. A probe failure resets
+// the counter and re-opens the circuit immediately. Default:
+// [DefaultSuccessThreshold]. Values <= 0 are ignored; values < 1 are floored
+// to 1.
+func WithSuccessThreshold(n int) Option {
+	return func(c *config) {
+		if n > 0 {
+			c.successThreshold = n
 		}
 	}
 }
