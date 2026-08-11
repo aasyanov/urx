@@ -389,6 +389,21 @@ URX separates **cheap checks** from **Execute wrappers**.
 
 Reject paths are optimized: e.g. `shedx.TryExecute` when shedding returns **0 allocs**; `bulkx.TryExecute` on a full bulkhead likewise.
 
+CI snapshot (`-benchmem -count=3`, medians; Linux **Intel Xeon 6973P-C**, Windows **AMD EPYC 7763**):
+
+| Hot path | Linux | Windows | allocs/op |
+| -------- | ----- | ------- | --------- |
+| `ratex.Allow` | 62.2 ns | **14.7 ns** | 0 |
+| `quotax.Allow` (hit) | 115.9 ns | **44.8 ns** | 0 |
+| `bulkx.Allow` | **0.7 ns** | 1.8 ns | 0 |
+| `shedx.TryExecute` (shed) | **7.5 ns** | 8.7 ns | 0 |
+| `circuitx.Execute` (open reject) | 47.5 ns | **27.2 ns** | 0 |
+| `lrux` cache hit | 65.9 ns | **38.3 ns** | 0 |
+| `panix.Safe` (no panic) | **5.2 ns** | 8.0 ns | 0 |
+| `adaptx.Allow` | 11.4 ns | **5.4 ns** | 0 |
+| `warmupx.Allow` | 20.9 ns | **18.4 ns** | 0 |
+
+
 Run benchmarks locally:
 
 ```powershell

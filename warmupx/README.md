@@ -372,7 +372,7 @@ Three environments, two hardware classes, two operating systems. All values are 
 
 |            | Laptop                      | CI Server (Linux)     | CI Server (Windows)   |
 | ---------- | --------------------------- | --------------------- | --------------------- |
-| CPU        | Intel Core i7-10510U, 4C/8T | AMD EPYC 7763, 4 vCPU | AMD EPYC 9V74, 4 vCPU |
+| CPU | Intel Core i7-10510U, 4C/8T | Intel Xeon 6973P-C | AMD EPYC 7763 |
 | TDP        | 15W (mobile, throttles)     | 280W (server, stable) | server, stable        |
 | OS         | Windows 10                  | Ubuntu                | Windows Server 2022   |
 | Go         | 1.26.2                      | 1.26                  | 1.26                  |
@@ -387,11 +387,11 @@ Three environments, two hardware classes, two operating systems. All values are 
 
 | Benchmark             | What it measures          | Laptop  | Linux       | Windows     | B/op | allocs/op |
 | --------------------- | ------------------------- | ------- | ----------- | ----------- | ---- | --------- |
-| Warmer_Allow          | Probabilistic admit check | 24.7 ns | **17.6 ns** | 18.8 ns     | 0    | 0         |
-| Warmer_Allow_Parallel | Allow, 8/4 goroutines     | 47.9 ns | 43.7 ns     | **36.7 ns** | 0    | 0         |
-| Warmer_Capacity       | Current capacity snapshot | 14.3 ns | **5.5 ns**  | 5.7 ns      | 0    | 0         |
-| Warmer_MaxRequests    | Ramp budget query         | 17.1 ns | **7.3 ns**  | 7.9 ns      | 0    | 0         |
-| Warmer_Stats          | Full stats snapshot       | 35.8 ns | 89.7 ns     | **34.1 ns** | 0    | 0         |
+| Warmer_Allow          | Probabilistic admit check | 24.7 ns | 20.9 ns | **18.4 ns** | 0 | 0 |
+| Warmer_Allow_Parallel | Allow, 8/4 goroutines     | 47.9 ns | 92.4 ns | **36.1 ns** | 0 | 0 |
+| Warmer_Capacity       | Current capacity snapshot | 14.3 ns | 12.1 ns | **6.5 ns** | 0 | 0 |
+| Warmer_MaxRequests    | Ramp budget query         | 17.1 ns | 12.6 ns | **8.5 ns** | 0 | 0 |
+| Warmer_Stats          | Full stats snapshot       | 35.8 ns | 66.6 ns | **34.4 ns** | 0 | 0 |
 
 
 
@@ -401,11 +401,11 @@ Three environments, two hardware classes, two operating systems. All values are 
 
 | Benchmark           | What it measures     | Laptop  | Linux       | Windows | B/op | allocs/op |
 | ------------------- | -------------------- | ------- | ----------- | ------- | ---- | --------- |
-| Execute             | Admit + callback     | 60.2 ns | **49.5 ns** | 54.2 ns | 24   | 1         |
-| Execute_Parallel    | Execute, parallel    | 63.5 ns | **49.1 ns** | 55.2 ns | 24   | 1         |
-| TryExecute          | Non-blocking execute | 61.5 ns | **50.0 ns** | 58.4 ns | 24   | 1         |
-| TryExecute_Parallel | TryExecute, parallel | 64.9 ns | **48.6 ns** | 53.9 ns | 24   | 1         |
-| TryExecute_Reject   | Zero capacity reject | 28.3 ns | **15.9 ns** | 16.7 ns | 0    | 0         |
+| Execute             | Admit + callback     | 60.2 ns | **38.1 ns** | 61.2 ns | 24 | 1 |
+| Execute_Parallel    | Execute, parallel    | 63.5 ns | 95.2 ns | **55.5 ns** | 24 | 1 |
+| TryExecute          | Non-blocking execute | 61.5 ns | **38.4 ns** | 63.1 ns | 24 | 1 |
+| TryExecute_Parallel | TryExecute, parallel | 64.9 ns | 86.8 ns | **58.7 ns** | 24 | 1 |
+| TryExecute_Reject   | Zero capacity reject | 28.3 ns | 21.4 ns | **17.8 ns** | 0 | 0 |
 
 
 
@@ -420,7 +420,7 @@ Three environments, two hardware classes, two operating systems. All values are 
 
 **Parallel scaling is flat — by design.** `Execute_Parallel` (49 ns Linux) matches serial (50 ns) within noise. `math/rand/v2` keeps per-P state, so parallel `Allow` does not serialize on a global RNG lock. The single heap allocation per execute is the only per-call cost; no mutex on the admit fast path.
 
-**Warmer_Stats spread on Linux CI (90 ns vs ~34 ns elsewhere).** Linux takes the full stats snapshot under read lock with more field copies on the EPYC 7763 runner; Windows and laptop cluster at ~35 ns. All platforms remain 0 alloc — safe for periodic scraping.
+**Warmer_Stats spread on Linux CI (66.6 ns vs ~34.4 ns elsewhere).** Linux takes the full stats snapshot under read lock with more field copies on the Xeon 6973P-C runner; Windows and laptop cluster at ~35 ns. All platforms remain 0 alloc — safe for periodic scraping.
 
 **Linux slightly wins serial execute.** ~49–50 ns (Linux) vs ~54–58 ns (Windows) — atomic admit + callback dispatch with no timer or channel; difference is CPU micro-architecture, not OS I/O.
 

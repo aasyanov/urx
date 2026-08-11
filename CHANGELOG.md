@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [1.5.0] — 2026-08-11
 
 ### Changed
+- Refreshed README benchmark tables from CI (Linux Xeon 6973P-C / Windows EPYC 7763).
 - Removed local `quality.ps1` / `quality.sh` wrappers; quality bar is CI + gate commands (`go test` / `golangci-lint` / pprof). Published docs must be English-only.
 - Ship-kit unified with org canon: identical `.gitignore`, `.golangci.yml`, MIT `LICENSE`, and `.github/workflows/ci.yml` (lint + OS×Go matrix + fuzz discover + bench/pprof on main).
 - Root README gate table aligned with canon (Gate M + Gates 0–5, coverage ship bar ≥90%).

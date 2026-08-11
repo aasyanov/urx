@@ -353,7 +353,7 @@ Three environments, two hardware classes, two operating systems. All values are 
 
 | | Laptop | CI Server (Linux) | CI Server (Windows) |
 |---|---|---|---|
-| CPU | Intel Core i7-10510U, 4C/8T | AMD EPYC 7763, 4 vCPU | AMD EPYC 9V74, 4 vCPU |
+| CPU | Intel Core i7-10510U, 4C/8T | Intel Xeon 6973P-C | AMD EPYC 7763 |
 | TDP | 15W (mobile, throttles) | 280W (server, stable) | server, stable |
 | OS | Windows 10 | Ubuntu | Windows Server 2022 |
 | Go | 1.26.2 | 1.26 | 1.26 |
@@ -366,22 +366,22 @@ This gives three comparison axes: **laptop vs server** (hardware scaling), **Lin
 
 | Benchmark | What it measures | Laptop | Linux | Windows | B/op | allocs/op |
 |---|---|---|---|---|---|---|
-| Execute | Admit + callback + release | 250 ns | 380 ns | **207 ns** | 52 | 3 |
-| Execute_Parallel | Execute, 8/4 goroutines | 497 ns | 540 ns | **409 ns** | 52 | 3 |
-| TryExecute | Non-blocking admit path | 184 ns | 322 ns | **153 ns** | 52 | 3 |
-| Acquire | Semaphore only (no callback) | 164 ns | **136 ns** | 144 ns | 28 | 2 |
-| Acquire_Parallel | Acquire, 8/4 goroutines | 344 ns | **192 ns** | 340 ns | 28 | 2 |
-| TryAcquire | Non-blocking acquire | 123 ns | **93 ns** | 92 ns | 28 | 2 |
-| Allow | Read-only admission check | 13.4 ns | **5.1 ns** | 6.0 ns | 0 | 0 |
-| Limit | Current limit snapshot | 13.5 ns | **6.7 ns** | 6.7 ns | 0 | 0 |
+| Execute | Admit + callback + release | 250 ns | 254.8 ns | **221 ns** | 52 | 3 |
+| Execute_Parallel | Execute, 8/4 goroutines | 497 ns | 507.2 ns | **399.5 ns** | 52 | 3 |
+| TryExecute | Non-blocking admit path | 184 ns | 237.1 ns | **175.4 ns** | 52 | 3 |
+| Acquire | Semaphore only (no callback) | 164 ns | **103.2 ns** | 147.8 ns | 28 | 2 |
+| Acquire_Parallel | Acquire, 8/4 goroutines | 344 ns | **174.6 ns** | 341.5 ns | 28 | 2 |
+| TryAcquire | Non-blocking acquire | 123 ns | **83.8 ns** | 109.8 ns | 28 | 2 |
+| Allow | Read-only admission check | 13.4 ns | 11.4 ns | **5.4 ns** | 0 | 0 |
+| Limit | Current limit snapshot | 13.5 ns | 12.3 ns | **7.2 ns** | 0 | 0 |
 
 ### Analysis
 
 **Pure CPU + channel + atomic — no I/O.** Every benchmark is in-process: buffered-channel semaphore, atomic counters, and (on the adaptation step only) a mutex. The Linux vs Windows gap on the same server class is dominated by mutex and channel fast-path cost, not filesystem or timer resolution.
 
-**Windows CI is faster on the admit path.** `Execute` is 380 ns (Linux) vs 207 ns (Windows) — a **1.8× spread** on identical `-count=3` methodology. `TryExecute` shows the same pattern (322 ns vs 153 ns). The three heap allocations (release closure, captured `atomic.Bool`, `execution` controller) are fixed on every admit; the remaining time is channel send/receive and atomic bumps. EPYC 9V74 on the Windows runner appears to win on this hot path despite the OS overhead seen in other urx packages.
+**Windows CI is faster on the admit path.** `Execute` is 254.8 ns (Linux) vs 221 ns (Windows) — a **1.2×** spread on identical `-count=3` methodology. `TryExecute` shows the same pattern (237.1 ns vs 175.4 ns). The three heap allocations (release closure, captured `atomic.Bool`, `execution` controller) are fixed on every admit; the remaining time is channel send/receive and atomic bumps. EPYC 7763 on the Windows runner appears to win on this hot path despite the OS overhead seen in other urx packages.
 
-**Parallel acquire is OS-sensitive.** `Acquire_Parallel` is 192 ns (Linux) vs 340 ns (Windows) — Linux **1.8× faster** under four goroutines contending on the same semaphore. `Execute_Parallel` inverts again (540 ns Linux vs 409 ns Windows), because the execute path adds callback setup work that amortizes channel contention differently. Pick `TryAcquire`/`Acquire` when you need raw slot reservation without the 52 B controller overhead.
+**Parallel acquire is OS-sensitive.** `Acquire_Parallel` is 174.6 ns (Linux) vs 341.5 ns (Windows) — Linux **1.8× faster** under four goroutines contending on the same semaphore. `Execute_Parallel` inverts again (507.2 ns Linux vs 399.5 ns Windows), because the execute path adds callback setup work that amortizes channel contention differently. Pick `TryAcquire`/`Acquire` when you need raw slot reservation without the 52 B controller overhead.
 
 **Laptop sits between CI platforms on serial paths, worse on parallel.** Serial `Execute` (250 ns) beats Linux CI but loses to Windows CI. `Acquire_Parallel` at 344 ns matches Windows, not Linux — the 8-thread laptop runs more goroutines than the 4-slot semaphore can serve without queueing, inflating parallel numbers versus the 4-vCPU CI matrix.
 

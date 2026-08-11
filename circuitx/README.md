@@ -383,7 +383,7 @@ Three environments, two hardware classes, two operating systems. All values are 
 
 |            | Laptop                      | CI Server (Linux)     | CI Server (Windows)   |
 | ---------- | --------------------------- | --------------------- | --------------------- |
-| CPU        | Intel Core i7-10510U, 4C/8T | AMD EPYC 7763, 4 vCPU | AMD EPYC 9V74, 4 vCPU |
+| CPU | Intel Core i7-10510U, 4C/8T | Intel Xeon 6973P-C | AMD EPYC 7763 |
 | TDP        | 15W (mobile, throttles)     | 280W (server, stable) | server, stable        |
 | OS         | Windows 10                  | Ubuntu                | Windows Server 2022   |
 | Go         | 1.26.2                      | 1.26                  | 1.26                  |
@@ -398,16 +398,16 @@ Three environments, two hardware classes, two operating systems. All values are 
 
 | Benchmark                  | What it measures                   | Laptop      | Linux       | Windows     | B/op | allocs/op |
 | -------------------------- | ---------------------------------- | ----------- | ----------- | ----------- | ---- | --------- |
-| Execute_Closed             | Success through healthy breaker    | 47.7 ns     | **44.3 ns** | 49.9 ns     | 32   | 1         |
-| Execute_Closed_Parallel    | Closed execute, parallel           | 44.9 ns     | **28.4 ns** | 36.8 ns     | 32   | 1         |
-| Execute_Open               | Reject before callback (open)      | 30.9 ns     | 71.4 ns     | **26.1 ns** | 0    | 0         |
-| Execute_Open_Parallel      | Open reject, parallel              | 29.7 ns     | 32.1 ns     | **25.5 ns** | 0    | 0         |
-| TryExecute_Closed          | Non-blocking closed path           | 48.0 ns     | **45.0 ns** | 49.8 ns     | 32   | 1         |
-| TryExecute_Open            | Non-blocking open reject           | 31.1 ns     | 71.6 ns     | **26.3 ns** | 0    | 0         |
-| TryExecute_Open_Parallel   | Open reject, parallel              | 30.1 ns     | 31.8 ns     | **22.8 ns** | 0    | 0         |
-| TryExecute_Closed_Parallel | Closed try, parallel               | 45.0 ns     | **29.1 ns** | 36.3 ns     | 32   | 1         |
-| State                      | Atomic state read (+ lazy promote) | **1.8 ns**  | 2.5 ns      | 2.2 ns      | 0    | 0         |
-| Stats                      | Lock-free counter snapshot         | **1.4 ns*** | 11.7 ns     | 11.1 ns     | 0    | 0         |
+| Execute_Closed             | Success through healthy breaker    | 47.7 ns     | **28.1 ns** | 52.8 ns | 32 | 1 |
+| Execute_Closed_Parallel    | Closed execute, parallel           | 44.9 ns     | 55.0 ns | **52.0 ns** | 32 | 1 |
+| Execute_Open               | Reject before callback (open)      | 30.9 ns     | 47.5 ns | **27.2 ns** | 0 | 0 |
+| Execute_Open_Parallel      | Open reject, parallel              | 29.7 ns     | 51.3 ns | **21.9 ns** | 0 | 0 |
+| TryExecute_Closed          | Non-blocking closed path           | 48.0 ns     | **27.5 ns** | 53.0 ns | 32 | 1 |
+| TryExecute_Open            | Non-blocking open reject           | 31.1 ns     | 48.5 ns | **27.7 ns** | 0 | 0 |
+| TryExecute_Open_Parallel   | Open reject, parallel              | 30.1 ns     | 52.0 ns | **22.2 ns** | 0 | 0 |
+| TryExecute_Closed_Parallel | Closed try, parallel               | 45.0 ns     | 55.9 ns | **40.5 ns** | 32 | 1 |
+| State                      | Atomic state read (+ lazy promote) | **1.8 ns**  | 1.0 ns | 2.3 ns | 0 | 0 |
+| Stats                      | Lock-free counter snapshot         | **1.4 ns*** | 7.0 ns | 11.8 ns | 0 | 0 |
 
 
  Laptop `Stats` is an outlier vs CI (~11 ns on both servers) — likely turbo + very short loop on the first run; treat CI numbers as the stable baseline.

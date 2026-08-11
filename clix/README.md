@@ -341,7 +341,7 @@ Three environments, two hardware classes, two operating systems. All values are 
 
 |            | Laptop                      | CI Server (Linux)     | CI Server (Windows)   |
 | ---------- | --------------------------- | --------------------- | --------------------- |
-| CPU        | Intel Core i7-10510U, 4C/8T | AMD EPYC 7763, 4 vCPU | AMD EPYC 9V74, 4 vCPU |
+| CPU | Intel Core i7-10510U, 4C/8T | Intel Xeon 6973P-C | AMD EPYC 7763 |
 | TDP        | 15W (mobile, throttles)     | 280W (server, stable) | server, stable        |
 | OS         | Windows 10                  | Ubuntu                | Windows Server 2022   |
 | Go         | 1.26.2                      | 1.26                  | 1.26                  |
@@ -356,12 +356,12 @@ Three environments, two hardware classes, two operating systems. All values are 
 
 | Benchmark      | What it measures           | Laptop  | Linux       | Windows     | B/op | allocs/op |
 | -------------- | -------------------------- | ------- | ----------- | ----------- | ---- | --------- |
-| New_SingleFlag | One typed flag + maps      | 766 ns  | **678 ns**  | 934 ns      | 1216 | 15        |
-| New_ManyFlags  | Five flags                 | 2.27 µs | **2.00 µs** | 2.73 µs     | 2560 | 34        |
-| New_Subcommand | Subcommand tree            | 1.16 µs | **1.01 µs** | 1.40 µs     | 1776 | 21        |
-| Parser_Reset   | Reuse tree, zero allocs    | 54.7 ns | 48.7 ns     | **44.9 ns** | 0    | 0         |
-| Parser_Help    | Help text render           | 800 ns  | **765 ns**  | 888 ns      | 528  | 10        |
-| New_Parallel   | Independent `New` per iter | 905 ns  | **703 ns**  | 1.10 µs     | 1544 | 20        |
+| New_SingleFlag | One typed flag + maps      | 766 ns  | **471.6 ns** | 1005 ns | 1216 | 15 |
+| New_ManyFlags  | Five flags                 | 2.27 µs | **1.31 µs** | 2.87 µs | 2560 | 34 |
+| New_Subcommand | Subcommand tree            | 1.16 µs | **0.7 µs** | 1.45 µs | 1776 | 21 |
+| Parser_Reset   | Reuse tree, zero allocs    | 54.7 ns | **28.6 ns** | 50.6 ns | 0 | 0 |
+| Parser_Help    | Help text render           | 800 ns  | **499.1 ns** | 1008 ns | 528 | 10 |
+| New_Parallel   | Independent `New` per iter | 905 ns  | **488.4 ns** | 1.25 µs | 1544 | 20 |
 
 
 
@@ -370,13 +370,13 @@ Three environments, two hardware classes, two operating systems. All values are 
 
 **Construction is a one-time startup cost — Linux CI is ~15–40% faster than Windows.** `New_SingleFlag` is 678 ns (Linux) vs 934 ns (Windows). Each `AddFlag` allocates a `flagMeta`, a closure pair (`setFunc`/`resetFunc`) that escapes because it captures the bound pointer, and map entries. This is paid once per process, not per request.
 
-**Scales linearly with flag count.** `New_ManyFlags` (five flags) is ~3× `New_SingleFlag` on Linux (2.0 µs vs 678 ns) — dominated by per-flag closure and map insertions.
+**Scales linearly with flag count.** `New_ManyFlags` (five flags) is ~3× `New_SingleFlag` on Linux (1.3 µs vs 471.6 ns) — dominated by per-flag closure and map insertions.
 
 **Parser_Reset — 0 allocs on all platforms (~45–55 ns).** Reset reuses the existing command tree; it only clears `set` markers, resets the positional slice header, and calls captured `resetFunc`. Re-running `New` per test case would reallocate the entire tree — `Reset` is the right tool for table-driven tests.
 
 **Parser_Help — not a hot path.** Allocations come from `strings.Builder` growth and padding; help renders at most once per invocation on `--help`.
 
-**Parallel New builds independent parsers.** `New_Parallel` scales with cores and shows no shared-state contention. Linux (703 ns) beats laptop (905 ns) and Windows (1.10 µs) because server CPUs sustain higher single-thread throughput on allocation-heavy setup work.
+**Parallel New builds independent parsers.** `New_Parallel` scales with cores and shows no shared-state contention. Linux (488.4 ns) beats laptop (905 ns) and Windows (1.2 µs) because server CPUs sustain higher single-thread throughput on allocation-heavy setup work.
 
 **Allocation floor is architectural.** Generic type-safe binding without reflection requires a per-flag setter closing over `*T`. Eliminating the closures would mean reflection (slower) or losing compile-time type safety. The 0-alloc `Reset` proves steady-state parse cost once the tree exists.
 

@@ -272,7 +272,7 @@ Three environments, two hardware classes, two operating systems. All values are 
 
 | | Laptop | CI Server (Linux) | CI Server (Windows) |
 |---|---|---|---|
-| CPU | Intel Core i7-10510U, 4C/8T | AMD EPYC 7763, 4 vCPU | AMD EPYC 9V74, 4 vCPU |
+| CPU | Intel Core i7-10510U, 4C/8T | Intel Xeon 6973P-C | AMD EPYC 7763 |
 | TDP | 15W (mobile, throttles) | 280W (server, stable) | server, stable |
 | OS | Windows 10 | Ubuntu | Windows Server 2022 |
 | Go | 1.26.2 | 1.26 | 1.26 |
@@ -283,17 +283,17 @@ Three environments, two hardware classes, two operating systems. All values are 
 
 | Benchmark | What it measures | Laptop | Linux | Windows | B/op | allocs/op |
 |---|---|---|---|---|---|---|
-| Execute_Fast | Instant `fn` under deadline | 1.88 µs | **1.71 µs** | 3.80 µs | 672 | 10 |
-| Execute_WithTimer | Same + `WithTimer` preset copy | 1.86 µs | **1.74 µs** | 3.83 µs | 672 | 10 |
-| Execute_Fast_Parallel | Fast execute, parallel | **654 ns** | 693 ns | 777 ns | 672 | 10 |
+| Execute_Fast | Instant `fn` under deadline | 1.88 µs | **1.11 µs** | 5.39 µs | 672 | 10 |
+| Execute_WithTimer | Same + `WithTimer` preset copy | 1.86 µs | **1.17 µs** | 5.46 µs | 672 | 10 |
+| Execute_Fast_Parallel | Fast execute, parallel | **654 ns** | 467.1 ns | 1213 ns | 672 | 10 |
 
 ### Analysis
 
 **10 allocs / 672 B is the architectural floor for timeout enforcement.** Every execute pays for `context.WithTimeout` (timer context + internal `time.Timer` + cancel closure), a worker goroutine, a buffered result channel, and the `panix.Safe` deferred-recover frame. None is removable without dropping a guarantee: no goroutine means the timeout cannot preempt a blocking `fn`; no timer context means no deadline propagation.
 
-**Windows sequential execute is ~2.2× slower than Linux.** `Execute_Fast` is 1.71 µs (Linux) vs 3.80 µs (Windows) — the benchmark's sub-microsecond `fn` completes instantly, so measured time is almost entirely goroutine spawn + timer setup + scheduler handoff. Windows timer and goroutine creation latency dominates when `fn` adds no work. Laptop (1.88 µs) tracks Linux, not Windows CI.
+**Windows sequential execute is ~2.2× slower than Linux.** `Execute_Fast` is 1.1 µs (Linux) vs 5.4 µs (Windows) — the benchmark's sub-microsecond `fn` completes instantly, so measured time is almost entirely goroutine spawn + timer setup + scheduler handoff. Windows timer and goroutine creation latency dominates when `fn` adds no work. Laptop (1.88 µs) tracks Linux, not Windows CI.
 
-**Parallel is faster per op — setup parallelizes.** `Execute_Fast_Parallel` is 693 ns (Linux) vs 1.71 µs serial — **2.5× faster** because goroutine/timer setup scales across cores. There is no shared lock on the hot path. Windows parallel (777 ns) still beats its own serial number (3.80 µs) by **4.9×**.
+**Parallel is faster per op — setup parallelizes.** `Execute_Fast_Parallel` is 467.1 ns (Linux) vs 1.1 µs serial — **2.5× faster** because goroutine/timer setup scales across cores. There is no shared lock on the hot path. Windows parallel (1.2 µs) still beats its own serial number (5.4 µs) by **4.9×**.
 
 **WithTimer adds no allocations.** The ~20 ns delta over bare `Execute_Fast` on Linux is copying the preset timer config into the execution struct — within noise.
 

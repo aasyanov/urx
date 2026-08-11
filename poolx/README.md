@@ -376,26 +376,24 @@ Three environments, two hardware classes, two operating systems. All values are 
 
 |            | Laptop                      | CI Server (Linux)             | CI Server (Windows)            |
 | ---------- | --------------------------- | ----------------------------- | ------------------------------ |
-| CPU        | Intel Core i7-10510U, 4C/8T | AMD EPYC 7763, 4 vCPU         | AMD EPYC 9V74, 4 vCPU          |
+| CPU | Intel Core i7-10510U, 4C/8T | Intel Xeon 6973P-C | AMD EPYC 7763 |
 | TDP        | 15W (mobile, throttles)     | 280W (server, stable)         | server, stable                 |
 | OS         | Windows 10                  | Ubuntu                        | Windows Server 2022            |
 | Go         | 1.26                        | 1.26                          | 1.26                           |
 | GOMAXPROCS | 8                           | 4                             | 4                              |
-| Source     | `quality.result`            | `benchmark-ubuntu-latest.txt` | `benchmark-windows-latest.txt` |
-
-
+| Source | `local laptop` | CI benchmark job (count=3) | CI benchmark job (count=3) |
 
 | Benchmark                              | What it measures               | Laptop   | Linux        | Windows  | B/op | allocs/op |
 | -------------------------------------- | ------------------------------ | -------- | ------------ | -------- | ---- | --------- |
-| `ObjectPool_GetPut`                    | `sync.Pool` get/put round trip | 23.2 ns  | **16.3 ns**  | 16.8 ns  | 0    | 0         |
-| `ObjectPool_GetPut_WithReset`          | Get/put with `Reset` callback  | 24.1 ns  | **16.9 ns**  | 18.1 ns  | 0    | 0         |
-| `ObjectPool_GetPut_Parallel`           | Get/put, 8/4 goroutines        | 50.5 ns  | **47.8 ns**  | 51.8 ns  | 0    | 0         |
-| `ObjectPool_GetPut_WithReset_Parallel` | Get/put + reset, parallel      | 52.4 ns  | **47.8 ns**  | 43.2 ns  | 0    | 0         |
-| `Batch_Add`                            | Mutex + slice append           | 15.4 ns  | **7.2 ns**   | 8.0 ns   | 8    | 0         |
-| `Batch_Add_Parallel`                   | `Add` under contention         | 53.6 ns  | **26.4 ns**  | 27.2 ns  | 8    | 0         |
-| `WorkerPool_Submit`                    | Fire-and-forget enqueue        | 599.8 ns | **284.3 ns** | 540.3 ns | 48   | 1         |
-| `WorkerPool_SubmitWait`                | Enqueue + result round trip    | 1.29 µs  | **753.2 ns** | 2.27 µs  | 176  | 3         |
-| `WorkerPool_Submit_Parallel`           | `SubmitWait`, parallel         | 1.69 µs  | **1.23 µs**  | 1.66 µs  | 176  | 3         |
+| `ObjectPool_GetPut`                    | `sync.Pool` get/put round trip | 23.2 ns  | 17.7 ns | **15.5 ns** | 0 | 0 |
+| `ObjectPool_GetPut_WithReset`          | Get/put with `Reset` callback  | 24.1 ns  | **15.6 ns** | 16.8 ns | 0 | 0 |
+| `ObjectPool_GetPut_Parallel`           | Get/put, 8/4 goroutines        | 50.5 ns  | 86.6 ns | **46.8 ns** | 0 | 0 |
+| `ObjectPool_GetPut_WithReset_Parallel` | Get/put + reset, parallel      | 52.4 ns  | 89.3 ns | **50.3 ns** | 0 | 0 |
+| `Batch_Add`                            | Mutex + slice append           | 15.4 ns  | 14.0 ns | **7.8 ns** | 7 | 0 |
+| `Batch_Add_Parallel`                   | `Add` under contention         | 53.6 ns  | 40.6 ns | **28.0 ns** | 9 | 0 |
+| `WorkerPool_Submit`                    | Fire-and-forget enqueue        | 599.8 ns | **252.2 ns** | 559.8 ns | 48 | 1 |
+| `WorkerPool_SubmitWait`                | Enqueue + result round trip    | 1.29 µs  | **557.2 ns** | 2.11 µs | 176 | 3 |
+| `WorkerPool_Submit_Parallel`           | `SubmitWait`, parallel         | 1.69 µs  | **1.49 µs** | 1.66 µs | 176 | 3 |
 
 
 
@@ -406,9 +404,9 @@ Three environments, two hardware classes, two operating systems. All values are 
 
 **Laptop vs CI server — 1.4–2.1× on ObjectPool and Batch.** `ObjectPool_GetPut`: 23.2 ns (laptop) vs 16.3 ns (Linux) = 1.4×. `Batch_Add`: 15.4 ns vs 7.2 ns = **2.1×**. The i7-10510U's 15W envelope throttles under sustained load; EPYC's stable clocks and wider pipeline dominate on short critical sections. `sync.Pool` and atomic counters scale predictably — parallel overhead is ~2–3× sequential on both platforms.
 
-**WorkerPool is scheduler-bound, not CPU-bound.** `SubmitWait` on Linux CI: 753 ns — a full cross-goroutine round trip (enqueue, worker wakeup, result channel) in under a microsecond. The same benchmark on Windows CI: 2.27 µs (**3× slower**) and on the laptop: 1.29 µs. This spread is goroutine scheduling and channel wakeup latency, not poolx logic. `Submit` (fire-and-forget, no result channel) shows the same pattern: 284 ns (Linux) vs 540 ns (Windows). Use `Submit` when the caller does not need the result; reserve `SubmitWait` for fan-in where the latency cost is acceptable.
+**WorkerPool is scheduler-bound, not CPU-bound.** `SubmitWait` on Linux CI: 557.2 ns — a full cross-goroutine round trip (enqueue, worker wakeup, result channel) in under a microsecond. The same benchmark on Windows CI: 2.1 µs (**3× slower**) and on the laptop: 1.29 µs. This spread is goroutine scheduling and channel wakeup latency, not poolx logic. `Submit` (fire-and-forget, no result channel) shows the same pattern: 252.2 ns (Linux) vs 559.8 ns (Windows). Use `Submit` when the caller does not need the result; reserve `SubmitWait` for fan-in where the latency cost is acceptable.
 
-**Parallel worker scaling is flat by design.** `WorkerPool_Submit_Parallel` (1.23 µs Linux) is within noise of sequential `SubmitWait` (753 ns) scaled by contention — the shared task channel is the coordination point, and 8 workers on the laptop saturate it without per-op degradation beyond the inherent channel cost.
+**Parallel worker scaling is flat by design.** `WorkerPool_Submit_Parallel` (1.5 µs Linux) is within noise of sequential `SubmitWait` (557.2 ns) scaled by contention — the shared task channel is the coordination point, and 8 workers on the laptop saturate it without per-op degradation beyond the inherent channel cost.
 
 **ObjectPool and Batch: 0 allocs/op on all platforms.** The happy path is a `sync.Pool.Get`/`Put` round trip plus two atomic increments (ObjectPool), or a mutex lock + slice append (Batch). The reported B/op on Batch (8 B) is amortized backing-array growth during the benchmark sequence; with a pre-sized buffer, steady-state `Add` is allocation-free.
 

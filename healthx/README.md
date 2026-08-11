@@ -330,7 +330,7 @@ Three environments, two hardware classes, two operating systems. All values are 
 
 |            | Laptop                      | CI Server (Linux)     | CI Server (Windows)        |
 | ---------- | --------------------------- | --------------------- | -------------------------- |
-| CPU        | Intel Core i7-10510U, 4C/8T | AMD EPYC 7763, 4 vCPU | AMD EPYC 9V74, 4 vCPU      |
+| CPU | Intel Core i7-10510U, 4C/8T | Intel Xeon 6973P-C | AMD EPYC 7763 |
 | TDP        | 15W (mobile, throttles)     | 280W (server, stable) | 280W (server, stable)      |
 | OS         | Windows 10 (NTFS)           | Ubuntu (ext4)         | Windows Server 2022 (NTFS) |
 | Go         | 1.24                        | 1.26                  | 1.26                       |
@@ -341,11 +341,11 @@ Three environments, two hardware classes, two operating systems. All values are 
 
 | Benchmark           | What it measures                   | Laptop  | Linux       | Windows | B/op | allocs/op |
 | ------------------- | ---------------------------------- | ------- | ----------- | ------- | ---- | --------- |
-| Liveness            | `atomic.Bool` load + stack Report  | 1 ns    | **1.6 ns**  | 2.0 ns  | 0    | 0         |
-| Readiness_NoChecks  | Report with zero registered checks | 52 ns   | **124 ns**  | 44 ns   | 4    | 1         |
-| Readiness_OneCheck  | One no-op check + full machinery   | 3.2 µs  | **4.8 µs**  | 7.7 µs  | 1456 | 16        |
-| Readiness_TenChecks | Ten concurrent no-op checks        | 18.8 µs | **36.2 µs** | 28.8 µs | 6321 | 81        |
-| Readiness_Parallel  | Four checks, 4 concurrent callers  | 2.4 µs  | **6.0 µs**  | 3.0 µs  | 2853 | 37        |
+| Liveness            | `atomic.Bool` load + stack Report  | 1 ns    | **1.2 ns** | 1.6 ns | 0 | 0 |
+| Readiness_NoChecks  | Report with zero registered checks | 52 ns   | 91.9 ns | **43.2 ns** | 4 | 1 |
+| Readiness_OneCheck  | One no-op check + full machinery   | 3.2 µs  | **3.2 µs** | 7.6 µs | 1456 | 16 |
+| Readiness_TenChecks | Ten concurrent no-op checks        | 18.8 µs | **25.5 µs** | 33.4 µs | 6319 | 81 |
+| Readiness_Parallel  | Four checks, 4 concurrent callers  | 2.4 µs  | 4.0 µs | **3.3 µs** | 2854 | 37 |
 
 
 
@@ -358,11 +358,11 @@ Three environments, two hardware classes, two operating systems. All values are 
 
 **Readiness_NoChecks: fixed Report overhead.** Linux shows 124 ns vs Windows 44 ns — the spread comes from `time.Since` + `Duration.String` (the one allocation) and scheduler timing on an empty check list, not from check fan-out. With no checks there is no goroutine spawn.
 
-**Readiness_OneCheck: ~5–8 µs, 16 allocs — the per-check machinery.** Dominated by `context.WithTimeout` (timer + cancel func), one goroutine, the result channel, the `panix.SafeVoid` deferred frame, the components map, and the one-per-call collection-deadline `time.Timer` that backstops context-ignoring checks. This is the cost of *bounded, panic-safe, concurrent, non-wedgeable* checking. Linux (4.8 µs) vs laptop (3.2 µs): the laptop's higher single-core boost helps the timer/goroutine setup path.
+**Readiness_OneCheck: ~5–8 µs, 16 allocs — the per-check machinery.** Dominated by `context.WithTimeout` (timer + cancel func), one goroutine, the result channel, the `panix.SafeVoid` deferred frame, the components map, and the one-per-call collection-deadline `time.Timer` that backstops context-ignoring checks. This is the cost of *bounded, panic-safe, concurrent, non-wedgeable* checking. Linux (3.2 µs) vs laptop (3.2 µs): the laptop's higher single-core boost helps the timer/goroutine setup path.
 
-**Readiness_TenChecks: sub-linear with check count.** 36.2 µs (Linux) vs 18.8 µs (laptop) for ten checks — ~3.6 µs per check vs 4.8 µs for one, because checks run **concurrently** and the collection timer is amortised. The benchmark uses CPU-bound no-op checks that still serialize on the scheduler; real I/O-bound checks overlap fully and wall-clock latency approaches the single slowest check.
+**Readiness_TenChecks: sub-linear with check count.** 25.5 µs (Linux) vs 18.8 µs (laptop) for ten checks — ~3.6 µs per check vs 4.8 µs for one, because checks run **concurrently** and the collection timer is amortised. The benchmark uses CPU-bound no-op checks that still serialize on the scheduler; real I/O-bound checks overlap fully and wall-clock latency approaches the single slowest check.
 
-**Readiness_Parallel: concurrent callers scale.** 6.0 µs (Linux) for 4 checks with 4 concurrent `Readiness` callers — contention is limited to the `RLock` registry snapshot and atomic counters. Windows (3.0 µs) is faster here due to shorter goroutine scheduling latency on this runner, not fewer allocations (37 allocs/op on both).
+**Readiness_Parallel: concurrent callers scale.** 4.0 µs (Linux) for 4 checks with 4 concurrent `Readiness` callers — contention is limited to the `RLock` registry snapshot and atomic counters. Windows (3.3 µs) is faster here due to shorter goroutine scheduling latency on this runner, not fewer allocations (37 allocs/op on both).
 
 **Allocation floor.** `Liveness` is 0 allocs by design. `Readiness`'s per-check allocations are the architectural minimum for giving each check an independent timeout, an isolated goroutine, and a panic boundary; removing them would mean giving up the timeout, the concurrency, or the panic safety.
 

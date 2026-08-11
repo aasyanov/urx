@@ -431,40 +431,38 @@ Three environments, two hardware classes, two operating systems. All values are 
 
 |            | Laptop                      | CI Server (Linux)             | CI Server (Windows)            |
 | ---------- | --------------------------- | ----------------------------- | ------------------------------ |
-| CPU        | Intel Core i7-10510U, 4C/8T | AMD EPYC 7763, 4 vCPU         | AMD EPYC 9V74, 4 vCPU          |
+| CPU | Intel Core i7-10510U, 4C/8T | Intel Xeon 6973P-C | AMD EPYC 7763 |
 | TDP        | 15W (mobile, throttles)     | 280W (server, stable)         | server, stable                 |
 | OS         | Windows 10                  | Ubuntu                        | Windows Server 2022            |
 | Go         | 1.26                        | 1.26                          | 1.26                           |
 | GOMAXPROCS | 8                           | 4                             | 4                              |
-| Source     | `quality.result`            | `benchmark-ubuntu-latest.txt` | `benchmark-windows-latest.txt` |
-
-
+| Source | `local laptop` | CI benchmark job (count=3) | CI benchmark job (count=3) |
 
 | Benchmark                   | What it measures                         | Laptop   | Linux        | Windows      | B/op | allocs/op |
 | --------------------------- | ---------------------------------------- | -------- | ------------ | ------------ | ---- | --------- |
-| `Execute_Admit`             | Normal priority, ample capacity          | 64.9 ns  | **53.9 ns**  | 57.1 ns      | 48   | 1         |
-| `Execute_Admit_Parallel`    | Admit, 8/4 goroutines                    | 164.1 ns | 136.2 ns     | **90.2 ns**  | 48   | 1         |
-| `Execute_Shed`              | Overloaded `Execute` (returns error)     | 256.2 ns | **213.8 ns** | 289.3 ns     | 80   | 2         |
-| `TryExecute_Admit`          | Admit via boolean API                    | 65.0 ns  | **53.9 ns**  | 60.4 ns      | 48   | 1         |
-| `TryExecute_Admit_Parallel` | `TryExecute` admit, parallel             | 163.2 ns | 135.8 ns     | **106.3 ns** | 48   | 1         |
-| `TryExecute_Shed`           | Overloaded `TryExecute` (no error alloc) | 12.4 ns  | **8.1 ns**   | 8.2 ns       | 0    | 0         |
-| `TryExecute_Shed_Parallel`  | Shed path, parallel                      | 30.0 ns  | **31.8 ns**  | 35.4 ns      | 0    | 0         |
-| `Acquire`                   | Token acquire + release                  | 52.0 ns  | **30.8 ns**  | 39.3 ns      | 16   | 1         |
-| `Acquire_Parallel`          | `Acquire`, parallel                      | 158.9 ns | 126.7 ns     | **99.0 ns**  | 16   | 1         |
-| `Allow`                     | Load check without reservation           | 2.7 ns   | 3.1 ns       | **2.9 ns**   | 0    | 0         |
+| `Execute_Admit`             | Normal priority, ample capacity          | 64.9 ns  | **44.1 ns** | 70.9 ns | 48 | 1 |
+| `Execute_Admit_Parallel`    | Admit, 8/4 goroutines                    | 164.1 ns | 222.8 ns | **79.4 ns** | 48 | 1 |
+| `Execute_Shed`              | Overloaded `Execute` (returns error)     | 256.2 ns | **148.7 ns** | 276.9 ns | 80 | 2 |
+| `TryExecute_Admit`          | Admit via boolean API                    | 65.0 ns  | **44.1 ns** | 69.7 ns | 48 | 1 |
+| `TryExecute_Admit_Parallel` | `TryExecute` admit, parallel             | 163.2 ns | 221.7 ns | **103.3 ns** | 48 | 1 |
+| `TryExecute_Shed`           | Overloaded `TryExecute` (no error alloc) | 12.4 ns  | **7.5 ns** | 8.7 ns | 0 | 0 |
+| `TryExecute_Shed_Parallel`  | Shed path, parallel                      | 30.0 ns  | 43.5 ns | **41.7 ns** | 0 | 0 |
+| `Acquire`                   | Token acquire + release                  | 52.0 ns  | **36.9 ns** | 39.6 ns | 16 | 1 |
+| `Acquire_Parallel`          | `Acquire`, parallel                      | 158.9 ns | 191.9 ns | **71.1 ns** | 16 | 1 |
+| `Allow`                     | Load check without reservation           | 2.7 ns   | **1.5 ns** | 3.4 ns | 0 | 0 |
 
 
 
 
 ### Analysis
 
-**Lock-free hot path — no mutex on admission.** All admission state (`inflight`, counters, `closed`) lives in atomics. `Execute_Admit` on Linux CI: **53.9 ns**, 1 alloc (48 B) — the allocation is the `execution` controller escaping through `panix.Safe`; the CAS reservation, `admitted` increment, and deferred decrement are alloc-free.
+**Lock-free hot path — no mutex on admission.** All admission state (`inflight`, counters, `closed`) lives in atomics. `Execute_Admit` on Linux CI: **44.1 ns**, 1 alloc (48 B) — the allocation is the `execution` controller escaping through `panix.Safe`; the CAS reservation, `admitted` increment, and deferred decrement are alloc-free.
 
-**Parallel admit: CAS retry under contention.** `Execute_Admit_Parallel` is 1.7–3.0× sequential cost depending on platform (54 ns → 90–164 ns). The slowdown is contention on the shared `inflight` counter — under parallelism the CAS loop occasionally retries when two goroutines race the same value. There is no mutex; this is the inherent cost of a single global concurrency counter. Windows CI (9V74) shows lower parallel overhead than Linux 7763 on several benchmarks, consistent with faster atomic operations on the newer core.
+**Parallel admit: CAS retry under contention.** `Execute_Admit_Parallel` is 1.7–3.0× sequential cost depending on platform (44.1 ns → 79.4 ns–222.8 ns). The slowdown is contention on the shared `inflight` counter — under parallelism the CAS loop occasionally retries when two goroutines race the same value. There is no mutex; this is the inherent cost of a single global concurrency counter. Windows CI (EPYC 7763) shows lower parallel overhead than Linux Xeon 6973P-C on several benchmarks, consistent with faster atomic operations on this runner.
 
-**Shed path: alloc-free with** `TryExecute`**, diagnostic-rich with** `Execute`**.** `TryExecute_Shed`: **8 ns**, 0 allocs — increments `shed` and returns `(false, zero, nil)` without constructing `ErrRejected`. `Execute_Shed`: 214–289 ns, 2 allocs — the extra cost is `fmt.Errorf` wrapping the priority into `ErrRejected`. Rejection only fires when the system is already overloaded, so the diagnostic-rich error costs nothing on the hot admit path.
+**Shed path: alloc-free with** `TryExecute`**, diagnostic-rich with** `Execute`**.** `TryExecute_Shed`: **7.5 ns**, 0 allocs — increments `shed` and returns `(false, zero, nil)` without constructing `ErrRejected`. `Execute_Shed`: 148.7 ns–276.9 ns, 2 allocs — the extra cost is `fmt.Errorf` wrapping the priority into `ErrRejected`. Rejection only fires when the system is already overloaded, so the diagnostic-rich error costs nothing on the hot admit path.
 
-**Acquire vs Allow.** `Acquire` (31–52 ns, 1 alloc) hands back a `Token` that must escape to the caller. `Allow` (~3 ns, 0 allocs) is a single atomic load plus float math — a best-effort hint with no reservation. Use `Allow` for edge pre-checks; use `Acquire`/`Execute` when you need a binding slot.
+**Acquire vs Allow.** `Acquire` (36.9 ns–52 ns, 1 alloc) hands back a `Token` that must escape to the caller. `Allow` (~3 ns, 0 allocs) is a single atomic load plus float math — a best-effort hint with no reservation. Use `Allow` for edge pre-checks; use `Acquire`/`Execute` when you need a binding slot.
 
 **Allocation floor.** The admit path's 1 alloc is architectural (the controller). `Allow` and `TryExecute` on the shed path prove the underlying admission decision is alloc-free; the controller and token allocations exist only because those APIs hand an object back to the caller.
 

@@ -362,7 +362,7 @@ Three environments, two hardware classes, two operating systems. All values are 
 
 |            | Laptop                      | CI Server (Linux)     | CI Server (Windows)        |
 | ---------- | --------------------------- | --------------------- | -------------------------- |
-| CPU        | Intel Core i7-10510U, 4C/8T | AMD EPYC 7763, 4 vCPU | AMD EPYC 9V74, 4 vCPU      |
+| CPU | Intel Core i7-10510U, 4C/8T | Intel Xeon 6973P-C | AMD EPYC 7763 |
 | TDP        | 15W (mobile, throttles)     | 280W (server, stable) | 280W (server, stable)      |
 | OS         | Windows 10 (NTFS)           | Ubuntu (ext4)         | Windows Server 2022 (NTFS) |
 | Go         | 1.24                        | 1.26                  | 1.26                       |
@@ -373,12 +373,12 @@ Three environments, two hardware classes, two operating systems. All values are 
 
 | Benchmark                    | What it measures                       | Laptop | Linux       | Windows | B/op | allocs/op |
 | ---------------------------- | -------------------------------------- | ------ | ----------- | ------- | ---- | --------- |
-| Execute_NoHedging            | Sync path, `MaxParallel == 1`          | 57 ns  | **99 ns**   | 63 ns   | 48   | 1         |
-| Execute_PrimaryWins          | Hedged call, primary wins before hedge | 2.0 µs | **1.9 µs**  | 4.9 µs  | 792  | 11        |
-| Execute_PrimaryWins_Parallel | Primary wins, 4 goroutines             | 570 ns | **800 ns**  | 820 ns  | 792  | 11        |
-| ExecuteMulti_PrimaryWins     | `ExecuteMulti`, primary wins           | 2.1 µs | **1.9 µs**  | 5.0 µs  | 792  | 11        |
-| Execute_HedgeWins            | Hedge copy fires and wins              | 5.4 ms | **5.16 ms** | 5.29 ms | 864  | 13        |
-| Delays                       | Delay schedule computation             | 37 ns  | **34 ns**   | 45 ns   | 64   | 1         |
+| Execute_NoHedging            | Sync path, `MaxParallel == 1`          | 57 ns  | **72.4 ns** | 82.7 ns | 48 | 1 |
+| Execute_PrimaryWins          | Hedged call, primary wins before hedge | 2.0 µs | **1.3 µs** | 5.2 µs | 792 | 11 |
+| Execute_PrimaryWins_Parallel | Primary wins, 4 goroutines             | 570 ns | **596.4 ns** | 889.5 ns | 792 | 11 |
+| ExecuteMulti_PrimaryWins     | `ExecuteMulti`, primary wins           | 2.1 µs | **1.2 µs** | 5.0 µs | 792 | 11 |
+| Execute_HedgeWins            | Hedge copy fires and wins              | 5.4 ms | **5149.3 µs** | 5255.9 µs | 865 | 13 |
+| Delays                       | Delay schedule computation             | 37 ns  | **24.5 ns** | 45.0 ns | 64 | 1 |
 
 
 
@@ -389,9 +389,9 @@ Three environments, two hardware classes, two operating systems. All values are 
 
 **Execute_NoHedging: 63–99 ns, 1 alloc.** The synchronous fast path (`MaxParallel == 1`) — no goroutine, channel, cancel context, or timer. The single allocation is the `HedgeController` handed to the callback. Linux (99 ns) is slightly slower than Windows (63 ns) on this micro-benchmark — within scheduler noise for a ~80 ns operation with one heap allocation.
 
-**Execute_PrimaryWins: ~2 µs / 11 allocs — price of being able to race.** The hedged path when the original wins before any hedge fires (the common good case). Allocations are inherent: `context.WithCancel` (2), buffered result channel (1), `delays` slice (1), spawned goroutine + controller, timer. CPU is dominated by `context.WithCancel` and goroutine scheduling, not `hedgex` logic. Windows (4.9 µs) is ~2.6× Linux (1.9 µs) — goroutine and timer setup is structurally heavier on Windows Server in this CI VM.
+**Execute_PrimaryWins: ~2 µs / 11 allocs — price of being able to race.** The hedged path when the original wins before any hedge fires (the common good case). Allocations are inherent: `context.WithCancel` (2), buffered result channel (1), `delays` slice (1), spawned goroutine + controller, timer. CPU is dominated by `context.WithCancel` and goroutine scheduling, not `hedgex` logic. Windows (5.2 µs) is ~4.1× Linux (1.3 µs) — goroutine and timer setup is structurally heavier on Windows Server in this CI VM.
 
-**Execute_PrimaryWins_Parallel: throughput scales.** 800 ns (Linux) vs 1.9 µs serial — `b.RunParallel` amortizes goroutine-creation and context cost across 4 cores. Linux and Windows converge (800 vs 820 ns) under parallel load because the atomic counter contention is negligible (four independent `Add`s).
+**Execute_PrimaryWins_Parallel: throughput scales.** 596.4 ns (Linux) vs 1.3 µs serial — `b.RunParallel` amortizes goroutine-creation and context cost across 4 cores. Linux and Windows converge (596.4 ns vs 889.5 ns) under parallel load because the atomic counter contention is negligible (four independent `Add`s).
 
 **Execute_HedgeWins: ~5.2 ms — dominated by deliberate delay.** When a hedge copy fires and wins while the primary is cancelled. Latency is set by `WithDelay` (5 ms in the benchmark) plus goroutine scheduling — OS-independent within 3%. The extra 2 allocs vs primary-wins come from the losing primary goroutine completing after cancellation.
 

@@ -397,7 +397,7 @@ Three environments, two hardware classes, two operating systems. All values are 
 
 |            | Laptop                      | CI Server (Linux)     | CI Server (Windows)        |
 | ---------- | --------------------------- | --------------------- | -------------------------- |
-| CPU        | Intel Core i7-10510U, 4C/8T | AMD EPYC 7763, 4 vCPU | AMD EPYC 9V74, 4 vCPU      |
+| CPU | Intel Core i7-10510U, 4C/8T | Intel Xeon 6973P-C | AMD EPYC 7763 |
 | TDP        | 15W (mobile, throttles)     | 280W (server, stable) | 280W (server, stable)      |
 | OS         | Windows 10 (NTFS)           | Ubuntu (ext4)         | Windows Server 2022 (NTFS) |
 | Go         | 1.24                        | 1.26                  | 1.26                       |
@@ -412,14 +412,14 @@ Three environments, two hardware classes, two operating systems. All values are 
 
 | Benchmark               | What it measures                  | Laptop | Linux      | Windows | B/op | allocs/op |
 | ----------------------- | --------------------------------- | ------ | ---------- | ------- | ---- | --------- |
-| Cache_Set               | Insert/update fixed key set       | 54 ns  | **73 ns**  | 25 ns   | 0    | 0         |
-| Cache_Get_Hit           | Hit + LRU promote (write lock)    | 58 ns  | **91 ns**  | 40 ns   | 0    | 0         |
-| Cache_Get_Miss          | Miss lookup, no promote           | 37 ns  | **13 ns**  | 14 ns   | 0    | 0         |
-| Cache_GetFast_Hit       | Hit without promotion (read lock) | 34 ns  | **20 ns**  | 19 ns   | 0    | 0         |
-| Cache_Mixed             | 90% read / 10% write              | 62 ns  | **90 ns**  | 40 ns   | 0    | 0         |
-| Cache_Get_Parallel      | Hit under 4 goroutines            | 136 ns | **124 ns** | 83 ns   | 0    | 0         |
-| Cache_GetOrCompute_Hit  | Hit on populated cache            | 74 ns  | **93 ns**  | 57 ns   | 0    | 0         |
-| Cache_GetOrCompute_Miss | Miss + compute closure            | 5.5 µs | **554 ns** | 548 ns  | 174  | 3         |
+| Cache_Set               | Insert/update fixed key set       | 54 ns  | 58.4 ns | **24.0 ns** | 0 | 0 |
+| Cache_Get_Hit           | Hit + LRU promote (write lock)    | 58 ns  | 65.9 ns | **38.3 ns** | 0 | 0 |
+| Cache_Get_Miss          | Miss lookup, no promote           | 37 ns  | 24.0 ns | **12.6 ns** | 0 | 0 |
+| Cache_GetFast_Hit       | Hit without promotion (read lock) | 34 ns  | **17.8 ns** | 20.0 ns | 0 | 0 |
+| Cache_Mixed             | 90% read / 10% write              | 62 ns  | 67.0 ns | **40.4 ns** | 0 | 0 |
+| Cache_Get_Parallel      | Hit under 4 goroutines            | 136 ns | 101.4 ns | **90.2 ns** | 0 | 0 |
+| Cache_GetOrCompute_Hit  | Hit on populated cache            | 74 ns  | 68.5 ns | **46.6 ns** | 0 | 0 |
+| Cache_GetOrCompute_Miss | Miss + compute closure            | 5.5 µs | **387 ns** | 506.5 ns | 166 | 3 |
 
 
 
@@ -429,10 +429,10 @@ Three environments, two hardware classes, two operating systems. All values are 
 
 | Benchmark                 | What it measures                   | Laptop | Linux      | Windows | B/op | allocs/op |
 | ------------------------- | ---------------------------------- | ------ | ---------- | ------- | ---- | --------- |
-| ShardedCache_Get_Parallel | Hit under 4 goroutines, 16 shards  | 55 ns  | **79 ns**  | 50 ns   | 0    | 0         |
-| ShardedCache_Set_Parallel | Insert under 4 goroutines          | 147 ns | **158 ns** | 156 ns  | 55   | 0         |
-| Hasher_String             | `maphash.Comparable` on string key | 11 ns  | **7.2 ns** | 7.7 ns  | 0    | 0         |
-| Hasher_Int                | `maphash.Comparable` on int key    | 8 ns   | **5.9 ns** | 7.3 ns  | 0    | 0         |
+| ShardedCache_Get_Parallel | Hit under 4 goroutines, 16 shards  | 55 ns  | 84.6 ns | **51.0 ns** | 0 | 0 |
+| ShardedCache_Set_Parallel | Insert under 4 goroutines          | 147 ns | 188.2 ns | **155.7 ns** | 50 | 0 |
+| Hasher_String             | `maphash.Comparable` on string key | 11 ns  | **4.1 ns** | 7.5 ns | 0 | 0 |
+| Hasher_Int                | `maphash.Comparable` on int key    | 8 ns   | **3.5 ns** | 5.9 ns | 0 | 0 |
 
 
 
@@ -449,7 +449,7 @@ Three environments, two hardware classes, two operating systems. All values are 
 
 **Bottleneck (single cache): the write lock on Get.** `Cache_Get_Parallel` at 124 ns (Linux) vs 91 ns serial reflects contention when multiple goroutines promote under the write lock. Sharding fixes this: `ShardedCache_Get_Parallel` at 79 ns (Linux) vs 124 ns single-cache parallel — **1.6× faster** because 16 independent locks spread contention.
 
-**Windows often faster on single-cache micro-benchmarks.** `Cache_Set` at 25 ns (Windows) vs 73 ns (Linux) and `Cache_Get_Hit` at 40 ns vs 91 ns — the EPYC 9V74 runner in Windows CI has higher per-core boost on this single-threaded mutex path. This reverses under parallel sharded access where both platforms converge (~50–79 ns).
+**Windows often faster on single-cache micro-benchmarks.** `Cache_Set` at 24.0 ns (Windows) vs 58.4 ns (Linux) and `Cache_Get_Hit` at 38.3 ns vs 65.9 ns — the Xeon 6973P-C runner in Windows CI has higher per-core boost on this single-threaded mutex path. This reverses under parallel sharded access where both platforms converge (~50–79 ns).
 
 **Compute miss path: ~550 ns, 3 allocs.** One for the map insert node, one from the compute closure escape, one from optional eviction bookkeeping. The laptop's older 5.5 µs figure was measured with `-count=1` and includes higher variance; CI medians at ~550 ns are the stable measurement.
 

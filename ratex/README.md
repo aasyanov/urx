@@ -300,20 +300,20 @@ Three environments, two hardware classes, two operating systems. All values are 
 
 | | Laptop | CI Server (Linux) | CI Server (Windows) |
 |---|---|---|---|
-| CPU | Intel Core i7-10510U, 4C/8T | AMD EPYC 7763, 4 vCPU | AMD EPYC 9V74, 4 vCPU |
+| CPU | Intel Core i7-10510U, 4C/8T | Intel Xeon 6973P-C | AMD EPYC 7763 |
 | TDP | 15W (mobile, throttles) | 280W (server, stable) | server, stable |
 | OS | Windows 10 | Ubuntu | Windows Server 2022 |
 | Go | 1.26 | 1.26 | 1.26 |
 | GOMAXPROCS | 8 | 4 | 4 |
-| Source | `quality.result` | `benchmark-ubuntu-latest.txt` | `benchmark-windows-latest.txt` |
+| Source | `local laptop` | CI benchmark job (count=3) | CI benchmark job (count=3) |
 
 | Benchmark | What it measures | Laptop | Linux | Windows | B/op | allocs/op |
 |---|---|---|---|---|---|---|
-| `Allow` | Token-bucket admit (unlimited rate) | 25.3 ns | 87.6 ns | **14.3 ns** | 0 | 0 |
-| `Allow_Parallel` | `Allow`, 8/4 goroutines | 62.0 ns | 108.5 ns | **41.5 ns** | 0 | 0 |
-| `Execute` | Admit + empty callback | 62.2 ns | 121.6 ns | **59.5 ns** | 32 | 1 |
-| `Execute_Parallel` | `Execute`, parallel | 143.5 ns | 169.6 ns | **96.2 ns** | 32 | 1 |
-| `TryExecute` | Boolean admit variant | 58.2 ns | 117.9 ns | **56.6 ns** | 32 | 1 |
+| `Allow` | Token-bucket admit (unlimited rate) | 25.3 ns | 62.2 ns | **14.7 ns** | 0 | 0 |
+| `Allow_Parallel` | `Allow`, 8/4 goroutines | 62.0 ns | 94.2 ns | **41.6 ns** | 0 | 0 |
+| `Execute` | Admit + empty callback | 62.2 ns | 78.5 ns | **59.5 ns** | 32 | 1 |
+| `Execute_Parallel` | `Execute`, parallel | 143.5 ns | 144.9 ns | **94.8 ns** | 32 | 1 |
+| `TryExecute` | Boolean admit variant | 58.2 ns | 77.2 ns | **56.8 ns** | 32 | 1 |
 
 ### Analysis
 
@@ -321,7 +321,7 @@ Three environments, two hardware classes, two operating systems. All values are 
 
 **Single mutex, predictable parallel penalty.** `Allow_Parallel` is 1.6–2.6× slower per op than sequential — the single mutex serialises the critical section, which is the expected and intended trade-off for exact accounting (a lock-free atomic bucket cannot enforce an exact burst bound without CAS retries). Under 8 goroutines on the laptop the penalty is 2.4× (25 → 62 ns); under 4 goroutines on CI it is 1.2–2.9× depending on platform.
 
-**CI Linux vs Windows on Allow — mutex fast-path variance.** Linux CI reports 87.6 ns for sequential `Allow` vs 14.3 ns on Windows CI — a 6× spread on identical-looking server VMs. Both paths execute the same Go code; the gap is EPYC 7763 (Linux) vs EPYC 9V74 (Windows) plus `futex(2)` vs `SRWLock` implementation differences on the uncontended mutex acquire/release. Laptop (25 ns) confirms the true cost is in the tens of nanoseconds, not hundreds — treat the Linux CI figure as an outlier of the runner, not the algorithm.
+**CI Linux vs Windows on Allow — mutex fast-path variance.** Linux CI reports 62.2 ns for sequential `Allow` vs 14.7 ns on Windows CI — a 4.2× spread on identical-looking server VMs. Both paths execute the same Go code; the gap is Xeon 6973P-C (Linux) vs EPYC 7763 (Windows) plus `futex(2)` vs `SRWLock` implementation differences on the uncontended mutex acquire/release. Laptop (25 ns) confirms the true cost is in the tens of nanoseconds, not hundreds — treat the Linux CI figure as an outlier of the runner, not the algorithm.
 
 **Execute / TryExecute: 1 alloc / 32 B is the controller-pattern floor.** The per-call `execution` struct escapes to the heap because it is captured by the closure passed to `panix.Safe` — the same pattern as `retryx`, `bulkx`, and `circuitx`. Callers that do not need the controller or panic safety can use `Allow`/`Wait` for the zero-alloc path. `Execute_Parallel` adds mutex contention on top of the controller allocation; the user function itself still runs outside the lock once admitted.
 

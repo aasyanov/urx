@@ -395,7 +395,7 @@ Three environments, two hardware classes, two operating systems. All values are 
 
 | | Laptop | CI Server (Linux) | CI Server (Windows) |
 |---|---|---|---|
-| CPU | Intel Core i7-10510U, 4C/8T | AMD EPYC 7763, 4 vCPU | AMD EPYC 9V74, 4 vCPU |
+| CPU | Intel Core i7-10510U, 4C/8T | Intel Xeon 6973P-C | AMD EPYC 7763 |
 | TDP | 15W (mobile, throttles) | 280W (server, stable) | server, stable |
 | OS | Windows 10 | Ubuntu | Windows Server 2022 |
 | Go | 1.26.2 | 1.26 | 1.26 |
@@ -406,30 +406,30 @@ Three environments, two hardware classes, two operating systems. All values are 
 
 | Benchmark | What it measures | Laptop | Linux | Windows | B/op | allocs/op |
 |---|---|---|---|---|---|---|
-| Lazy_Get | First / cached `Get` | 14.6 ns | **8.1 ns** | 7.6 ns | 0 | 0 |
-| Lazy_Get_Parallel | `Get`, 8/4 goroutines | 54.2 ns | 27.7 ns | **17.3 ns** | 0 | 0 |
+| Lazy_Get | First / cached `Get` | 14.6 ns | 13.1 ns | **8.2 ns** | 0 | 0 |
+| Lazy_Get_Parallel | `Get`, 8/4 goroutines | 54.2 ns | 54.7 ns | **23.8 ns** | 0 | 0 |
 
 ### Map[K,V]
 
 | Benchmark | What it measures | Laptop | Linux | Windows | B/op | allocs/op |
 |---|---|---|---|---|---|---|
-| Map_Load_Hit | Typed load, key present | 16.0 ns | **14.4 ns** | 14.9 ns | 0 | 0 |
-| Map_Load_Miss | Typed load, key absent | 10.9 ns | 11.0 ns | **10.0 ns** | 0 | 0 |
-| Map_Load_Parallel | Read-only `sync.Map` path | 5.0 ns | **6.4 ns** | 6.8 ns | 0 | 0 |
-| Map_LoadOrStore | First-store fast path | 32.8 ns | **24.1 ns** | 23.9 ns | 0 | 0 |
-| Map_Store | Insert + length track | 77.2 ns | **60.3 ns** | 83.0 ns | 48 | 1 |
-| Map_Store_Parallel | Concurrent stores | 350 ns | **357 ns** | 460 ns | 80 | 3 |
-| Map_Delete | Remove + length dec | 139 ns | **91 ns** | 110 ns | 48 | 1 |
-| Map_Clear | Drain all entries | 1.97 µs | **1.29 µs** | 1.83 µs | 1568 | 21 |
+| Map_Load_Hit | Typed load, key present | 16.0 ns | **8.5 ns** | 15.7 ns | 0 | 0 |
+| Map_Load_Miss | Typed load, key absent | 10.9 ns | **6.0 ns** | 12.4 ns | 0 | 0 |
+| Map_Load_Parallel | Read-only `sync.Map` path | 5.0 ns | **3.9 ns** | 6.8 ns | 0 | 0 |
+| Map_LoadOrStore | First-store fast path | 32.8 ns | **20.1 ns** | 24.1 ns | 0 | 0 |
+| Map_Store | Insert + length track | 77.2 ns | **51.2 ns** | 88.3 ns | 48 | 1 |
+| Map_Store_Parallel | Concurrent stores | 350 ns | **251.5 ns** | 497.6 ns | 79 | 3 |
+| Map_Delete | Remove + length dec | 139 ns | **94.1 ns** | 131.7 ns | 48 | 1 |
+| Map_Clear | Drain all entries | 1.97 µs | **1.13 µs** | 2.07 µs | 1408 | 20 |
 
 ### Group
 
 | Benchmark | What it measures | Laptop | Linux | Windows | B/op | allocs/op |
 |---|---|---|---|---|---|---|
-| Group_Go | One goroutine + errgroup | 1.19 µs | **763 ns** | 1.95 µs | 240 | 5 |
-| Group_Go_Parallel | `Go` from parallel bench | 341 ns | **321 ns** | 358 ns | 240 | 5 |
-| Group_Go_Limited | `Go` with semaphore limit | 3.59 µs | **2.08 µs** | 7.16 µs | 424 | 9 |
-| Group_TryGo | Non-blocking `TryGo` | 1.20 µs | **763 ns** | 2.02 µs | 240 | 5 |
+| Group_Go | One goroutine + errgroup | 1.19 µs | **564.6 ns** | 2.31 µs | 240 | 5 |
+| Group_Go_Parallel | `Go` from parallel bench | 341 ns | **266.1 ns** | 617.8 ns | 240 | 5 |
+| Group_Go_Limited | `Go` with semaphore limit | 3.59 µs | **1.51 µs** | 7.32 µs | 424 | 9 |
+| Group_TryGo | Non-blocking `TryGo` | 1.20 µs | **575.8 ns** | 2.58 µs | 240 | 5 |
 
 ### Analysis
 
@@ -439,11 +439,11 @@ Three environments, two hardware classes, two operating systems. All values are 
 
 **Lazy_Get — 0 allocs, mutex on first init only.** Cached `Get` is ~8 ns on CI (lock + `done` check + return by copy). `Lazy_Get_Parallel` spreads to 17–54 ns because every goroutine hits the same mutex until initialization completes; after warmup, contention drops to the cached path.
 
-**Group_Go — 5 allocs is per-group, not per-task.** Covers `context.WithCancel`, the goroutine, and the `panix.SafeVoid` recover frame. Linux CI (763 ns) is **2.5× faster** than Windows sequential (1.95 µs) — goroutine spawn + scheduler latency on Windows inflates the one-shot `Go` benchmark. `Group_Go_Parallel` (321 ns) amortizes that setup across concurrent iterations.
+**Group_Go — 5 allocs is per-group, not per-task.** Covers `context.WithCancel`, the goroutine, and the `panix.SafeVoid` recover frame. Linux CI (763 ns) is **2.5× faster** than Windows sequential (1.95 µs) — goroutine spawn + scheduler latency on Windows inflates the one-shot `Go` benchmark. `Group_Go_Parallel` (266.1 ns) amortizes that setup across concurrent iterations.
 
-**Group_Go_Limited — 9 allocs, semaphore channel bookkeeping.** 2.08 µs (Linux) vs 7.16 µs (Windows) — the limited variant adds channel send/receive per task; Windows pays a larger penalty on the combined spawn + semaphore path.
+**Group_Go_Limited — 9 allocs, semaphore channel bookkeeping.** 1.5 µs (Linux) vs 7.3 µs (Windows) — the limited variant adds channel send/receive per task; Windows pays a larger penalty on the combined spawn + semaphore path.
 
-**Map_Clear — bulk rebuild cost.** ~1.3 µs on Linux, 21 allocs from draining and re-inserting entries in the benchmark loop; not a per-key hot path.
+**Map_Clear — bulk rebuild cost.** ~1.1 µs on Linux, 21 allocs from draining and re-inserting entries in the benchmark loop; not a per-key hot path.
 
 
 

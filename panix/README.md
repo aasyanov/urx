@@ -378,7 +378,7 @@ Three environments, two hardware classes, two operating systems. All values are 
 
 | | Laptop | CI Server (Linux) | CI Server (Windows) |
 |---|---|---|---|
-| CPU | Intel Core i7-10510U, 4C/8T | AMD EPYC 7763, 4 vCPU | AMD EPYC 9V74, 4 vCPU |
+| CPU | Intel Core i7-10510U, 4C/8T | Intel Xeon 6973P-C | AMD EPYC 7763 |
 | TDP | 15W (mobile, throttles) | 280W (server, stable) | 280W (server, stable) |
 | OS | Windows 10 (NTFS) | Ubuntu (ext4) | Windows Server 2022 (NTFS) |
 | Go | 1.24 | 1.26 | 1.26 |
@@ -389,47 +389,47 @@ Three environments, two hardware classes, two operating systems. All values are 
 
 | Benchmark | Laptop | Linux | Windows | B/op | allocs/op |
 |---|---|---|---|---|---|
-| Safe_NoPanic | 26 ns | **8.1 ns** | 11 ns | 0 | 0 |
-| Safe_NoPanic_Error | 27 ns | **8.2 ns** | 11 ns | 0 | 0 |
-| SafeVoid_NoPanic | 27 ns | **11 ns** | 11 ns | 0 | 0 |
-| Wrap_NoPanic | 32 ns | **8.2 ns** | 11 ns | 0 | 0 |
-| WrapVoid_NoPanic | 50 ns | **11 ns** | 10 ns | 0 | 0 |
-| Safe_NoPanic_Parallel | 8 ns | **3.9 ns** | 3.8 ns | 0 | 0 |
-| SafeVoid_NoPanic_Parallel | 8 ns | **4.4 ns** | 4.8 ns | 0 | 0 |
+| Safe_NoPanic | 26 ns | **5.2 ns** | 8.0 ns | 0 | 0 |
+| Safe_NoPanic_Error | 27 ns | **4.6 ns** | 8.4 ns | 0 | 0 |
+| SafeVoid_NoPanic | 27 ns | **5.2 ns** | 10.3 ns | 0 | 0 |
+| Wrap_NoPanic | 32 ns | **5.1 ns** | 8.3 ns | 0 | 0 |
+| WrapVoid_NoPanic | 50 ns | **5.1 ns** | 10.3 ns | 0 | 0 |
+| Safe_NoPanic_Parallel | 8 ns | **2.5 ns** | 4.1 ns | 0 | 0 |
+| SafeVoid_NoPanic_Parallel | 8 ns | **3.1 ns** | 4.9 ns | 0 | 0 |
 
 ### Panic Path
 
 | Benchmark | Laptop | Linux | Windows | B/op | allocs/op |
 |---|---|---|---|---|---|
-| Safe_Panic | 18 µs | **7.4 µs** | 7.9 µs | 4160 | 2 |
-| SafeVoid_Panic | 27 µs | **8.6 µs** | 9.2 µs | 4160 | 2 |
-| Wrap_Panic | 130 µs | **7.9 µs** | 8.3 µs | 4160 | 2 |
-| WrapVoid_Panic | 43 µs | **9.2 µs** | 9.5 µs | 4160 | 2 |
-| Safe_Panic_Parallel | 38 µs | **11.7 µs** | 11.4 µs | 4160 | 2 |
-| CaptureStack | 36 µs | **4.0 µs** | 4.2 µs | 4096 | 1 |
+| Safe_Panic | 18 µs | **5.0 µs** | 8.0 µs | 4160 | 2 |
+| SafeVoid_Panic | 27 µs | **6.0 µs** | 9.3 µs | 4160 | 2 |
+| Wrap_Panic | 130 µs | **5.4 µs** | 8.9 µs | 4160 | 2 |
+| WrapVoid_Panic | 43 µs | **6.2 µs** | 10.3 µs | 4160 | 2 |
+| Safe_Panic_Parallel | 38 µs | **9.0 µs** | 13.4 µs | 4160 | 2 |
+| CaptureStack | 36 µs | **2.9 µs** | 4.4 µs | 4096 | 1 |
 
 ### Goroutine Path
 
 | Benchmark | Laptop | Linux | Windows | B/op | allocs/op |
 |---|---|---|---|---|---|
-| SafeGo_NoPanic | 2.2 µs | **426 ns** | 1.2 µs | 64 | 1 |
-| SafeGo_Panic | 48 µs | **16.3 µs** | 16.0 µs | 4240 | 4 |
+| SafeGo_NoPanic | 2.2 µs | **321.6 ns** | 1.4 µs | 64 | 1 |
+| SafeGo_Panic | 48 µs | **11.8 µs** | 22.3 µs | 4240 | 4 |
 
 ### Analysis
 
-**Happy path: ~8–11 ns, 0 allocs — the deferred `recover()` tax.** `Safe_NoPanic` at 8.1 ns (Linux) adds approximately 8 ns over a raw function call. The 0-allocation guarantee means `Safe` can be used on hot paths without GC pressure. Linux CI is ~3× faster than the laptop (26 ns) because the EPYC server runs at stable clocks without mobile throttling.
+**Happy path: ~5–8 ns, 0 allocs — the deferred `recover()` tax.** `Safe_NoPanic` at 5.2 ns (Linux) is only a few nanoseconds over a raw function call. The 0-allocation guarantee means `Safe` can be used on hot paths without GC pressure. Linux CI is ~5× faster than the laptop (26 ns) because the Xeon 6973P-C server runs at stable clocks without mobile throttling.
 
-**Parallel scaling: 3–4 ns/op under 4 goroutines.** `Safe_NoPanic_Parallel` at 3.9 ns (Linux) vs 8.1 ns serial — each goroutine has its own deferred closure with no shared mutable state. The sub-serial number is expected from `b.RunParallel` work distribution across P's.
+**Parallel scaling: ~2.5–4 ns/op under 4 goroutines.** `Safe_NoPanic_Parallel` at 2.5 ns (Linux) vs 5.2 ns serial — each goroutine has its own deferred closure with no shared mutable state. The sub-serial number is expected from `b.RunParallel` work distribution across P's.
 
-**Panic path: ~7–12 µs, 2 allocs (4160 B) — dominated by `runtime.Stack`.** ~700× slower than the happy path. The 4096 B buffer allocation + stack walk is the irreducible floor for any stack-capturing recovery mechanism. Linux (7.4 µs) vs laptop (18 µs): server hardware walks stacks faster; the allocation count is identical.
+**Panic path: ~5–13 µs, 2 allocs (4160 B) — dominated by `runtime.Stack`.** ~700× slower than the happy path. The 4096 B buffer allocation + stack walk is the irreducible floor for any stack-capturing recovery mechanism. Linux (5.0 µs) vs laptop (18 µs): server hardware walks stacks faster; the allocation count is identical.
 
-**CaptureStack: 4.0 µs, 1 alloc (4096 B).** Pure `runtime.Stack` cost without the `recover()` overhead. OS-independent within 5%.
+**CaptureStack: 2.9 µs, 1 alloc (4096 B).** Pure `runtime.Stack` cost without the `recover()` overhead. OS-independent within 5%.
 
-**SafeGo_NoPanic: 426 ns (Linux) vs 1.2 µs (Windows) — goroutine launch dominates.** One 64 B allocation for the goroutine descriptor. Suitable for background tasks; not appropriate for per-request hot loops. The Windows CI VM adds ~3× scheduling overhead vs Linux on this micro-benchmark.
+**SafeGo_NoPanic: 321.6 ns (Linux) vs 1.4 µs (Windows) — goroutine launch dominates.** One 64 B allocation for the goroutine descriptor. Suitable for background tasks; not appropriate for per-request hot loops. The Windows CI VM adds ~3× scheduling overhead vs Linux on this micro-benchmark.
 
 **SafeGo_Panic: ~16 µs, 4 allocs.** Two `SafeVoid` layers (fn + onError path) plus goroutine scheduling on the panic path.
 
-**Wrap/WrapVoid: thin closures, no meaningful overhead.** `Wrap_NoPanic` at 8.2 ns vs `Safe_NoPanic` at 8.1 ns — one indirection, negligible in practice.
+**Wrap/WrapVoid: thin closures, no meaningful overhead.** `Wrap_NoPanic` at 5.1 ns vs `Safe_NoPanic` at 5.2 ns — one indirection, negligible in practice.
 
 **Allocation floor on panic path.** 2 allocations (4160 B) is the architectural minimum: 4096 B for the stack buffer + 64 B for the `PanicError` struct. This cannot be reduced without sacrificing stack trace capture.
 

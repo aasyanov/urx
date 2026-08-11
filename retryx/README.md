@@ -314,19 +314,19 @@ Three environments, two hardware classes, two operating systems. All values are 
 
 | | Laptop | CI Server (Linux) | CI Server (Windows) |
 |---|---|---|---|
-| CPU | Intel Core i7-10510U, 4C/8T | AMD EPYC 7763, 4 vCPU | AMD EPYC 9V74, 4 vCPU |
+| CPU | Intel Core i7-10510U, 4C/8T | Intel Xeon 6973P-C | AMD EPYC 7763 |
 | TDP | 15W (mobile, throttles) | 280W (server, stable) | server, stable |
 | OS | Windows 10 | Ubuntu | Windows Server 2022 |
 | Go | 1.26 | 1.26 | 1.26 |
 | GOMAXPROCS | 8 | 4 | 4 |
-| Source | `quality.result` | `benchmark-ubuntu-latest.txt` | `benchmark-windows-latest.txt` |
+| Source | `local laptop` | CI benchmark job (count=3) | CI benchmark job (count=3) |
 
 | Benchmark | What it measures | Laptop | Linux | Windows | B/op | allocs/op |
 |---|---|---|---|---|---|---|
-| `Do_Success` | First-attempt success | 102.4 ns | 145.1 ns | **117.1 ns** | 128 | 2 |
-| `Do_Success_Parallel` | Success, 8/4 goroutines | **72.8 ns** | 73.3 ns | 91.8 ns | 128 | 2 |
-| `Do_SuccessAfterOneRetry` | Fail once, 1 ns backoff | 463.8 µs | **584.2 ns** | 550.4 µs | 440 | 6 |
-| `Backoff` | Delay calculation only | 27.1 ns | **25.2 ns** | 25.8 ns | 0 | 0 |
+| `Do_Success` | First-attempt success | 102.4 ns | **91.3 ns** | 111.7 ns | 128 | 2 |
+| `Do_Success_Parallel` | Success, 8/4 goroutines | **72.8 ns** | 47.2 ns | 100.4 ns | 128 | 2 |
+| `Do_SuccessAfterOneRetry` | Fail once, 1 ns backoff | 463.8 µs | **403.8 ns** | 545.1 µs | 440 | 6 |
+| `Backoff` | Delay calculation only | 27.1 ns | **15.4 ns** | 25.8 ns | 0 | 0 |
 
 ### Analysis
 
@@ -334,7 +334,7 @@ Three environments, two hardware classes, two operating systems. All values are 
 
 **Do_Success_Parallel scales cleanly.** 73–92 ns per op under parallelism — the path takes no lock and touches no shared counter, so it scales across cores. `math/rand/v2` is not even reached on the success path. Laptop sequential (102 ns) is slightly slower than parallel (73 ns) due to benchmark loop overhead at low iteration counts.
 
-**Do_SuccessAfterOneRetry: OS timer resolution dominates — not CPU.** Configured with `WithBackoff(time.Nanosecond)` and jitter disabled, yet Linux CI completes in **584 ns** while Windows CI and the laptop take **463–550 µs**. On Linux, `time.NewTimer` with a 1 ns duration can fire immediately when the runtime coalesces sub-millisecond timers; on Windows the OS timer granularity (~0.5–1 ms) forces a real sleep. This benchmark measures wall-clock backoff, not retry logic — the 6 allocs (440 B) are the timer, error wrapping, and controller overhead, negligible next to the sleep on Windows.
+**Do_SuccessAfterOneRetry: OS timer resolution dominates — not CPU.** Configured with `WithBackoff(time.Nanosecond)` and jitter disabled, yet Linux CI completes in **403.8 ns** while Windows CI and the laptop take **463–545.1 µs**. On Linux, `time.NewTimer` with a 1 ns duration can fire immediately when the runtime coalesces sub-millisecond timers; on Windows the OS timer granularity (~0.5–1 ms) forces a real sleep. This benchmark measures wall-clock backoff, not retry logic — the 6 allocs (440 B) are the timer, error wrapping, and controller overhead, negligible next to the sleep on Windows.
 
 **Backoff: 0 allocs, ~25 ns — pure compute.** Float math plus one `math/rand/v2` call; no heap involvement. This is the per-retry scheduling cost, dwarfed by any realistic sleep interval.
 

@@ -295,7 +295,7 @@ Three environments, two hardware classes, two operating systems. All values are 
 
 |            | Laptop                      | CI Server (Linux)     | CI Server (Windows)   |
 | ---------- | --------------------------- | --------------------- | --------------------- |
-| CPU        | Intel Core i7-10510U, 4C/8T | AMD EPYC 7763, 4 vCPU | AMD EPYC 9V74, 4 vCPU |
+| CPU | Intel Core i7-10510U, 4C/8T | Intel Xeon 6973P-C | AMD EPYC 7763 |
 | TDP        | 15W (mobile, throttles)     | 280W (server, stable) | server, stable        |
 | OS         | Windows 10                  | Ubuntu                | Windows Server 2022   |
 | Go         | 1.26.2                      | 1.26                  | 1.26                  |
@@ -310,32 +310,32 @@ Three environments, two hardware classes, two operating systems. All values are 
 
 | Benchmark                    | What it measures      | Laptop      | Linux       | Windows | B/op | allocs/op |
 | ---------------------------- | --------------------- | ----------- | ----------- | ------- | ---- | --------- |
-| Parse_YAML                   | yaml.v3 decode        | **6.59 µs** | 7.74 µs     | 9.22 µs | 7472 | 54        |
-| Parse_JSON                   | stdlib JSON decode    | **823 ns**  | 854 ns      | 915 ns  | 272  | 7         |
-| Parse_TOML                   | BurntSushi decode     | **4.22 µs** | 4.53 µs     | 5.59 µs | 3544 | 37        |
-| Parse_JSON_Parallel          | JSON decode, parallel | **389 ns**  | 393 ns      | 467 ns  | 272  | 7         |
-| Marshal_YAML                 | yaml.v3 encode        | 4.30 µs     | **3.91 µs** | 5.76 µs | 6832 | 27        |
-| Marshal_JSON                 | stdlib JSON encode    | **497 ns**  | 508 ns      | 496 ns  | 96   | 2         |
-| Load_InjectedReader          | Parse via `io.Reader` | **6.81 µs** | 6.88 µs     | 9.70 µs | 7472 | 54        |
-| Load_InjectedReader_Parallel | Load, parallel        | 6.01 µs     | **4.31 µs** | 6.80 µs | 7472 | 54        |
-| ResolveFormat                | Extension → `Format`  | **13.8 ns** | 14.6 ns     | 14.3 ns | 0    | 0         |
+| Parse_YAML                   | yaml.v3 decode        | **6.59 µs** | 4.23 µs | 9.94 µs | 7472 | 54 |
+| Parse_JSON                   | stdlib JSON decode    | **823 ns**  | 509.2 ns | 1010 ns | 272 | 7 |
+| Parse_TOML                   | BurntSushi decode     | **4.22 µs** | 2.54 µs | 5.72 µs | 3544 | 37 |
+| Parse_JSON_Parallel          | JSON decode, parallel | **389 ns**  | 223 ns | 506.5 ns | 272 | 7 |
+| Marshal_YAML                 | yaml.v3 encode        | 4.30 µs     | **2.66 µs** | 5.84 µs | 6832 | 27 |
+| Marshal_JSON                 | stdlib JSON encode    | **497 ns**  | 298.7 ns | 547.2 ns | 96 | 2 |
+| Load_InjectedReader          | Parse via `io.Reader` | **6.81 µs** | 4.35 µs | 10.02 µs | 7472 | 54 |
+| Load_InjectedReader_Parallel | Load, parallel        | 6.01 µs     | **2.71 µs** | 8.52 µs | 7472 | 54 |
+| ResolveFormat                | Extension → `Format`  | **13.8 ns** | 11.5 ns | 14.2 ns | 0 | 0 |
 
 
 
 
 ### Analysis
 
-**JSON is an order of magnitude cheaper than YAML.** `Parse_JSON` (~~850 ns, 7 allocs) vs~~ `Parse_YAML` ~~(~~7.7 µs, 54 allocs) on Linux CI. The stdlib decoder reuses buffers aggressively; yaml.v3 builds an intermediate node tree that dominates both time and heap traffic. TOML sits between (~4.5 µs, 37 allocs).
+**JSON is an order of magnitude cheaper than YAML.** `Parse_JSON` (509.2 ns, 7 allocs) vs `Parse_YAML` (4.2 µs, 54 allocs) on Linux CI. The stdlib decoder reuses buffers aggressively; yaml.v3 builds an intermediate node tree that dominates both time and heap traffic. TOML sits between (~4.5 µs, 37 allocs).
 
-**Linux wins decode; laptop wins YAML on this run.** Linux CI is ~15% faster on YAML parse (7.74 µs vs 9.22 µs Windows) and ~7% on JSON. The laptop beat both CI platforms on YAML decode (6.59 µs) — likely turbo on a cold, short benchmark — but CI medians are more stable for regression tracking.
+**Linux wins decode; laptop wins YAML on this run.** Linux CI is faster on YAML parse (4.2 µs vs 9.9 µs Windows) and ~7% on JSON. The laptop beat both CI platforms on YAML decode (6.59 µs) — likely turbo on a cold, short benchmark — but CI medians are more stable for regression tracking.
 
-**Marshal_JSON is flat across all three environments (~500 ns, 2 allocs).** Encode is CPU-bound and OS-independent; differences are within noise. `Marshal_YAML` spreads wider (3.9 µs Linux vs 5.8 µs Windows) because yaml.v3 reflection work amplifies small CPU/OS gaps.
+**Marshal_JSON is flat across all three environments (~500 ns, 2 allocs).** Encode is CPU-bound and OS-independent; differences are within noise. `Marshal_YAML` spreads wider (2.7 µs Linux vs 5.8 µs Windows) because yaml.v3 reflection work amplifies small CPU/OS gaps.
 
 **ResolveFormat is 0 allocs / ~14 ns** — extension detection is a lowercase pass + switch, completely off the decode hot path.
 
 **Load_InjectedReader ≈ Parse + reader overhead.** The delta over bare `Parse_YAML` is the injected reader call and the reflect-based pointer check in `requirePointer` — both paid once per load.
 
-**Parallel benchmarks confirm statelessness.** `Parse_JSON_Parallel` scales to ~390 ns/op on CI because each goroutine owns its own `dst` — no mutex, no shared cache. `Load_InjectedReader_Parallel` is faster than serial on Linux (4.3 µs vs 6.9 µs) because four decoders saturate cores; laptop parallel load (6.0 µs) does not beat serial due to memory bandwidth limits on 15W silicon.
+**Parallel benchmarks confirm statelessness.** `Parse_JSON_Parallel` scales to ~223 ns/op on CI because each goroutine owns its own `dst` — no mutex, no shared cache. `Load_InjectedReader_Parallel` is faster than serial on Linux (2.7 µs vs 4.3 µs) because four decoders saturate cores; laptop parallel load (6.0 µs) does not beat serial due to memory bandwidth limits on 15W silicon.
 
 **Allocation floor is the codec's, not cfgx's.** cfgx adds a handful of allocations (option closures, validator interface check); everything else is the third-party decoder. Config loading runs once at startup — pick JSON when format choice is yours.
 

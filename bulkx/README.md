@@ -320,7 +320,7 @@ Three environments, two hardware classes, two operating systems. All values are 
 
 | | Laptop | CI Server (Linux) | CI Server (Windows) |
 |---|---|---|---|
-| CPU | Intel Core i7-10510U, 4C/8T | AMD EPYC 7763, 4 vCPU | AMD EPYC 9V74, 4 vCPU |
+| CPU | Intel Core i7-10510U, 4C/8T | Intel Xeon 6973P-C | AMD EPYC 7763 |
 | TDP | 15W (mobile, throttles) | 280W (server, stable) | server, stable |
 | OS | Windows 10 | Ubuntu | Windows Server 2022 |
 | Go | 1.26.2 | 1.26 | 1.26 |
@@ -331,13 +331,13 @@ Three environments, two hardware classes, two operating systems. All values are 
 
 | Benchmark | What it measures | Laptop | Linux | Windows | B/op | allocs/op |
 |---|---|---|---|---|---|---|
-| Execute | Admit + callback + release | 97.5 ns | **77.3 ns** | 78.0 ns | 24 | 1 |
-| Execute_Parallel | Execute, 8/4 goroutines | 240 ns | **158 ns** | 160 ns | 24 | 1 |
-| Execute_Reject | Full bulkhead, non-blocking reject | 12.6 ns | **8.2 ns** | 8.4 ns | 0 | 0 |
-| TryExecute | Non-blocking execute | 102 ns | **74.7 ns** | 76.5 ns | 24 | 1 |
-| Acquire | Token hand-off (no callback) | 83.8 ns | **65.3 ns** | 65.1 ns | 16 | 1 |
-| Acquire_Parallel | Acquire, 8/4 goroutines | 206 ns | **138 ns** | 136 ns | 16 | 1 |
-| Allow | Best-effort slot check | **1.3 ns** | 1.7 ns | 1.8 ns | 0 | 0 |
+| Execute | Admit + callback + release | 97.5 ns | **66.4 ns** | 81.2 ns | 24 | 1 |
+| Execute_Parallel | Execute, 8/4 goroutines | 240 ns | 182.2 ns | **155.8 ns** | 24 | 1 |
+| Execute_Reject | Full bulkhead, non-blocking reject | 12.6 ns | **7.7 ns** | 9.9 ns | 0 | 0 |
+| TryExecute | Non-blocking execute | 102 ns | **63.0 ns** | 80.5 ns | 24 | 1 |
+| Acquire | Token hand-off (no callback) | 83.8 ns | **55.4 ns** | 68.3 ns | 16 | 1 |
+| Acquire_Parallel | Acquire, 8/4 goroutines | 206 ns | 144.2 ns | **140 ns** | 16 | 1 |
+| Allow | Best-effort slot check | **1.3 ns** | 0.7 ns | 1.8 ns | 0 | 0 |
 
 ### Analysis
 

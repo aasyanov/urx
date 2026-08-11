@@ -348,7 +348,7 @@ Three environments, two hardware classes, two operating systems. All values are 
 
 | | Laptop | CI Server (Linux) | CI Server (Windows) |
 |---|---|---|---|
-| CPU | Intel Core i7-10510U, 4C/8T | AMD EPYC 7763, 4 vCPU | AMD EPYC 9V74, 4 vCPU |
+| CPU | Intel Core i7-10510U, 4C/8T | Intel Xeon 6973P-C | AMD EPYC 7763 |
 | TDP | 15W (mobile, throttles) | 280W (server, stable) | 280W (server, stable) |
 | OS | Windows 10 (NTFS) | Ubuntu (ext4) | Windows Server 2022 (NTFS) |
 | Go | 1.24 | 1.26 | 1.26 |
@@ -359,13 +359,13 @@ This gives three comparison axes: **laptop vs server** (hardware scaling), **Lin
 
 | Benchmark | What it measures | Laptop | Linux | Windows | B/op | allocs/op |
 |---|---|---|---|---|---|---|
-| Execute_StaticSuccess | Primary succeeds, no fallback | 52 ns | **50 ns** | 82 ns | 48 | 1 |
-| Execute_StaticSuccess_Parallel | Static success, 4 goroutines | 61 ns | **57 ns** | 69 ns | 48 | 1 |
-| Execute_StaticFallback | Static fallback on failure | 61 ns | **52 ns** | 76 ns | 48 | 1 |
-| Execute_FuncFallback | Func fallback on failure | 75 ns | **64 ns** | 88 ns | 48 | 1 |
-| Execute_CachedHit | Cache hit after prior store | 116 ns | **154 ns** | 128 ns | 48 | 1 |
-| Execute_CachedHit_Parallel | Cache hit, 4 goroutines | 215 ns | **205 ns** | 166 ns | 48 | 1 |
-| Execute_CachedStore | Cache miss + store on fallback | 112 ns | **146 ns** | 125 ns | 48 | 1 |
+| Execute_StaticSuccess | Primary succeeds, no fallback | 52 ns | **36.0 ns** | 61.0 ns | 48 | 1 |
+| Execute_StaticSuccess_Parallel | Static success, 4 goroutines | 61 ns | 96.8 ns | **72.7 ns** | 48 | 1 |
+| Execute_StaticFallback | Static fallback on failure | 61 ns | **41.0 ns** | 72.0 ns | 48 | 1 |
+| Execute_FuncFallback | Func fallback on failure | 75 ns | **45.4 ns** | 81.6 ns | 48 | 1 |
+| Execute_CachedHit | Cache hit after prior store | 116 ns | **110 ns** | 128 ns | 48 | 1 |
+| Execute_CachedHit_Parallel | Cache hit, 4 goroutines | 215 ns | 191.4 ns | **170.9 ns** | 48 | 1 |
+| Execute_CachedStore | Cache miss + store on fallback | 112 ns | **106.5 ns** | 118.2 ns | 48 | 1 |
 
 ### Analysis
 

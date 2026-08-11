@@ -358,23 +358,21 @@ Three environments, two hardware classes, two operating systems. All values are 
 
 |            | Laptop                      | CI Server (Linux)             | CI Server (Windows)            |
 | ---------- | --------------------------- | ----------------------------- | ------------------------------ |
-| CPU        | Intel Core i7-10510U, 4C/8T | AMD EPYC 7763, 4 vCPU         | AMD EPYC 9V74, 4 vCPU          |
+| CPU | Intel Core i7-10510U, 4C/8T | Intel Xeon 6973P-C | AMD EPYC 7763 |
 | TDP        | 15W (mobile, throttles)     | 280W (server, stable)         | server, stable                 |
 | OS         | Windows 10                  | Ubuntu                        | Windows Server 2022            |
 | Go         | 1.26                        | 1.26                          | 1.26                           |
 | GOMAXPROCS | 8                           | 4                             | 4                              |
-| Source     | `quality.result`            | `benchmark-ubuntu-latest.txt` | `benchmark-windows-latest.txt` |
-
-
+| Source | `local laptop` | CI benchmark job (count=3) | CI benchmark job (count=3) |
 
 | Benchmark                  | What it measures                 | Laptop       | Linux        | Windows  | B/op | allocs/op |
 | -------------------------- | -------------------------------- | ------------ | ------------ | -------- | ---- | --------- |
-| `RunHook`                  | Single hook via `panix.SafeVoid` | **13.0 ns**  | 14.3 ns      | 14.0 ns  | 0    | 0         |
-| `OnShutdown`               | Global hook registration         | **51.7 ns**  | 69.5 ns      | 55.9 ns  | 48   | 0         |
-| `Wait_NoHooks`             | Full drain, no hooks             | 636.3 ns     | **608.7 ns** | 693.8 ns | 376  | 7         |
-| `Wait_SingleHook`          | Drain with one hook              | 680.6 ns     | **651.7 ns** | 786.1 ns | 384  | 8         |
-| `Wait_TenHooks`            | Drain with ten hooks             | 848.7 ns     | **838.4 ns** | 990.0 ns | 456  | 8         |
-| `Wait_SingleHook_Parallel` | Drain, 8/4 goroutines            | **417.9 ns** | 484.8 ns     | 474.8 ns | 384  | 8         |
+| `RunHook`                  | Single hook via `panix.SafeVoid` | **13.0 ns**  | 6.8 ns | 13.7 ns | 0 | 0 |
+| `OnShutdown`               | Global hook registration         | **51.7 ns**  | 44.8 ns | 60.3 ns | 40 | 0 |
+| `Wait_NoHooks`             | Full drain, no hooks             | 636.3 ns     | **482.2 ns** | 726.3 ns | 376 | 7 |
+| `Wait_SingleHook`          | Drain with one hook              | 680.6 ns     | **486.8 ns** | 803.7 ns | 384 | 8 |
+| `Wait_TenHooks`            | Drain with ten hooks             | 848.7 ns     | **597.5 ns** | 1062.0 ns | 456 | 8 |
+| `Wait_SingleHook_Parallel` | Drain, 8/4 goroutines            | **417.9 ns** | 300.8 ns | 512.9 ns | 384 | 8 |
 
 
 

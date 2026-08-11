@@ -280,7 +280,7 @@ Three environments, two hardware classes, two operating systems. All values are 
 
 |            | Laptop                      | CI Server (Linux)     | CI Server (Windows)   |
 | ---------- | --------------------------- | --------------------- | --------------------- |
-| CPU        | Intel Core i7-10510U, 4C/8T | AMD EPYC 7763, 4 vCPU | AMD EPYC 9V74, 4 vCPU |
+| CPU | Intel Core i7-10510U, 4C/8T | Intel Xeon 6973P-C | AMD EPYC 7763 |
 | TDP        | 15W (mobile, throttles)     | 280W (server, stable) | server, stable        |
 | OS         | Windows 10                  | Ubuntu                | Windows Server 2022   |
 | Go         | 1.26.2                      | 1.26                  | 1.26                  |
@@ -295,15 +295,15 @@ No `_Parallel` benchmarks — binding is a cold startup path on a single gorouti
 
 | Benchmark     | What it measures            | Laptop     | Linux      | Windows | B/op | allocs/op |
 | ------------- | --------------------------- | ---------- | ---------- | ------- | ---- | --------- |
-| Bind_Int      | Parse + store `Var[int]`    | 134 ns     | **129 ns** | 130 ns  | 160  | 1         |
-| Bind_String   | Parse + store `Var[string]` | **120 ns** | 142 ns     | 128 ns  | 178  | 1         |
-| Bind_Duration | `time.ParseDuration` path   | 177 ns     | **170 ns** | 161 ns  | 174  | 1         |
-| Bind_List     | Split + parse slice         | 341 ns     | **353 ns** | 344 ns  | 348  | 3         |
-| Bind_Absent   | Lookup miss, no parse       | **112 ns** | 112 ns     | 119 ns  | 168  | 1         |
-| Bind_Time     | RFC3339 parse               | **157 ns** | 170 ns     | 184 ns  | 195  | 1         |
-| Validate      | Cross-field check           | 356 ns     | **316 ns** | 400 ns  | 184  | 6         |
-| Parse_Int     | Internal int parse only     | **9.4 ns** | 9.8 ns     | 11.3 ns | 0    | 0         |
-| Parse_Time    | Internal time parse only    | **40 ns**  | 38 ns      | 47 ns   | 0    | 0         |
+| Bind_Int      | Parse + store `Var[int]`    | 134 ns     | **98.8 ns** | 155.6 ns | 172 | 1 |
+| Bind_String   | Parse + store `Var[string]` | **120 ns** | 88.9 ns | 145.9 ns | 166 | 1 |
+| Bind_Duration | `time.ParseDuration` path   | 177 ns     | **126.5 ns** | 193.4 ns | 177 | 1 |
+| Bind_List     | Split + parse slice         | 341 ns     | **229.9 ns** | 384.6 ns | 348 | 3 |
+| Bind_Absent   | Lookup miss, no parse       | **112 ns** | 86.4 ns | 120.9 ns | 164 | 1 |
+| Bind_Time     | RFC3339 parse               | **157 ns** | 114.5 ns | 180 ns | 179 | 1 |
+| Validate      | Cross-field check           | 356 ns     | **214.1 ns** | 417 ns | 184 | 6 |
+| Parse_Int     | Internal int parse only     | **9.4 ns** | 7.3 ns | 9.1 ns | 0 | 0 |
+| Parse_Time    | Internal time parse only    | **40 ns**  | 28.4 ns | 40.9 ns | 0 | 0 |
 
 
 
