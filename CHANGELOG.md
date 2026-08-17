@@ -7,7 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-This Unreleased payload is intended to ship as **1.5.2** (sole consumer; breaking resilience contracts are intentional).
+## [1.5.2] — 2026-08-17
+
+Sole consumer; breaking resilience contracts in this minor are intentional.
 
 ### Breaking
 
@@ -366,6 +368,8 @@ Initial public release.
 - `gopkg.in/yaml.v3`
 - `github.com/BurntSushi/toml`
 
+[Unreleased]: https://github.com/aasyanov/urx/compare/v1.5.2...HEAD
+[1.5.2]: https://github.com/aasyanov/urx/compare/v1.5.1...v1.5.2
 [1.5.1]: https://github.com/aasyanov/urx/compare/v1.5.0...v1.5.1
 [1.5.0]: https://github.com/aasyanov/urx/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/aasyanov/urx/compare/v1.3.0...v1.4.0

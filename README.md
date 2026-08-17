@@ -190,17 +190,17 @@ Detailed API tables, benchmarks, pitfalls, and file trees are in each package RE
 
 | Package | One-line | Typical use |
 | ------- | -------- | ----------- |
-| [retryx](retryx/) | Exponential backoff + jitter + `WithRetryIf` | Transient downstream failures |
-| [circuitx](circuitx/) | Closed → open → half-open breaker | Fail fast; probe recovery |
-| [bulkx](bulkx/) | Semaphore bulkhead | Cap concurrent calls to one dependency |
-| [shedx](shedx/) | Priority-based load shedding | Protect service under overload |
-| [adaptx](adaptx/) | AIMD / Vegas / Gradient adaptive limit | Auto-tune concurrency from latency |
-| [hedgex](hedgex/) | Hedged speculative requests | Cut tail latency on idempotent reads |
-| [toutx](toutx/) | Deadline wrapper (goroutine + timer) | Per-attempt or call timeout |
-| [fallx](fallx/) | Static, func, or cached fallback | Degrade when primary fails |
-| [ratex](ratex/) | Global token-bucket limiter | Process-wide or handler rate cap |
-| [quotax](quotax/) | Per-key token buckets + eviction | Tenant/user/API-key limits |
-| [warmupx](warmupx/) | Slow-start capacity ramp | Roll out new instances gradually |
+| [retryx](retryx/) | Backoff + jitter; **retries every error** until `WithRetryIf` / `Abort` | Transient downstream failures |
+| [circuitx](circuitx/) | **Consecutive**-failure Closed→Open→HalfOpen (not a rate window) | Fail fast; probe recovery |
+| [bulkx](bulkx/) | Semaphore bulkhead; `TryExecute` does not barge waiters | Cap concurrent calls to one dependency |
+| [shedx](shedx/) | Priority shedder; **Critical is never shed**; optional hysteresis | Protect service under overload |
+| [adaptx](adaptx/) | **Windowed** AIMD / Vegas / Gradient concurrency servo | Auto-tune concurrency from latency |
+| [hedgex](hedgex/) | Hedged copies; first success wins; `Cancel` is that copy's ctx | Cut tail latency on idempotent reads |
+| [toutx](toutx/) | Deadline wrapper; Go does not kill `fn`; inner timeouts propagate | Per-attempt or call timeout |
+| [fallx](fallx/) | Static / func / cached fallback; **primary always hits origin** | Degrade when primary fails |
+| [ratex](ratex/) | Process-local token bucket; `WaitN(n > burst)` fails immediately | Process-wide or handler rate cap |
+| [quotax](quotax/) | Per-key buckets; Wait/Execute pins so eviction cannot split a key | Tenant/user/API-key limits |
+| [warmupx](warmupx/) | Process-local Bernoulli ramp; `Close` rejects, `Stop` freeze-and-admits | Roll out new instances gradually |
 
 ### Infrastructure
 
@@ -216,9 +216,9 @@ Detailed API tables, benchmarks, pitfalls, and file trees are in each package RE
 
 | Package | One-line | Typical use |
 | ------- | -------- | ----------- |
-| [cfgx](cfgx/) | Load/save struct ↔ YAML/JSON/TOML | File-backed config |
-| [envx](envx/) | Typed env binding (generics) | 12-factor overrides at boot |
-| [clix](clix/) | Flags + subcommands | CLI entrypoints and dev overrides |
+| [cfgx](cfgx/) | Load/save YAML/JSON/TOML + nested `Validator` walk | File-backed config |
+| [envx](envx/) | Typed `Bind`; opt-in `Walk` / `BindField` | 12-factor overrides at boot |
+| [clix](clix/) | Flags + subcommands; `WithHelpLabels` for help chrome | CLI entrypoints and dev overrides |
 
 ### Boot vs runtime
 
@@ -403,7 +403,7 @@ URX separates **cheap checks** from **Execute wrappers**.
 
 Reject paths are optimized: e.g. `shedx.TryExecute` when shedding returns **0 allocs**; `bulkx.TryExecute` on a full bulkhead likewise.
 
-CI snapshot (`-benchmem -count=3`, medians; Linux **Intel Xeon 6973P-C**, Windows **AMD EPYC 7763**):
+CI snapshot from **1.5.0** (`-benchmem -count=3`, medians; Linux **Intel Xeon 6973P-C**, Windows **AMD EPYC 7763**). **0 allocs/op** on these check/reject paths is the contract; nanosecond figures are hardware-specific and were not re-run for 1.5.2:
 
 | Hot path | Linux | Windows | allocs/op |
 | -------- | ----- | ------- | --------- |
@@ -463,7 +463,7 @@ URX uses a **gate pipeline** — craft gates 0–5 plus Gate M (mission proof). 
 | Metric | Value |
 | ------ | ----- |
 | Public packages | 20 |
-| Statement coverage | ≥90% ship bar (CI); measured **98.5%** with `-race` |
+| Statement coverage | ≥90% ship bar (CI); last published total **98.5%** (`-race`, 1.5.0) |
 | `golangci-lint` | 0 issues |
 | Fuzz targets | 52 across packages |
 | CI | Lint + OS×Go 1.24–1.26 test matrix + fuzz discover + bench on `main` ([ci.yml](.github/workflows/ci.yml)) |
@@ -490,7 +490,9 @@ Contributing workflow: bring one package to Gate M+5 per focused change — audi
 
 ## Versioning
 
-- **1.5.2** (Unreleased) — resilience 8+ pass plus re-audit polish: windowed adaptx laws (Gradient first window holds; `Close()` does not wait), fail-fast `WaitN`, pin-count quotax (`Remove`/`Reset` skip pins), consecutive circuitx generation (heal+Reset), hysteresis that actually sheds in-band, fallback/retry/hedge/bulk/toutx contract fixes. Breaking details in [CHANGELOG.md](CHANGELOG.md).
+- **1.5.2** — resilience 8+: windowed adaptx (first Gradient window holds; `Close()` does not wait), fail-fast `WaitN`, pin-safe quotax, consecutive circuitx generation (heal + every `Reset`), hysteresis that sheds in-band, fallx/retryx/hedgex/bulkx/toutx/warmupx contract fixes. Same release: `clix` `WithHelpLabels`, nested `cfgx.Validate`, `envx` `Walk`/`BindField`. Breaking details in [CHANGELOG.md](CHANGELOG.md).
+- **1.5.1** — `circuitx.WithSuccessThreshold` (consecutive HalfOpen successes to heal).
+- **1.5.0** — ship-kit / CI / English docs; `ratex`/`quotax` honor fractional rates below 1.0 req/s.
 - **1.4.0** — greenfield rewrite: flat imports, sentinel errors, expanded controllers, removed packages from ≤1.3.0 (`errx`, `dicx`, `logx`, …). Details in [CHANGELOG.md](CHANGELOG.md).
 - Pin a version in `go.mod`. Releases through 1.3.0 are a different library surface; upgrading to 1.4.0+ requires code changes.
 
