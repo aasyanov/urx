@@ -29,6 +29,9 @@ func FuzzParse(f *testing.F) {
 		_, _ = parse[time.Duration](raw)
 		_, _ = parse[time.Time](raw)
 		_, _ = parse[[]string](raw)
+
+		type namedStr string
+		_, _ = parse[namedStr](raw)
 	})
 }
 
@@ -47,5 +50,16 @@ func FuzzBindValidate(f *testing.F) {
 		Bind(env, key, []string(nil))
 		_ = env.Validate()
 		_ = env.Vars()
+
+		type leaf struct {
+			D time.Duration `env:"D"`
+			N int64         `env:"N"`
+		}
+		cfg := leaf{}
+		walkEnv := New(WithLookup(MapLookup(map[string]string{"D": val, "N": val})))
+		for f := range Walk(&cfg) {
+			BindField(walkEnv, f)
+		}
+		_ = walkEnv.Validate()
 	})
 }

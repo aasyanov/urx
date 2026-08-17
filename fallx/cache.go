@@ -77,6 +77,9 @@ func (f *Fallback[T]) getShard(key string) *cacheShard[T] {
 // updated in place and its access time bumped; a new entry is inserted and, if
 // the cache is now over capacity, eviction is triggered outside the shard lock.
 func (f *Fallback[T]) cacheResult(key string, result T, ttl time.Duration) {
+	if f.cfg.clone != nil {
+		result = f.cfg.clone(result)
+	}
 	shard := f.getShard(key)
 	shard.mu.Lock()
 
@@ -126,7 +129,11 @@ func (f *Fallback[T]) getCachedResult(key string) (T, bool) {
 		return zero, false
 	}
 	shard.lru.touch(entry, now)
-	return entry.value, true
+	val := entry.value
+	if f.cfg.clone != nil {
+		val = f.cfg.clone(val)
+	}
+	return val, true
 }
 
 // evictIfNeeded brings the cache back under capacity. It first sweeps expired
@@ -232,7 +239,8 @@ func (f *Fallback[T]) syncCacheSize() int64 {
 }
 
 // cleanupLoop periodically sweeps expired entries from every shard until Close
-// signals it to stop. It runs only under [StrategyCached].
+// signals it to stop. It runs only under [StrategyCached] when
+// [WithCleanupInterval] is positive.
 func (f *Fallback[T]) cleanupLoop() {
 	defer close(f.cleanupDone)
 	ticker := time.NewTicker(f.cfg.cleanupInterval)

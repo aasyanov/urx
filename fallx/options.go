@@ -33,11 +33,6 @@ const (
 	// minShards is the floor on shard count; a non-positive request degrades to
 	// a single shard rather than a zero-length shard slice.
 	minShards = 1
-
-	// cleanupDivisor derives the background cleanup interval from the TTL: the
-	// sweeper runs twice per TTL so expired entries are reclaimed promptly
-	// without a dedicated tuning knob.
-	cleanupDivisor = 2
 )
 
 // Option configures a [Fallback] created by [New]. Exactly one of [WithStatic],
@@ -57,6 +52,8 @@ type config[T any] struct {
 	cleanupInterval time.Duration
 
 	onFallback func(err error, strategy Strategy)
+	fallbackIf func(error) bool
+	clone      func(T) T
 	op         string
 }
 
@@ -65,11 +62,10 @@ type config[T any] struct {
 // never produce an unusable fallback.
 func newConfig[T any](opts []Option[T]) config[T] {
 	cfg := config[T]{
-		strategy:        StrategyStatic,
-		cacheTTL:        DefaultCacheTTL,
-		maxCacheSize:    DefaultMaxCacheSize,
-		shardCount:      DefaultShards,
-		cleanupInterval: DefaultCacheTTL / cleanupDivisor,
+		strategy:     StrategyStatic,
+		cacheTTL:     DefaultCacheTTL,
+		maxCacheSize: DefaultMaxCacheSize,
+		shardCount:   DefaultShards,
 	}
 	for _, opt := range opts {
 		if opt != nil {
@@ -127,14 +123,15 @@ func WithFunc[T any](fn FallbackFunc[T]) Option[T] {
 // WithCached selects [StrategyCached]: successful primary results are cached per
 // key and replayed on later failures. ttl is the entry lifetime and maxSize the
 // maximum number of live entries; non-positive values fall back to
-// [DefaultCacheTTL] and [DefaultMaxCacheSize]. Call [Fallback.Close] when done to
-// stop the background cleanup goroutine.
+// [DefaultCacheTTL] and [DefaultMaxCacheSize]. Expired entries are removed
+// lazily on lookup and on capacity eviction; there is no background sweeper
+// unless [WithCleanupInterval] is set, in which case [Fallback.Close] is
+// required to stop it.
 func WithCached[T any](ttl time.Duration, maxSize int) Option[T] {
 	return func(c *config[T]) {
 		c.strategy = StrategyCached
 		if ttl > 0 {
 			c.cacheTTL = ttl
-			c.cleanupInterval = ttl / cleanupDivisor
 		}
 		if maxSize > 0 {
 			c.maxCacheSize = maxSize
@@ -167,12 +164,51 @@ func WithShards[T any](n int) Option[T] {
 
 // WithOnFallback registers a callback invoked each time the fallback path is
 // taken, before the strategy runs. It receives the primary error and the active
-// strategy. Use it for metrics or logging; it must not block. A nil callback is
-// ignored.
+// strategy. Use it for metrics or logging; it runs synchronously on the
+// driving goroutine and must not block. A panic in the hook is recovered and
+// discarded. A nil callback is ignored.
 func WithOnFallback[T any](fn func(err error, strategy Strategy)) Option[T] {
 	return func(c *config[T]) {
 		if fn != nil {
 			c.onFallback = fn
+		}
+	}
+}
+
+// WithFallbackIf sets a predicate that decides whether a primary error should
+// take the fallback path. When fn is nil the option is ignored and every
+// primary error — including [context.Canceled] — triggers fallback (the
+// default). When fn is set and returns false, [Execute] returns the primary
+// error and does not increment FallbackUsed.
+func WithFallbackIf[T any](fn func(error) bool) Option[T] {
+	return func(c *config[T]) {
+		if fn != nil {
+			c.fallbackIf = fn
+		}
+	}
+}
+
+// WithClone registers a function applied to values on cache store and on
+// replay so callers do not share a mutable T with the cache. When fn is nil
+// the option is ignored; without a clone, pointer (and other mutable) values
+// are stored and replayed by alias.
+func WithClone[T any](fn func(T) T) Option[T] {
+	return func(c *config[T]) {
+		if fn != nil {
+			c.clone = fn
+		}
+	}
+}
+
+// WithCleanupInterval starts a background goroutine that sweeps expired cache
+// entries at the given interval under [StrategyCached]. Values <= 0 disable
+// the sweeper (the default): expiry is still enforced lazily on lookup and
+// capacity eviction still runs on insert. When the interval is positive,
+// [Fallback.Close] is required to stop the loop.
+func WithCleanupInterval[T any](d time.Duration) Option[T] {
+	return func(c *config[T]) {
+		if d > 0 {
+			c.cleanupInterval = d
 		}
 	}
 }

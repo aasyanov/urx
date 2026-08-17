@@ -2,6 +2,7 @@
 
 [CI](https://github.com/aasyanov/urx/actions/workflows/ci.yml)
 [Go Reference](https://pkg.go.dev/github.com/aasyanov/urx/bulkx)
+[Changelog](../CHANGELOG.md)
 [License: MIT](../LICENSE)
 
 A thread-safe bulkhead that caps the number of operations running concurrently, isolating a slow or failing dependency so it cannot drain the resources of the whole process. Blocking and non-blocking admission, a bounded wait with timeout, a controller for load-aware degradation, and panic recovery. Go 1.24+. Zero external dependencies (depends only on the urx `panix` package; testify in tests only).
@@ -11,7 +12,7 @@ go get github.com/aasyanov/urx
 ```
 
 > [!IMPORTANT]
-> **A bulkhead bounds concurrency, not queue depth.** `Execute` waits up to `[WithTimeout](#configuration)` for a slot, then rejects — it does **not** buffer unbounded work. Size `[WithMaxConcurrent](#configuration)` to the concurrency the protected dependency can actually sustain. A bulkhead larger than the downstream can handle admits everything and isolates nothing.
+> **A bulkhead bounds concurrency, not queue depth.** `Execute` waits up to `[WithTimeout](#configuration)` for a slot (or the context deadline, whichever is sooner), then rejects — it does **not** buffer unbounded work. Size `[WithMaxConcurrent](#configuration)` to the concurrency the protected dependency can actually sustain. A bulkhead larger than the downstream can handle admits everything and isolates nothing. `[TryExecute](#api)` will not take a free slot while another caller is already waiting.
 
 ## The Problem
 
@@ -66,16 +67,18 @@ A single misbehaving dependency can take down an entire service. The failure mod
    │                   │                   │                   │
  Bulkhead (bulkx.go)  Option (options.go)  BulkController
    │                  config{maxConcurrent, (types.go)
- sem chan + atomics:   timeout, op}         execution{active,
- active/executed/      │                     maxConcurrent,
- rejected/timeouts/    WithMaxConcurrent     waitedSlot}
- closed                WithTimeout           Active/MaxConcurrent/
-   │                   WithOp                Load/WaitedSlot
- Execute[T] /          │
- TryExecute[T] /       errors.go
- Acquire+Token         ErrTimeout/ErrClosed/
-   │                   ErrCancelled/ErrNilFunc
- panix.Safe(callback)
+ sem chan + atomics:   timeout, maxWaiters,  execution{active,
+ active/waiters/       op}                   maxConcurrent,
+ executed/rejected/    │                     waitedSlot}
+ timeouts/closed       WithMaxConcurrent     Active/MaxConcurrent/
+   │                   WithTimeout           Load/WaitedSlot
+ Execute[T] /          WithMaxWaiters
+ TryExecute[T] /       WithOp
+ Acquire+Token         │
+   │                   errors.go
+ panix.Safe(callback)  ErrTimeout/ErrClosed/
+                       ErrCancelled/ErrNilFunc/
+                       ErrWaitersExceeded
 ```
 
 ## How It Works
@@ -86,34 +89,37 @@ Execute(b, ctx, fn)
   │ fn == nil ? ────────────────────────► ErrNilFunc
   │ ctx.Err() ? ────────────────────────► ErrCancelled (no slot consumed)
   │
-  ├── phase 2: optimistic non-blocking send to sem
-  │      slot free ? ──► commitSlot ──► closed ? ──► ErrClosed
+  ├── phase 2: if waiters==0, optimistic non-blocking send to sem
+  │      slot free ? ──► finishReserve ──► closed ? ──► ErrClosed
+  │                                    └──► ctx.Err() ? ──► refund ; ErrCancelled
   │                                    └──► run(waited=false)
+  │      waiters>0 ? skip fast path (anti-barge)
   │
-  └── phase 3: arm timer, then select:
-        slot frees up ──► commitSlot ──► run(waited=true)
+  └── phase 3: waiters++ ; if maxWaiters>0 && n>max ? ErrWaitersExceeded
+        arm timer for min(timeout, ctx remaining), then select:
+        slot frees up ──► finishReserve ──► run(waited=true)
         ctx.Done()    ──► rejected++ ; ErrCancelled
-        timer fires   ──► timeouts++ ; ErrTimeout
+        timer fires   ──► ctx.Err() set ? ErrCancelled : timeouts++ ; ErrTimeout
         closedCh      ──► rejected++ ; ErrClosed
 
 TryExecute(b, ctx, fn)
   │ closed / nil fn / ctx.Err() ? ──────► ErrClosed / ErrNilFunc / ErrCancelled
-  ├── sem free ? ──► commitSlot ──► ctx.Err() ? ──► release slot ; ErrCancelled
-  │                              └──► run(opTryExecute)
+  ├── waiters>0 ? ──► rejected++ ; (false, zero, nil)   // never barges
+  ├── sem free ? ──► finishReserve ──► run(opTryExecute)
   └── sem full  ? ──► rejected++ ; (false, zero, nil)
 
 run(b, ctx, waited, fn)
-  active++ ; (defer active-- ; defer release slot) ; executed++
+  active++ ; (defer releaseSlot: active-- THEN <-sem) ; executed++
   bc = {active, maxConcurrent, waitedSlot=waited}
   (val,err) = panix.Safe(op, fn(ctx, bc))
   return val, err
 ```
 
-Admission is a three-phase strategy tuned for the common case. A pre-cancelled context is rejected before any work. The **optimistic phase** attempts a non-blocking send on the semaphore channel — when a slot is free (the overwhelmingly common case) the call proceeds with **zero timer allocation**. Only when every slot is busy does the **slow phase** arm a `time.Timer` and block on a three-way select: a freed slot, context cancellation, or the wait timeout.
+Admission is a three-phase strategy tuned for the common case. A pre-cancelled context is rejected before any work. The **optimistic phase** attempts a non-blocking send on the semaphore channel — when a slot is free **and no one is already waiting**, the call proceeds with **zero timer allocation**. If `waiters > 0`, the fast path is skipped so [TryExecute] and a lucky [Execute] cannot barge ahead of a blocked waiter. Only when every slot is busy (or waiters already exist) does the **slow phase** increment the waiter count, arm a `time.Timer` for `min(timeout, ctx remaining)`, and block on a four-way select: a freed slot, context cancellation, the wait timeout, or close.
 
-The semaphore is a buffered channel of capacity `maxConcurrent`: a send occupies a slot, a receive frees one. This makes the concurrency bound a structural invariant — the channel literally cannot hold more than `maxConcurrent` tokens, so no amount of contention can overshoot the limit.
+On timer expiry the wait re-checks `ctx.Err()`: if the context is done it returns `ErrCancelled`, otherwise `ErrTimeout`. After winning the semaphore, a cancelled context refunds the slot instead of running the callback.
 
-The callback runs under `panix.Safe`, so a panic becomes a `*panix.PanicError` and the slot is still released by the deferred channel receive — a panicking handler can never leak capacity.
+The semaphore is a buffered channel of capacity `maxConcurrent`: a send occupies a slot, a receive frees one. `releaseSlot` decrements `active` **before** freeing the semaphore so a spinner on `Active()` cannot observe a count above `maxConcurrent` during handover. The callback runs under `panix.Safe`, so a panic becomes a `*panix.PanicError` and the slot is still released — a panicking handler can never leak capacity.
 
 ### Load-aware callbacks
 
@@ -125,8 +131,11 @@ The `BulkController` handed to the callback carries the occupancy snapshot taken
 | Contract             | Guarantee                                                                                                 |
 | -------------------- | --------------------------------------------------------------------------------------------------------- |
 | Concurrency bound    | The number of in-flight callbacks never exceeds `maxConcurrent`, even under contention (channel-enforced) |
-| Bounded wait         | `Execute` and `Acquire` wait at most `timeout` for a slot, then return `ErrTimeout`                       |
+| Bounded wait         | `Execute` and `Acquire` wait at most `min(timeout, ctx remaining)` for a slot, then return `ErrTimeout` or `ErrCancelled` if the context is done |
 | Context first        | A pre-cancelled context returns `ErrCancelled` without invoking fn or consuming a slot (`Execute`, `TryExecute`, `Acquire`) |
+| Cancel after claim   | Winning a slot on a cancelled context refunds it and returns `ErrCancelled` |
+| Anti-barge           | `TryExecute` and the reserve fast path refuse a free slot while `waiters > 0` |
+| Waiter cap           | `WithMaxWaiters(n)` (`n > 0`) rejects additional slow-path waiters with `ErrWaitersExceeded`; `0` (default) is unlimited |
 | Cancel while waiting | A context cancelled during the wait returns `ErrCancelled` and consumes no slot                           |
 | Non-blocking variant | `TryExecute` never blocks: it runs immediately, rejects with `(false, zero, nil)`, or returns `ErrCancelled`/`ErrClosed` |
 | Slot release         | The slot is released when the callback returns **or panics**                                              |
@@ -253,8 +262,8 @@ resp, err := bulkx.Execute(bh, ctx,
 | `Bulkhead.Active`        | `func (b *Bulkhead) Active() int`                                                                                                | Current in-flight count                   |
 | `Bulkhead.MaxConcurrent` | `func (b *Bulkhead) MaxConcurrent() int`                                                                                         | Configured slot count                     |
 | `Bulkhead.Load`          | `func (b *Bulkhead) Load() float64`                                                                                              | Current active/max, in [0, 1]             |
-| `Bulkhead.Stats`         | `func (b *Bulkhead) Stats() Stats`                                                                                               | Counter snapshot                          |
-| `Bulkhead.ResetStats`    | `func (b *Bulkhead) ResetStats()`                                                                                                | Zero cumulative counters                  |
+| `Bulkhead.Stats`         | `func (b *Bulkhead) Stats() Stats`                                                                                               | Counter snapshot (`Waiters` is the live slow-path count) |
+| `Bulkhead.ResetStats`    | `func (b *Bulkhead) ResetStats()`                                                                                                | Zero cumulative counters (not `Active` / `Waiters`) |
 | `Bulkhead.Close`         | `func (b *Bulkhead) Close() error`                                                                                               | Idempotent shutdown                       |
 | `Bulkhead.IsClosed`      | `func (b *Bulkhead) IsClosed() bool`                                                                                             | Report closed state                       |
 | `Token.Release`          | `func (t *Token) Release()`                                                                                                      | Free an acquired slot (idempotent)        |
@@ -277,19 +286,21 @@ resp, err := bulkx.Execute(bh, ctx,
 | Option                 | Default                     | Description                                                      |
 | ---------------------- | --------------------------- | ---------------------------------------------------------------- |
 | `WithMaxConcurrent(n)` | `DefaultMaxConcurrent` (10) | Max concurrent operations; ≤ 0 ignored, final value floored to 1 |
-| `WithTimeout(d)`       | `DefaultTimeout` (30s)      | Max wait for a slot before `ErrTimeout`; ≤ 0 ignored             |
+| `WithTimeout(d)`       | `DefaultTimeout` (30s)      | Max wait for a slot before `ErrTimeout`; ≤ 0 ignored. Actual wait is `min(d, ctx remaining)` |
+| `WithMaxWaiters(n)`    | `0` (unlimited)             | Cap on slow-path waiters; ≤ 0 ignored. Excess waiters get `ErrWaitersExceeded` |
 | `WithOp(s)`            | `[opExecute]` / `[opTryExecute]` | Operation name attached to panic reports (`TryExecute` defaults to `"bulkx.TryExecute"`) |
 
 
 ## Errors
 
 
-| Error          | Condition                                                                                             |
-| -------------- | ----------------------------------------------------------------------------------------------------- |
-| `ErrTimeout`   | The wait timeout elapsed before a slot became available                                               |
-| `ErrClosed`    | The bulkhead has been closed                                                                          |
-| `ErrCancelled` | The context was cancelled or expired before a slot was acquired (wraps `ctx.Err()`); no slot consumed (`Execute`, `TryExecute`, `Acquire`) |
-| `ErrNilFunc`   | `Execute`/`TryExecute` was given a nil function                                                       |
+| Error                | Condition                                                                                             |
+| -------------------- | ----------------------------------------------------------------------------------------------------- |
+| `ErrTimeout`         | The wait timeout elapsed before a slot became available (context not done)                            |
+| `ErrClosed`          | The bulkhead has been closed                                                                          |
+| `ErrCancelled`       | The context was cancelled or expired before a slot was acquired, or after the slot was claimed and refunded (wraps `ctx.Err()`) |
+| `ErrNilFunc`         | `Execute`/`TryExecute` was given a nil function                                                       |
+| `ErrWaitersExceeded` | `WithMaxWaiters` is set and another slow-path waiter would exceed the cap                             |
 
 
 A panicking callback surfaces as a `*panix.PanicError` returned by `Execute`/`TryExecute` (reach it with `errors.As`); the slot is still released.
@@ -297,20 +308,23 @@ A panicking callback surfaces as a `*panix.PanicError` returned by `Execute`/`Tr
 ## Pitfalls
 
 > [!WARNING]
-> **The wait timeout is not a request deadline.** `WithTimeout` bounds only how long `Execute` waits for a *slot*. Once admitted, the callback runs as long as it wants. For a hard per-operation deadline, wrap the callback with `toutx.Execute`.
+> **The wait timeout is not a request deadline.** `WithTimeout` bounds only how long `Execute` waits for a *slot*, and the actual wait is `min(timeout, ctx remaining)`. Once admitted, the callback runs as long as it wants. For a hard per-operation deadline, wrap the callback with `toutx.Execute`.
+
+> [!WARNING]
+> **TryExecute does not steal slots from waiters.** If another caller is blocked on `Execute`/`Acquire`, `TryExecute` returns `(false, zero, nil)` even when a slot is about to free. That is intentional anti-barge, not a full semaphore.
 
 > [!WARNING]
 > **Sizing concurrency wrong defeats the purpose.** `WithMaxConcurrent` must reflect the concurrency the *downstream* can sustain, not your accept queue. A bulkhead sized to 10× the real limit admits everything and isolates nothing.
 
 > [!NOTE]
-> **bulkx** bounds concurrency, not request rate.** A flood of fast operations can churn through the slots without ever filling them. For requests-per-second limiting, use `ratex`; combine the two for both axes.
+> **bulkx bounds concurrency, not request rate.** A flood of fast operations can churn through the slots without ever filling them. For requests-per-second limiting, use `ratex`; combine the two for both axes.
 
 > [!NOTE]
 > **No priorities.** Every caller competes for the same slots equally. If you need to shed low-priority traffic first while protecting critical traffic, use `shedx`.
 
 ## Safety and Concurrency
 
-`Bulkhead` is safe for concurrent use from any number of goroutines. The concurrency bound is enforced by a buffered channel semaphore, so the number of in-flight callbacks is structurally incapable of exceeding `maxConcurrent` regardless of contention. The surrounding counters (`active`, `executed`, `rejected`, `timeouts`, `closed`) live in `sync/atomic` values; there is no mutex. `Token.Release` uses an atomic compare-and-swap, so a double release is a no-op that can neither drive the active count negative nor double-free a slot. The `BulkController` is touched only by the single goroutine running its callback and needs no synchronization. Every test runs under `-race`, including a 64-goroutine stress test that asserts the observed in-flight count never exceeds the configured maximum.
+`Bulkhead` is safe for concurrent use from any number of goroutines. The concurrency bound is enforced by a buffered channel semaphore, so the number of in-flight callbacks is structurally incapable of exceeding `maxConcurrent` regardless of contention. `releaseSlot` decrements `active` before freeing the semaphore so observers never see a spike above the cap during handover. The surrounding counters (`active`, `waiters`, `executed`, `rejected`, `timeouts`, `closed`) live in `sync/atomic` values; there is no mutex. `Token.Release` uses an atomic compare-and-swap, so a double release is a no-op that can neither drive the active count negative nor double-free a slot. The `BulkController` is touched only by the single goroutine running its callback and needs no synchronization. Every test runs under `-race`, including a 64-goroutine stress test that asserts the observed in-flight count never exceeds the configured maximum.
 
 ## Benchmarks
 
@@ -358,7 +372,7 @@ Three environments, two hardware classes, two operating systems. All values are 
 
 | Metric         | Value                          |
 | -------------- | ------------------------------ |
-| Test functions | 49                             |
+| Test functions | 64                             |
 | Benchmarks     | 7                              |
 | Fuzz targets   | 3                              |
 | Examples       | 6                              |
@@ -374,8 +388,9 @@ bulkx/
 ├── bulkx.go            # package doc + Bulkhead + Execute[T]/TryExecute[T] + Acquire/Token + admission
 ├── options.go          # config, Option, defaults, WithXxx
 ├── types.go            # BulkController + private execution impl
-├── errors.go           # ErrTimeout, ErrClosed, ErrCancelled, ErrNilFunc
+├── errors.go           # ErrTimeout, ErrClosed, ErrCancelled, ErrNilFunc, ErrWaitersExceeded
 ├── bulkx_test.go       # unit + table-driven tests
+├── errors_test.go      # sentinel wrapping tests
 ├── bench_test.go       # benchmarks (sequential + parallel)
 ├── fuzz_test.go        # FuzzExecute, FuzzTryExecute, FuzzAcquireRelease — admission invariants
 ├── example_test.go     # runnable GoDoc examples

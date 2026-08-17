@@ -23,24 +23,29 @@ func TestAwaitResult_ReturnsDoneWhenReady(t *testing.T) {
 }
 
 func TestAwaitResult_DoneWinsWhenDeadlineAlsoReady(t *testing.T) {
-	done := make(chan execResult[int], 1)
-	done <- execResult[int]{val: 99}
+	// Both the result and the deadline are ready; Go's select may take either
+	// arm. Loop so the inner re-check of done after tctx.Done() is exercised.
+	for range 50 {
+		done := make(chan execResult[int], 1)
+		done <- execResult[int]{val: 99}
 
-	tctx, cancel := context.WithTimeout(context.Background(), time.Nanosecond)
-	defer cancel()
-	time.Sleep(2 * time.Nanosecond)
+		tctx, cancel := context.WithTimeout(context.Background(), time.Nanosecond)
+		<-tctx.Done()
 
-	got, err := awaitResult(done, tctx, context.Background(), "op", time.Nanosecond)
-	require.NoError(t, err)
-	assert.Equal(t, 99, got)
+		got, err := awaitResult(done, tctx, context.Background(), "op", time.Nanosecond)
+		cancel()
+		require.NoError(t, err)
+		assert.Equal(t, 99, got)
+	}
 }
 
 func TestAwaitResult_MapsCallbackDeadlineError(t *testing.T) {
+	tctx, cancel := context.WithTimeout(context.Background(), time.Nanosecond)
+	defer cancel()
+	<-tctx.Done()
+
 	done := make(chan execResult[int], 1)
 	done <- execResult[int]{err: context.DeadlineExceeded}
-
-	tctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
-	defer cancel()
 
 	_, err := awaitResult(done, tctx, context.Background(), "slow.op", 5*time.Millisecond)
 	require.ErrorIs(t, err, ErrDeadlineExceeded)
@@ -103,12 +108,35 @@ func TestAwaitResult_MapsCallbackDeadlineErrorWhenParentCancelled(t *testing.T) 
 }
 
 func TestNormalizeResult_CanceledWithoutParentCause(t *testing.T) {
+	tctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	var zero int
-	got, err := normalizeResult(zero, context.Background(), "op", time.Second,
-		execResult[int]{err: context.Canceled})
+	got, err := normalizeResult(zero, tctx, context.Background(), "op", time.Second,
+		execResult[int]{val: 7, err: context.Canceled})
+	require.ErrorIs(t, err, context.Canceled)
+	assert.NotErrorIs(t, err, ErrCancelled)
+	assert.Equal(t, 7, got)
+}
+
+func TestNormalizeResult_CanceledWhenOurCtxDone(t *testing.T) {
+	tctx, cancel := context.WithTimeout(context.Background(), time.Nanosecond)
+	defer cancel()
+	<-tctx.Done()
+	got, err := normalizeResult(0, tctx, context.Background(), "op", time.Second,
+		execResult[int]{val: 7, err: context.Canceled})
 	require.ErrorIs(t, err, ErrCancelled)
 	require.ErrorIs(t, err, context.Canceled)
-	assert.Equal(t, zero, got)
+	assert.Zero(t, got)
+}
+
+func TestNormalizeResult_InnerDeadlineExceededPropagates(t *testing.T) {
+	tctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	got, err := normalizeResult(0, tctx, context.Background(), "op", time.Second,
+		execResult[int]{val: 42, err: context.DeadlineExceeded})
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	assert.NotErrorIs(t, err, ErrDeadlineExceeded)
+	assert.Equal(t, 42, got)
 }
 
 func TestResolveDeadline_FallsBackToStartPlusTimeout(t *testing.T) {

@@ -3,15 +3,16 @@
 [CI](https://github.com/aasyanov/urx/actions/workflows/ci.yml)
 [Go Reference](https://pkg.go.dev/github.com/aasyanov/urx/adaptx)
 [License: MIT](../LICENSE)
+[Changelog](../CHANGELOG.md)
 
-A thread-safe concurrency limiter that **discovers** a backend's safe operating limit instead of making you guess it. It starts at a configured limit and continuously moves it up or down from latency and error feedback using one of three control laws — `AIMD`, `Vegas`, or `Gradient` — opening up when the backend is fast and healthy and clamping down the moment latency climbs or errors appear. A controller for load-aware callbacks, panic recovery, and lock-light admission. Go 1.24+. Zero external dependencies (depends only on the urx `panix` package; testify in tests only).
+A thread-safe concurrency limiter that **discovers** a backend's safe operating limit instead of making you guess it. It starts at a configured limit and moves that limit **once per sample window** (default 1s) from latency and error feedback using one of three control laws — `AIMD`, `Vegas`, or `Gradient` — opening up when the backend is fast and healthy and clamping down the moment a window shows latency climb or errors. A controller for load-aware callbacks, panic recovery, and lock-light admission. Go 1.24+. Zero external dependencies (depends only on the urx `panix` package; testify in tests only).
 
 ```
 go get github.com/aasyanov/urx
 ```
 
 > [!IMPORTANT]
-> **adaptx limits *concurrency*, not request rate, and it adapts the limit itself.** Where `bulkx` enforces a fixed, hand-sized bound, `adaptx` treats the limit as a variable it servo-controls toward the backend's real capacity. Pick the algorithm that matches your overload signal: `AIMD` when *errors* signal overload, `Vegas`/`Gradient` when *latency* does.
+> **adaptx limits *concurrency*, not request rate, and it adapts the limit itself — windowed, not per request.** Where `bulkx` enforces a fixed, hand-sized bound, `adaptx` treats the limit as a variable it servo-controls toward the backend's real capacity. Pick the algorithm that matches your overload signal: `AIMD` when *errors* signal overload, `Vegas`/`Gradient` when *latency* does.
 
 ## The Problem
 
@@ -67,16 +68,17 @@ A static concurrency bound forces an impossible choice. Set it too low and you l
    │                    │                    │                    │
  Limiter (adaptx.go)   Option (options.go)  AdaptController (types.go)
    │                   config{algorithm,    execution{limit,inFlight,
- sem chan (permits)     initial/min/max,     algorithm,skipped}
- atomic counters,       smoothing,...}       Limit/InFlight/
+ sem chan (permits)     utilization,         algorithm,skipped}
+ atomic counters,       sampleWindow,...}    Limit/InFlight/
  mu: limit/debt/        │                    Algorithm/SkipSample
- latency/ring          WithAlgorithm         │
-   │                   WithInitial/Min/Max   Algorithm enum (types.go)
- Execute/TryExecute     WithSmoothing        AIMD / Vegas / Gradient
- Acquire/release/Allow  WithJitter / WithOp  AdaptFunc[T] (types.go)
-   │                   opOrDefault/Try()    │
- adjust → aimd/vegas/  ringCapacity()        ErrClosed/ErrTimeout
- gradient → permits                          ErrCancelled/ErrNilFunc
+ window/estimators     WithAlgorithm         │
+   │                   WithUtilization       Algorithm enum (types.go)
+ Execute/TryExecute     WithSampleWindow     AIMD / Vegas / Gradient
+ Acquire/release/Allow  WithOnLimitChange    AdaptFunc[T] (types.go)
+   │                   (sync, must not block)│
+ window snapshot →     ringCapacity()        ErrClosed/ErrTimeout
+ aimd/vegas/gradient                         ErrCancelled/ErrNilFunc
+ → permits                                   ErrDrainTimeout
 ```
 
 ## How It Works
@@ -96,54 +98,75 @@ Execute(l, ctx, fn)
   └── release(success, latency):            (idempotent, runs once)
         record(success, latency)
           ├── success/fail counters++
-          ├── skip (latency==0) ? ──► return (no feedback, no history)
-          ├── ring buffer ← sample ; EMA avg ; RTT_min decay
-          └── seen ≥ warmup ? adjust(success, latency)
-                ├── AIMD     : ok → limit+rate ; fail → limit·ratio
-                ├── Vegas    : queue=lim·(rtt−min)/min vs target band from targetLatency
-                └── Gradient : g=(rtt−avg)/avg ; below → grow, above → back off
-              jitter, clamp to [min,max]
-              grow → push permits (pay debt first)
-              shrink → pull idle permits, else record debt
+          ├── peak in-flight for this window
+          ├── skip (latency==0) ? ──► no ring, no window n
+          └── else: ring ← sample ; window n/fails/meanRTT/minRTT
+        if now−windowStart ≥ sampleWindow AND seen ≥ warmup:
+          ONE adjust from snapshot {n, fails, maxInFlight, meanRTT, minRTT}
+            ├── AIMD     : fails>0 → ×ratio once
+            │              else if maxInFlight ≥ ceil(limit·utilization)
+            │                → accumulate increaseRate credit, step=int(credit)
+            │              else hold
+            ├── Vegas    : queue = limit·(1 − minRTT/rtt)   rtt = window mean
+            │              α = limit·tol [, ×(1 − minRTT/targetLatency)]
+            │              queue<α → +1 ; queue>α·2 → ×ratio ; else hold
+            └── Gradient : first window avgLat = rtt (no blend with 0)
+                           later avgLat = s·rtt + (1−s)·avgLat
+                           fails>0 → ×ratio once
+                           g=(rtt−avg)/avg ; g<−tol → +2 ; g≤tol → +1
+                           else ×max(1−g·ratio, ratio)
+          jitter, clamp to [min,max]
+          grow → push permits (pay debt first)
+          shrink → pull idle permits, else record debt
+          onLimitChange(old,new) synchronously under recover (must not block)
+          reset window counters
         inFlight-- ; releasePermit (pay debt or return permit)
 ```
 
-The limit is a **servo-controlled variable**, not a constant. Admission rides a buffered-channel semaphore whose buffer is the configured maximum; the number of values currently buffered is the count of permits available to acquire. Acquiring receives a permit; releasing returns one. To **grow** the limit the controller pushes new permits into the channel; to **shrink** it, it pulls idle permits out, and for permits that are currently held it records *debt* — the next releases retire those permits instead of returning them. This is what makes a multiplicative decrease actually remove capacity without ever blocking a release.
+The limit is a **windowed servo**, not a per-request counter. Samples accumulate for `WithSampleWindow` (default 1s). When the window elapses and warmup is done, the configured law runs **once** on the snapshot, then the window resets. Ten failures in one window are one multiplicative decrease, not ten halvings.
 
-Only the periodic adaptation step and the percentile snapshot take the mutex; the success/failure/reject counters are lock-free atomics. The callback runs under `panix.Safe`, so a panic becomes a `*panix.PanicError` and the permit is still released — a panicking handler can never leak capacity.
+Admission rides a buffered-channel semaphore whose buffer is the configured **maximum**; the number of values currently buffered is the count of permits available to acquire. Acquiring receives a permit; releasing returns one. To **grow** the limit the controller pushes new permits into the channel; to **shrink** it, it pulls idle permits out, and for permits that are currently held it records *debt* — the next releases retire those permits instead of returning them. That is what makes a multiplicative decrease actually remove capacity without blocking a release.
+
+**In-flight vs live limit.** Admission never takes a permit that is not in the semaphore, so in-flight never exceeds `maxLimit`. After a shrink, in-flight work that was already admitted **may exceed the live limit** until those releases pay the debt. `Allow` compares in-flight to the live limit without claiming a slot — it is a hint, not an admission.
+
+Only the windowed adaptation step and the percentile snapshot take the mutex; the success/failure/reject counters are lock-free atomics. The callback runs under `panix.Safe`, so a panic becomes a `*panix.PanicError` and the permit is still released — a panicking handler can never leak capacity.
 
 ### The three control laws
 
 
-| Algorithm      | Signal                 | Grows when                   | Backs off when                      | Best for                                  |
-| -------------- | ---------------------- | ---------------------------- | ----------------------------------- | ----------------------------------------- |
-| **AIMD**     | success/failure        | every success (`+rate`)      | any failure (`×ratio`)              | failure-driven overload; the safe default |
-| **Vegas**    | latency vs RTT_min     | estimated queue below target | estimated queue above `2×target`    | a stable backend floor latency            |
-| **Gradient** | latency vs EMA average | sample at/below average      | sample above average (proportional) | drifting floor latency                    |
+| Algorithm      | Signal                    | Grows when                                      | Backs off when                     | Best for                                  |
+| -------------- | ------------------------- | ----------------------------------------------- | ---------------------------------- | ----------------------------------------- |
+| **AIMD**     | window success / failure  | successful window at ≥ `ceil(limit·utilization)` | any failure in the window (`×ratio`, once) | failure-driven overload; the safe default |
+| **Vegas**    | window mean RTT vs RTT_min | estimated queue below α                        | estimated queue above β = 2α       | a stable backend floor latency            |
+| **Gradient** | window mean vs EMA average | g at/below tolerance                           | g above tolerance (proportional)   | drifting floor latency                    |
 
 
-`AIMD` is the TCP congestion-avoidance law: additive increase, multiplicative decrease. `Vegas` infers queued work from how far the current round-trip time sits above the best ever seen (`RTT_min`) and holds the limit inside a tolerance band. `Gradient` compares each sample to a smoothed running average, so it adapts when the backend's baseline latency itself moves.
+`AIMD` is the TCP congestion-avoidance law, applied per window and **gated on utilization**: idle successes do not inflate the limit. Fractional `WithIncreaseRate` (for example 0.5) keeps a remainder so the limit grows by 1 every two eligible windows. `Vegas` infers queued work as `limit·(1 − minRTT/rtt)` — the denominator is the window mean RTT, not RTT_min — and holds the limit inside a tolerance band scaled by `WithTargetLatency` when the target sits above RTT_min. `Gradient` compares each window mean to an EMA that is initialized to the first window's RTT (not blended with zero) so it adapts when the backend's baseline latency itself moves.
 
 ### Keeping the feedback honest
 
-Two mechanisms stop the controller from chasing noise. **Warmup** (`WithWarmupSamples`) ignores the first N samples so an unrepresentative cold start does not move the limit. **RTT_min decay** (`WithMinLatencyDecay`) drifts the recorded minimum slowly toward the average so `Vegas` cannot stick forever to one anomalously fast sample. The callback can also call `AdaptController.SkipSample()` to exclude a known outlier (a cache miss, a cold connection) from both the latency feedback and the percentile history — it still counts toward the success/failure totals.
+Two mechanisms stop the controller from chasing noise. **Warmup** (`WithWarmupSamples`) ignores the first N samples so an unrepresentative cold start does not move the limit — windows still roll, but no adjust runs until `seen ≥ warmup`. **RTT_min decay** (`WithMinLatencyDecay`) drifts the recorded minimum toward the average on each completed window so `Vegas` cannot stick forever to one anomalously fast sample. The callback can also call `AdaptController.SkipSample()` to exclude a known outlier (a cache miss, a cold connection) from both the latency feedback and the percentile history — it still counts toward the success/failure totals.
 
 ## Normative Contracts
 
 
 | Contract            | Guarantee                                                                                         |
 | ------------------- | ------------------------------------------------------------------------------------------------- |
-| Bounded concurrency | Admitted in-flight work never exceeds the live limit; the limit never leaves `[min, max]`         |
+| Bounded admission   | A missing permit is never taken; in-flight never exceeds `maxLimit`; the live limit stays in `[min, max]` |
+| Shrink debt         | After a shrink, in-flight **may exceed the live limit** until released permits pay the debt       |
+| Allow is a hint     | `Allow` does not claim a slot; a concurrent admit may change the outcome                          |
 | Limit floor         | `min` is floored to 1, so the limiter always makes forward progress                               |
 | Context first       | A pre-cancelled context returns `ErrCancelled`/`ErrTimeout` without consuming a permit            |
 | Permit release      | The permit is released when the callback returns **or panics**                                    |
 | Idempotent release  | The release function runs its effect once; extra calls are no-ops                                 |
-| Debt accounting     | A shrink retires held permits as they are released; in-flight never exceeds the new limit         |
+| Windowed adjust     | The control law runs at most once per sample window, after warmup                                 |
 | Skip honesty        | `SkipSample` removes a call from latency feedback and history but not from success/failure totals |
 | Warmup              | No adaptation occurs until `warmupSamples` samples have been recorded                             |
 | Panic safety        | A panicking callback becomes a `*panix.PanicError`, permit still freed                            |
-| Close semantics     | After `Close`, admission returns `ErrClosed`; blocked waiters wake immediately; in-flight work drains before permits retire |
-| Idempotent close    | `Close` is safe to call repeatedly; the first call wins, later calls return `ErrClosed`           |
+| Close semantics     | After close, admission returns `ErrClosed`; blocked waiters wake immediately                      |
+| Idempotent `Close`  | `Close()` returns nil on the first and every later call                                           |
+| Drain timeout       | `CloseWithTimeout` returns `ErrDrainTimeout` if in-flight remains; the limiter stays closed       |
+| Limit-change hook   | Runs synchronously under recover; must not block or panic                                         |
 | Controller scope    | An `AdaptController` is valid only during its callback; do not retain it                          |
 
 
@@ -258,6 +281,8 @@ l := adaptx.New(adaptx.WithOnLimitChange(func(old, new int) {
 }))
 ```
 
+The hook runs **synchronously** on the goroutine that closed the sample window. It must not block or panic; a panic is recovered and discarded.
+
 ## API
 
 
@@ -273,8 +298,8 @@ l := adaptx.New(adaptx.WithOnLimitChange(func(old, new int) {
 | `Limiter.InFlight`         | `func (l *Limiter) InFlight() int`                                                                                      | Current in-flight count                         |
 | `Limiter.Stats`            | `func (l *Limiter) Stats() Stats`                                                                                       | Counter + latency-percentile snapshot           |
 | `Limiter.ResetStats`       | `func (l *Limiter) ResetStats()`                                                                                        | Zero counters, reset adaptive state             |
-| `Limiter.Close`            | `func (l *Limiter) Close() error`                                                                                       | Idempotent shutdown (30s drain)                 |
-| `Limiter.CloseWithTimeout` | `func (l *Limiter) CloseWithTimeout(d time.Duration) error`                                                             | Shutdown with custom drain window               |
+| `Limiter.Close`            | `func (l *Limiter) Close() error`                                                                                       | Idempotent shutdown; always returns nil (30s drain) |
+| `Limiter.CloseWithTimeout` | `func (l *Limiter) CloseWithTimeout(d time.Duration) error`                                                             | Shutdown with custom drain; `ErrDrainTimeout` / `ErrClosed` |
 | `Limiter.IsClosed`         | `func (l *Limiter) IsClosed() bool`                                                                                     | Report closed state                             |
 | `Algorithm`                | `type Algorithm uint8`                                                                                                  | `AIMD` / `Vegas` / `Gradient`                   |
 | `AIMD`, `Vegas`, `Gradient`| constants                                                                                                               | Control-law selectors                           |
@@ -301,49 +326,60 @@ l := adaptx.New(adaptx.WithOnLimitChange(func(old, new int) {
 | `WithInitialLimit(n)`    | `10`               | Starting limit; clamped into `[min, max]`                       |
 | `WithMinLimit(n)`        | `1`                | Floor; ≤ 0 ignored, final value floored to 1                    |
 | `WithMaxLimit(n)`        | `1000`             | Ceiling and semaphore capacity; below min raised to min         |
-| `WithSmoothing(f)`       | `0.2`              | EMA weight per latency sample; outside (0, 1] ignored           |
-| `WithIncreaseRate(r)`    | `1.0`              | AIMD additive step on success; ≤ 0 ignored                      |
-| `WithDecreaseRatio(r)`   | `0.5`              | Multiplicative backoff factor; outside (0, 1) ignored           |
+| `WithSmoothing(f)`       | `0.2`              | EMA weight per **window mean** RTT; outside (0, 1] ignored      |
+| `WithIncreaseRate(r)`    | `1.0`              | AIMD additive **credit per eligible window**; ≤ 0 ignored; fractional rates accumulate |
+| `WithDecreaseRatio(r)`   | `0.5`              | Multiplicative backoff factor per backoff window; outside (0, 1) ignored |
+| `WithUtilization(f)`     | `0.9`              | AIMD increase gate: peak in-flight ≥ `ceil(limit·f)`; outside (0, 1] ignored |
 | `WithTargetLatency(d)`   | `100ms`            | Vegas operating-point RTT; scales the queue target band; ≤ 0 ignored |
 | `WithTolerance(f)`       | `0.1`              | Vegas/Gradient deviation band; outside (0, 1] ignored           |
-| `WithSampleWindow(d)`    | `1s`               | Percentile window; ≤ 0 ignored                                  |
+| `WithSampleWindow(d)`    | `1s`               | Aggregation window for one adjust **and** Stats percentiles; ≤ 0 ignored |
 | `WithWarmupSamples(n)`   | `10`               | Samples before adaptation; 0 disables warmup                    |
-| `WithMinLatencyDecay(f)` | `0.001`            | RTT_min drift toward average; 0 disables, outside [0,1] ignored |
+| `WithMinLatencyDecay(f)` | `0.001`            | RTT_min drift toward average per window; 0 disables, outside [0,1] ignored |
 | `WithJitter(f)`          | `0.1`              | Fraction of an increase that may be withheld; 0 disables        |
 | `WithOp(s)`              | `[opExecute]` / `[opTryExecute]` | Operation name attached to panic reports                        |
-| `WithOnLimitChange(fn)`  | none               | Async callback on every limit change                            |
+| `WithOnLimitChange(fn)`  | none               | Synchronous callback on every limit change; must not block      |
 
 
 ## Errors
 
 
-| Error          | Condition                                                                         |
-| -------------- | --------------------------------------------------------------------------------- |
-| `ErrClosed`    | Admission attempted after `Close`                                                 |
-| `ErrTimeout`   | Blocking acquire exceeded its context deadline (wraps `context.DeadlineExceeded`) |
-| `ErrCancelled` | Context cancelled before a permit was available (`Execute`, `Acquire`, `TryExecute`; wraps `ctx.Err()`) |
-| `ErrNilFunc`   | `Execute`/`TryExecute` given a nil function                                       |
+| Error             | Condition                                                                         |
+| ----------------- | --------------------------------------------------------------------------------- |
+| `ErrClosed`       | Admission attempted after close; also a second `CloseWithTimeout`                 |
+| `ErrTimeout`      | Blocking acquire exceeded its context deadline (wraps `context.DeadlineExceeded`) |
+| `ErrCancelled`    | Context cancelled before a permit was available (`Execute`, `Acquire`, `TryExecute`; wraps `ctx.Err()`) |
+| `ErrNilFunc`      | `Execute`/`TryExecute` given a nil function                                       |
+| `ErrDrainTimeout` | `CloseWithTimeout` deadline elapsed while in-flight work remains; limiter stays closed |
 
 
-A panicking callback surfaces as a `*panix.PanicError` returned by `Execute` (reach it with `errors.As`); the permit is still released.
+A panicking callback surfaces as a `*panix.PanicError` returned by `Execute` (reach it with `errors.As`); the permit is still released. `Close()` itself always returns nil; use `CloseWithTimeout` when a drain failure must be visible.
 
 ## Pitfalls
 
 > [!WARNING]
-> **adaptx bounds concurrency, not request rate.** A flood of fast successes will *raise* the limit, not throttle arrivals. For requests-per-second limiting use `ratex`; compose the two for both axes.
+> **adaptx bounds concurrency, not request rate.** A flood of fast successes at high utilization will *raise* the limit, not throttle arrivals. Serial traffic well below `ceil(limit·utilization)` holds AIMD still. For requests-per-second limiting use `ratex`; compose the two for both axes.
+
+> [!WARNING]
+> **After a shrink, in-flight may exceed the live limit.** Already-admitted work is not cancelled. New admissions wait for debt to be paid. `Allow` is a hint: it compares in-flight to the live limit without taking a permit.
 
 > [!WARNING]
 > **Choose the algorithm to match your overload signal.** `Vegas` and `Gradient` need representative latency: if your work has wildly bimodal latency (cache hit vs miss) without `SkipSample`, they will thrash. When failures — not latency — are the overload signal, prefer `AIMD`.
 
+> [!WARNING]
+> **`WithOnLimitChange` must not block.** The hook runs on the goroutine that closed the window. A slow hook stalls every subsequent `record`. Panics are recovered and discarded.
+
 > [!NOTE]
-> **`ResetStats` snaps the limit immediately.** Counters, latency estimators, and the permit pool are reset to the configured initial limit in one step. When in-flight work exceeds that initial limit the live limit is raised to the in-flight count so permits never go negative.
+> **`ResetStats` snaps the limit immediately.** Counters, latency estimators, window credit, and the permit pool are reset to the configured initial limit in one step. When in-flight work exceeds that initial limit the live limit is raised to the in-flight count so permits never go negative.
 
 > [!NOTE]
 > **SkipSample keeps the success/failure totals.** A skipped call is removed from latency feedback and percentile history only — it still counts as a success or failure in `Stats`. Use it for outlier *latency*, not to hide errors.
 
+> [!NOTE]
+> **`CloseWithTimeout(0)` does not wait.** If in-flight work remains it returns `ErrDrainTimeout` and the limiter stays closed. `Close()` waits up to 30s and always returns nil.
+
 ## Safety and Concurrency
 
-`Limiter` is safe for concurrent use from any number of goroutines. Admission rides a buffered-channel semaphore; the success, failure, reject, and adjustment counters are `sync/atomic`. A single mutex guards the adaptive state (limit, shrink debt, latency estimators, sample ring) and is taken only on the periodic adaptation step and the percentile snapshot — never on the fast admission path beyond a single `Limit()` read. Growing the limit pushes permits into the channel; shrinking pulls idle permits and records *debt* so held permits are retired on release, which keeps in-flight work from ever exceeding the new limit. The release function uses an atomic compare-and-swap so a double call is a no-op. The `AdaptController` is touched only by the goroutine running its callback. Every test runs under `-race`, including 50-goroutine admission stress that asserts in-flight returns to zero.
+`Limiter` is safe for concurrent use from any number of goroutines. Admission rides a buffered-channel semaphore; the success, failure, reject, and adjustment counters are `sync/atomic`. A single mutex guards the adaptive state (limit, shrink debt, latency estimators, sample ring, window counters) and is taken on each completed sample and on the percentile snapshot — never on the fast admission path beyond a single `Limit()` read. Growing the limit pushes permits into the channel; shrinking pulls idle permits and records *debt* so held permits are retired on release. Already-admitted in-flight work may exceed the live limit until that debt is paid; it never exceeds `maxLimit`. The release function uses an atomic compare-and-swap so a double call is a no-op. The `AdaptController` is touched only by the goroutine running its callback. `CloseWithTimeout` waits with a timer/select on a drain channel, not `time.Sleep`. Every test runs under `-race`, including 50-goroutine admission stress that asserts in-flight returns to zero.
 
 ## Benchmarks
 
@@ -396,24 +432,33 @@ This gives three comparison axes: **laptop vs server** (hardware scaling), **Lin
 
 | Metric         | Value                          |
 | -------------- | ------------------------------ |
-| Test functions | 71                             |
+| Test functions | 85                             |
 | Benchmarks     | 8                              |
 | Fuzz targets   | 2                              |
 | Examples       | 4                              |
-| Coverage       | 96.3%                          |
-| Race detector  | All pass                       |
+| Coverage       | 95.2%                          |
+| Race detector  | All pass (`go test -race -count=1 ./adaptx/`) |
 | External deps  | 0 (panix; testify in dev only) |
+
+
+```text
+go test -race -count=1 ./adaptx/
+go test -run='^$' -bench=. -benchmem -count=5 ./adaptx/
+go test -fuzz=FuzzNew -fuzztime=30s ./adaptx/
+go test -fuzz=FuzzExecute -fuzztime=30s ./adaptx/
+```
 
 
 ## File Structure
 
 ```text
 adaptx/
-├── adaptx.go           # package doc + Limiter + Execute/TryExecute + Acquire + adaptation
-├── options.go          # config, Option, defaults, WithXxx, ring sizing
+├── adaptx.go           # package doc + Limiter + Execute/TryExecute + Acquire + windowed adaptation
+├── options.go          # config, Option, defaults, WithXxx, withClock (tests)
 ├── types.go            # Algorithm enum + AdaptController + private execution impl + sample
-├── errors.go           # ErrClosed, ErrTimeout, ErrCancelled, ErrNilFunc
+├── errors.go           # ErrClosed, ErrTimeout, ErrCancelled, ErrNilFunc, ErrDrainTimeout
 ├── adaptx_test.go      # unit + table-driven + race tests
+├── errors_test.go      # sentinel errors.Is coverage
 ├── bench_test.go       # benchmarks (sequential + parallel)
 ├── fuzz_test.go        # FuzzNew, FuzzExecute — construction + permit-accounting invariants
 ├── example_test.go     # runnable GoDoc examples

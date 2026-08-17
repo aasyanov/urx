@@ -25,6 +25,11 @@ var (
 	// ErrNilFunc is returned by [Execute] and [TryExecute] when the supplied
 	// function is nil. Safe to compare with == or [errors.Is].
 	ErrNilFunc = errors.New("bulkx: nil function")
+
+	// ErrWaitersExceeded is returned by [Execute] and [Bulkhead.Acquire] when
+	// [WithMaxWaiters] is set and the slow-path waiter cap is already full.
+	// No slot is consumed. Safe to compare with == or [errors.Is].
+	ErrWaitersExceeded = errors.New("bulkx: waiter limit exceeded")
 )
 
 // errCancelled wraps [ErrCancelled] joining the underlying context cause.

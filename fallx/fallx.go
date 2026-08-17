@@ -43,13 +43,16 @@ import (
 
 // Fallback wraps a primary operation with a graceful-degradation strategy fixed
 // at construction. Create one with [New], run work with the package-level
-// [Execute] or [ExecuteWithKey], inspect counters with [Fallback.Stats], and —
-// under [StrategyCached] — release the background cleanup goroutine with
-// [Fallback.Close].
+// [Execute] or [ExecuteWithKey], inspect counters with [Fallback.Stats], and
+// call [Fallback.Close] to reject further work. Close is required to stop a
+// background sweeper only when [WithCleanupInterval] was set under
+// [StrategyCached].
 //
-// A Fallback is safe for concurrent use from any number of goroutines: counters
-// are lock-free atomics. Under [StrategyCached] the result cache is sharded
-// across per-shard mutexes; other strategies allocate no cache storage.
+// A Fallback is safe for concurrent use from any number of goroutines:
+// counters are lock-free atomics. Under [StrategyCached] the result cache is
+// sharded across per-shard mutexes; other strategies allocate no cache storage.
+// A background cleanup goroutine is started only when [WithCleanupInterval] is
+// set under [StrategyCached]; then [Fallback.Close] is required to stop it.
 type Fallback[T any] struct {
 	cfg config[T]
 
@@ -75,8 +78,10 @@ type Fallback[T any] struct {
 // New creates a [Fallback] with the given options applied on top of the package
 // defaults. With no strategy option it defaults to [StrategyStatic] returning
 // the zero value of T. Invalid options are clamped, so New never returns an
-// unusable fallback. Under [StrategyCached] it starts a background goroutine
-// that sweeps expired entries; call [Fallback.Close] to stop it.
+// unusable fallback. Under [StrategyCached] the result cache is allocated at
+// construction; a background sweeper is started only when
+// [WithCleanupInterval] is positive, in which case [Fallback.Close] is
+// required to stop it.
 func New[T any](opts ...Option[T]) *Fallback[T] {
 	cfg := newConfig(opts)
 
@@ -103,11 +108,13 @@ func (f *Fallback[T]) Strategy() Strategy { return f.cfg.strategy }
 //
 // Execute returns [ErrClosed] if the fallback is closed and [ErrNilFunc] if
 // primaryFn is nil. When the primary succeeds its value is returned and, under
-// [StrategyCached], cached for the key. When it fails the result depends on the
-// strategy: [StrategyStatic] returns the configured value; [StrategyFunc] runs
-// the fallback function (returning [ErrFallbackFailed] on its error, or
-// [ErrNoFunc] if none is configured); [StrategyCached] returns the cached value
-// or [ErrNoCached]. Each callback runs under [panix.Safe].
+// [StrategyCached], cached for the key. When it fails, [WithFallbackIf]
+// (if set) may return the primary error without taking the fallback path;
+// otherwise the result depends on the strategy: [StrategyStatic] returns the
+// configured value; [StrategyFunc] runs the fallback function (returning
+// [ErrFallbackFailed] on its error, or [ErrNoFunc] if none is configured);
+// [StrategyCached] returns the cached value or [ErrNoCached]. Each callback
+// runs under [panix.Safe]. The primary callback always runs first.
 func Execute[T any](f *Fallback[T], ctx context.Context, primaryFn PrimaryFunc[T]) (T, error) {
 	return ExecuteWithKey(f, ctx, f.resolveKey(ctx), primaryFn)
 }
@@ -139,6 +146,10 @@ func ExecuteWithKey[T any](f *Fallback[T], ctx context.Context, key string, prim
 		return result, nil
 	}
 
+	if f.cfg.fallbackIf != nil && !f.cfg.fallbackIf(err) {
+		return result, err
+	}
+
 	return f.fallback(ctx, fc, err)
 }
 
@@ -149,10 +160,7 @@ func ExecuteWithKey[T any](f *Fallback[T], ctx context.Context, key string, prim
 func (f *Fallback[T]) fallback(ctx context.Context, fc *execution, primaryErr error) (T, error) {
 	var zero T
 	f.fallbackUsed.Add(1)
-
-	if f.cfg.onFallback != nil {
-		f.cfg.onFallback(primaryErr, f.cfg.strategy)
-	}
+	f.fireOnFallback(primaryErr)
 
 	fc.onFallback = true
 	fc.err = primaryErr
@@ -191,6 +199,18 @@ func (f *Fallback[T]) fallback(ctx context.Context, fc *execution, primaryErr er
 		f.fallbackFailed.Add(1)
 		return zero, ErrNoFunc
 	}
+}
+
+// fireOnFallback invokes the configured [WithOnFallback] hook, if any. The hook
+// runs synchronously on the driving goroutine; a panic is recovered so it
+// cannot crash the caller.
+func (f *Fallback[T]) fireOnFallback(err error) {
+	fn := f.cfg.onFallback
+	if fn == nil {
+		return
+	}
+	defer func() { _ = recover() }()
+	fn(err, f.cfg.strategy)
 }
 
 // resolveKey derives the cache key for a call: the [WithKeyFunc] result when
@@ -271,13 +291,16 @@ func (f *Fallback[T]) ResetStats() {
 	f.cacheEvictions.Store(0)
 }
 
-// Close stops the background cleanup goroutine started for [StrategyCached] and
-// marks the fallback closed: subsequent [Execute] and [ExecuteWithKey] calls
-// return [ErrClosed], and [Fallback.Seed], [Fallback.SeedWithTTL], and
-// [Fallback.ClearCache] become no-ops. Close is idempotent and always returns
-// nil; the cache contents are left intact for inspection via [Fallback.Stats].
-// It is safe to call on non-cached strategies (a no-op beyond setting the
-// closed flag).
+// Close stops the background cleanup goroutine if one was started by
+// [WithCleanupInterval] under [StrategyCached] and marks the fallback closed:
+// subsequent [Execute] and [ExecuteWithKey] calls return [ErrClosed], and
+// [Fallback.Seed], [Fallback.SeedWithTTL], and [Fallback.ClearCache] become
+// no-ops. Close is idempotent and always returns nil; the cache contents are
+// left intact for inspection via [Fallback.Stats]. It is safe to call on
+// non-cached strategies and when no sweeper is running (a no-op beyond setting
+// the closed flag). Close is required to avoid a goroutine leak only when a
+// cleanup interval was configured; it is still recommended so Execute is
+// rejected after shutdown.
 func (f *Fallback[T]) Close() error {
 	if f.closed.Swap(true) {
 		return nil

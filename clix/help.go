@@ -20,16 +20,21 @@ const (
 )
 
 // help builds the formatted help text for this command, including the USAGE
-// line, description, subcommand list, own flags, and flags inherited from
-// ancestor commands (shown under GLOBAL FLAGS).
+// line (full command path), description, subcommand list, own flags plus
+// built-in --help/--version, and flags inherited from ancestor commands
+// (shown under GLOBAL FLAGS, root-first). Headings come from [HelpLabels].
 func (c *Command) help() string {
 	var b strings.Builder
+	lb := c.labels()
 
-	b.WriteString("USAGE: ")
-	b.WriteString(c.name)
-	b.WriteString(" [flags]")
+	b.WriteString(lb.Usage)
+	b.WriteString(": ")
+	b.WriteString(commandPath(c))
+	b.WriteByte(' ')
+	b.WriteString(lb.FlagsMetavar)
 	if len(c.subcommands) > 0 {
-		b.WriteString(" [command]")
+		b.WriteByte(' ')
+		b.WriteString(lb.CommandMetavar)
 	}
 	b.WriteByte('\n')
 
@@ -40,26 +45,69 @@ func (c *Command) help() string {
 	}
 
 	if len(c.subcommands) > 0 {
-		writeCommandBlock(&b, c)
+		writeCommandBlock(&b, c, lb)
 	}
 
-	if len(c.flags) > 0 {
-		b.WriteString("\nFLAGS:\n")
-		writeFlagBlock(&b, c.flags)
-	}
+	local := append(append([]*flagMeta{}, c.flags...), builtinFlagMetas(c, lb)...)
+	b.WriteByte('\n')
+	b.WriteString(lb.Flags)
+	b.WriteString(":\n")
+	writeFlagBlock(&b, local, lb)
 
 	if inherited := collectInheritedFlags(c); len(inherited) > 0 {
-		b.WriteString("\nGLOBAL FLAGS:\n")
-		writeFlagBlock(&b, inherited)
+		b.WriteByte('\n')
+		b.WriteString(lb.GlobalFlags)
+		b.WriteString(":\n")
+		writeFlagBlock(&b, inherited, lb)
 	}
 
 	return b.String()
 }
 
+// commandPath returns the space-separated names from the root command down
+// to c, e.g. "myapp db migrate".
+func commandPath(c *Command) string {
+	n := 0
+	for cur := c; cur != nil; cur = cur.parent {
+		n++
+	}
+	parts := make([]string, n)
+	i := n - 1
+	for cur := c; cur != nil; cur = cur.parent {
+		parts[i] = cur.name
+		i--
+	}
+	return strings.Join(parts, " ")
+}
+
+// builtinFlagMetas returns render-only flag rows for control flags. They are
+// not registered in flagMap — the parser intercepts them before lookup.
+func builtinFlagMetas(c *Command, lb HelpLabels) []*flagMeta {
+	out := []*flagMeta{{
+		name:     helpFlagName,
+		short:    helpFlagShort,
+		usage:    lb.HelpFlag,
+		isBool:   true,
+		defValue: false,
+	}}
+	if c.root().version != "" {
+		out = append(out, &flagMeta{
+			name:     versionFlagName,
+			short:    versionFlagShort,
+			usage:    lb.VersionFlag,
+			isBool:   true,
+			defValue: false,
+		})
+	}
+	return out
+}
+
 // writeCommandBlock writes the COMMANDS section listing each subcommand (with
 // its aliases) and description in a two-column layout.
-func writeCommandBlock(b *strings.Builder, c *Command) {
-	b.WriteString("\nCOMMANDS:\n")
+func writeCommandBlock(b *strings.Builder, c *Command, lb HelpLabels) {
+	b.WriteByte('\n')
+	b.WriteString(lb.Commands)
+	b.WriteString(":\n")
 	labels := make([]string, 0, len(c.subOrder))
 	for _, name := range c.subOrder {
 		sub := c.subcommands[name]
@@ -81,14 +129,14 @@ func writeCommandBlock(b *strings.Builder, c *Command) {
 
 // writeFlagBlock writes a group of flags to b in a three-column layout:
 // flag names, default value, and usage description.
-func writeFlagBlock(b *strings.Builder, flags []*flagMeta) {
+func writeFlagBlock(b *strings.Builder, flags []*flagMeta, lb HelpLabels) {
 	flagCol := 0
 	defCol := 0
 	for _, f := range flags {
 		if w := flagDisplayWidth(f); w > flagCol {
 			flagCol = w
 		}
-		if w := len(formatDefault(f.defValue)); w > defCol {
+		if w := len(formatDefault(f.defValue, lb.EmptyString)); w > defCol {
 			defCol = w
 		}
 	}
@@ -107,14 +155,14 @@ func writeFlagBlock(b *strings.Builder, flags []*flagMeta) {
 			flag = "--" + f.name + ", -" + f.short
 		}
 
-		td := formatDefault(f.defValue)
+		td := formatDefault(f.defValue, lb.EmptyString)
 
 		comment := f.usage
 		if f.required {
-			comment += " (required)"
+			comment += " (" + lb.Required + ")"
 		}
 		if len(f.enumValues) > 0 {
-			comment += " (one of: " + fmt.Sprint(f.enumValues) + ")"
+			comment += " (" + formatOneOf(lb.OneOf, formatEnum(f.enumValues)) + ")"
 		}
 
 		writePadded(b, flag, td, comment, flagCol, defCol)
@@ -162,25 +210,41 @@ func writePadded(b *strings.Builder, col1, col2, col3 string, w1, w2 int) {
 }
 
 // collectInheritedFlags gathers flags from all ancestor commands so they can
-// be displayed in a "GLOBAL FLAGS" section in help output.
+// be displayed in a "GLOBAL FLAGS" section. Groups are root-first so true
+// globals appear above intermediate-command flags.
 func collectInheritedFlags(cmd *Command) []*flagMeta {
-	var inherited []*flagMeta
+	var layers [][]*flagMeta
 	for p := cmd.parent; p != nil; p = p.parent {
-		inherited = append(inherited, p.flags...)
+		if len(p.flags) > 0 {
+			layers = append(layers, p.flags)
+		}
+	}
+	var inherited []*flagMeta
+	for i := len(layers) - 1; i >= 0; i-- {
+		inherited = append(inherited, layers[i]...)
 	}
 	return inherited
+}
+
+// formatEnum joins allowed enum values for the help comment, e.g. "dev, prod".
+func formatEnum(vals []any) string {
+	parts := make([]string, len(vals))
+	for i, v := range vals {
+		parts[i] = fmt.Sprint(v)
+	}
+	return strings.Join(parts, ", ")
 }
 
 // formatDefault produces a human-readable representation of a flag's default
 // value for the help output. Bool flags return an empty string (their
 // presence/absence is self-explanatory); empty strings show "<string>".
-func formatDefault(v any) string {
+func formatDefault(v any, emptyString string) string {
 	switch d := v.(type) {
 	case bool:
 		return ""
 	case string:
 		if d == "" {
-			return "<string>"
+			return emptyString
 		}
 		return "[" + d + "]"
 	case time.Duration:

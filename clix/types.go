@@ -16,7 +16,9 @@ type Context struct {
 // Args returns the positional arguments collected for the matched command.
 // Positional arguments are tokens that appear after flags and are not
 // recognised as subcommands, plus everything after a bare "--" terminator.
-// Returns nil when the context has no command (zero-value Context).
+// The returned slice is the live parse state, not a copy; mutating it
+// mutates the command. Returns nil when the context has no command
+// (zero-value Context).
 func (c *Context) Args() []string {
 	if c.command == nil {
 		return nil
@@ -32,12 +34,15 @@ func (c *Context) Command() *Command { return c.command }
 func (c *Context) Parser() *Parser { return c.parser }
 
 // Option configures a [Command] during construction. The built-in options
-// are [AddFlag], [SubCommand], [Run], and [Alias]. Options compose: they
-// can be nested inside [SubCommand] to build arbitrarily deep command trees.
+// are [AddFlag], [SubCommand], [Run], [Alias], [Version], and [WithHelpLabels].
+// Options compose: they can be nested inside [SubCommand] to build
+// arbitrarily deep command trees.
 type Option func(*Command)
 
 // FlagOption modifies flag metadata during [AddFlag] registration.
-// Built-in flag options are [Required] and [Enum].
+// The extras defined in this package are [Required] and [Enum]. Callers
+// outside this package cannot write additional FlagOption values because
+// the receiver type is unexported.
 type FlagOption func(*flagMeta)
 
 // Command represents a node in the CLI command tree. Each command has its
@@ -58,6 +63,7 @@ type Command struct {
 	action      Action
 	hasAction   bool
 	version     string
+	helpLabels  *HelpLabels
 	flagMap     map[string]*flagMeta
 	shortMap    map[string]string
 	args        []string
@@ -75,7 +81,9 @@ func (c *Command) Parent() *Command { return c.parent }
 
 // Args returns the positional arguments collected for this command during
 // parsing: tokens that are neither flags nor subcommands, plus everything
-// after a bare "--" terminator. Returns nil when no positionals were seen.
+// after a bare "--" terminator. The returned slice is the live parse
+// state, not a copy; mutating it mutates the command. Returns nil when
+// no positionals were seen.
 func (c *Command) Args() []string { return c.args }
 
 // flagMeta stores the definition, state, and setter for a single flag.
@@ -116,4 +124,12 @@ func newCommand(name, desc string) *Command {
 		flagMap:     make(map[string]*flagMeta),
 		shortMap:    make(map[string]string),
 	}
+}
+
+// root walks to the top of the command tree. The receiver is not mutated.
+func (c *Command) root() *Command {
+	for c.parent != nil {
+		c = c.parent
+	}
+	return c
 }

@@ -14,23 +14,40 @@ import (
 // jsonIndent is the indentation applied when encoding JSON config files.
 const jsonIndent = "  "
 
-// resolveFormat returns f unchanged when it is explicit, otherwise detects
-// the format from path's extension. Returns [ErrUnsupportedFormat] when the
-// extension is not recognised.
+// resolveFormat returns f unchanged when it is a known explicit codec,
+// otherwise detects the format from path's extension. Returns
+// [ErrUnsupportedFormat] when the extension is not recognised or f is not
+// a known [Format] value.
 func resolveFormat(f Format, path string) (Format, error) {
-	if f != FormatAuto {
+	switch f {
+	case FormatYAML, FormatJSON, FormatTOML:
 		return f, nil
-	}
-	ext := strings.ToLower(filepath.Ext(path))
-	switch ext {
-	case ".yaml", ".yml":
-		return FormatYAML, nil
-	case ".json":
-		return FormatJSON, nil
-	case ".toml":
-		return FormatTOML, nil
+	case FormatAuto:
+		ext := strings.ToLower(filepath.Ext(path))
+		switch ext {
+		case ".yaml", ".yml":
+			return FormatYAML, nil
+		case ".json":
+			return FormatJSON, nil
+		case ".toml":
+			return FormatTOML, nil
+		default:
+			return FormatAuto, errUnsupportedFormat(path, ext)
+		}
 	default:
-		return FormatAuto, errUnsupportedFormat(path, ext)
+		return FormatAuto, errUnsupportedFormat(path, f.String())
+	}
+}
+
+// requireExplicitFormat returns [ErrUnsupportedFormat] unless f is
+// [FormatYAML], [FormatJSON], or [FormatTOML]. Used by [Parse], [Marshal],
+// and [Validate] when a concrete codec is required.
+func requireExplicitFormat(f Format, path string) error {
+	switch f {
+	case FormatYAML, FormatJSON, FormatTOML:
+		return nil
+	default:
+		return errUnsupportedFormat(path, f.String())
 	}
 }
 

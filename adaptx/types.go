@@ -7,28 +7,31 @@ import (
 )
 
 // Algorithm selects the strategy a [Limiter] uses to move its concurrency
-// limit in response to latency and error feedback.
+// limit in response to latency and error feedback. Each law runs once per
+// completed sample window, not once per request.
 type Algorithm uint8
 
 const (
-	// AIMD is Additive Increase / Multiplicative Decrease: the limit grows by a
-	// fixed step on each success and is cut by a multiplicative factor on each
-	// failure. It needs no latency target and is the safest default — the same
-	// control law TCP congestion avoidance uses. Best when failures (not
-	// latency) are the overload signal.
+	// AIMD is Additive Increase / Multiplicative Decrease: after a successful
+	// window that reached the utilization gate the limit grows by a fractional
+	// credit of [WithIncreaseRate]; a window with any failure is cut once by
+	// [WithDecreaseRatio]. It needs no latency target and is the safest default
+	// — the same control law TCP congestion avoidance uses. Best when failures
+	// (not latency) are the overload signal.
 	AIMD Algorithm = iota
 
 	// Vegas estimates queue build-up from round-trip time, in the spirit of
-	// TCP Vegas. It compares observed latency against the best latency seen
-	// (RTT_min) to infer how much work is queued, then grows the limit while
-	// the estimated queue is small and shrinks it when the queue grows. Best
-	// when a backend has a stable, measurable floor latency.
+	// TCP Vegas. It compares the window's mean RTT against the best latency
+	// seen (RTT_min) as queue = limit·(1 − minRTT/rtt), then grows the limit
+	// while the estimated queue is below α and shrinks it when the queue
+	// exceeds β = α·2. Best when a backend has a stable, measurable floor
+	// latency.
 	Vegas
 
 	// Gradient reacts to the trend of latency: it grows the limit while the
-	// current sample is at or below the smoothed average and backs off in
-	// proportion to how far latency has risen above it. Best for backends
-	// whose floor latency drifts, where an absolute target would go stale.
+	// window mean is at or below the EMA average and backs off in proportion
+	// to how far the window mean has risen above it. Best for backends whose
+	// floor latency drifts, where an absolute target would go stale.
 	Gradient
 )
 
@@ -121,9 +124,19 @@ var _ AdaptController = (*execution)(nil)
 type AdaptFunc[T any] func(ctx context.Context, ac AdaptController) (T, error)
 
 // sample is one recorded outcome retained in the limiter's ring buffer for
-// percentile statistics and (for the latency-based algorithms) adaptation.
+// percentile statistics.
 type sample struct {
 	latency time.Duration
 	ts      time.Time
 	success bool
+}
+
+// windowSnap is the aggregate of one completed sample window, fed once to the
+// configured control law.
+type windowSnap struct {
+	n           int
+	fails       int
+	maxInFlight int
+	meanRTT     float64
+	minRTT      float64
 }

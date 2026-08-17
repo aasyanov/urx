@@ -29,6 +29,11 @@ const (
 	// minSpread is the floor for the tail stagger, guarding against a zero
 	// spread when delay/spreadDivisor rounds down below one tick.
 	minSpread = time.Millisecond
+
+	// DefaultHedgeProbability is the chance that a call fans out beyond the
+	// original copy when [WithHedgeProbability] is not supplied. 1.0 means
+	// every eligible call may launch hedges.
+	DefaultHedgeProbability = 1.0
 )
 
 // Option configures a [Hedger] created by [New].
@@ -39,7 +44,9 @@ type config struct {
 	maxParallel int
 	delay       time.Duration
 	maxDelay    time.Duration
+	hedgeProb   float64
 	onHedge     func(attempt int)
+	randFn      func() float64
 	op          string
 }
 
@@ -51,9 +58,12 @@ func newConfig(opts []Option) config {
 		maxParallel: DefaultMaxParallel,
 		delay:       DefaultDelay,
 		maxDelay:    DefaultMaxDelay,
+		hedgeProb:   DefaultHedgeProbability,
 	}
 	for _, opt := range opts {
-		opt(&cfg)
+		if opt != nil {
+			opt(&cfg)
+		}
 	}
 	if cfg.maxParallel < minParallel {
 		cfg.maxParallel = minParallel
@@ -111,10 +121,36 @@ func WithMaxDelay(d time.Duration) Option {
 
 // WithOnHedge registers a callback invoked just before each hedge copy is
 // launched, with the 1-based attempt number (2 for the first hedge, 3 for the
-// second, ...). It runs asynchronously under panic recovery so a slow or
-// panicking hook never stalls or crashes the dispatch loop. Default: none.
+// second, ...). It runs synchronously on the dispatch goroutine under panic
+// recovery so a panicking hook never crashes the loop; the hook must not block
+// or panic. Default: none.
 func WithOnHedge(fn func(attempt int)) Option {
 	return func(c *config) { c.onHedge = fn }
+}
+
+// WithHedgeProbability sets the probability that a call fans out beyond the
+// original copy. Default: [DefaultHedgeProbability] (1.0). Values <= 0 are
+// ignored; values > 1 are clamped to 1.
+func WithHedgeProbability(p float64) Option {
+	return func(c *config) {
+		if p <= 0 {
+			return
+		}
+		if p > DefaultHedgeProbability {
+			p = DefaultHedgeProbability
+		}
+		c.hedgeProb = p
+	}
+}
+
+// withRand injects the [0, 1) source used by [WithHedgeProbability]. A nil fn
+// is ignored. Unexported: tests only.
+func withRand(fn func() float64) Option {
+	return func(c *config) {
+		if fn != nil {
+			c.randFn = fn
+		}
+	}
 }
 
 // WithOp sets the logical operation name attached to panic reports raised by a

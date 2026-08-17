@@ -67,13 +67,16 @@ Retry loops look trivial and are almost always wrong in production:
    │                 config{maxAttempts,   (types.go)
  loop i in 0..max     backoff,maxBackoff,  RetryFunc[T]
    │                  jitter,retryIf,       attempt{number,lastErr,
- panix.Safe(attempt)  onRetry,op}            start,aborted}
-   │                   │                   Number/LastErr/
+ panix.Safe(attempt)  onRetry,delayFunc,     start,aborted}
+   │                  maxElapsed,op}       Number/LastErr/
  isRetryable?         WithMaxAttempts       Elapsed/Abort
  abort? cancel?       WithBackoff
-   │                  WithMaxBackoff        errors.go
- backoff() + sleep()  WithJitter/RetryIf    ErrExhausted/ErrCancelled
-                      WithOnRetry           ErrAborted/ErrNilFunc
+ elapsed cap?         WithMaxBackoff        errors.go
+   │                  WithJitter            ErrExhausted/ErrCancelled
+ backoff() + sleep()  WithEqualJitter       ErrAborted/ErrNilFunc
+                      WithMaxElapsed        ErrMaxElapsed
+                      WithDelayFunc
+                      WithRetryIf/OnRetry
                       WithOp
 ```
 
@@ -86,13 +89,16 @@ Do(ctx, fn, opts...)
   │
   └── for i in 0 .. maxAttempts-1:
         ├── ctx cancelled ? ───────────► ErrCancelled(ctx.Err())
+        ├── i>0 && elapsed ≥ maxElapsed ► ErrMaxElapsed(lastErr)
         ├── (val, err) = panix.Safe(fn(ctx,rc))  rc = {i+1, lastErr, start}
         ├── err == nil ? ──────────────► return val, nil
         ├── rc.Abort() called ? ───────► ErrAborted(i+1, err)
+        ├── ctx.Err() != nil ? ────────► ErrCancelled(ctx.Err())  [incl. last attempt]
         ├── !retryable(err) ? ─────────► ErrExhausted(i+1, err)
         ├── last attempt ? ────────────► break
-        ├── onRetry(i+1, err)
-        └── sleep(ctx, backoff(i))     cancellable
+        ├── onRetry under panix.SafeVoid  panic → *panix.PanicError, stop
+        └── sleep(ctx, min(delay, remaining))
+             delay = DelayFunc(attempt, err) if set, else backoff+jitter
              └── cancelled ? ──────────► ErrCancelled(ctx.Err())
 
   return ErrExhausted(maxAttempts, lastErr)
@@ -100,11 +106,13 @@ Do(ctx, fn, opts...)
 
 Each iteration builds a fresh `RetryController` carrying the 1-based attempt number, the previous attempt's error (`nil` on the first), and a shared start time for `Elapsed`. The callback runs under `panix.Safe`, so a panic is converted into a `*panix.PanicError` and treated as an ordinary failure — it can be retried or classified by `WithRetryIf` like any error.
 
-After a retryable failure that is not the last attempt, `Do` sleeps for the computed backoff using a cancellable timer: if the context is cancelled mid-sleep, `Do` returns `ErrCancelled` immediately rather than waiting out the delay.
+After every failed attempt, including the last, `Do` checks `ctx.Err()` **before** treating the budget as exhausted. A cancelled last attempt returns `ErrCancelled` wrapping `ctx.Err()` — not `ErrExhausted`. `OnRetry` runs under `panix.SafeVoid` on the driving goroutine; a panicking hook becomes a `*panix.PanicError` and stops retrying.
+
+After a retryable failure that is not the last attempt, `Do` sleeps for the computed delay using a cancellable timer: if the context is cancelled mid-sleep, `Do` returns `ErrCancelled` immediately rather than waiting out the delay. When `WithMaxElapsed` is set, that sleep is `min(delay, remaining budget)`.
 
 ### Backoff
 
-The nominal delay before the retry following attempt `i` (0-based) is `base * 2^i`, capped at `maxBackoff`. The cap is applied **before** jitter, then the capped delay is multiplied by a random factor in `[0.5, 1.5)`. Applying the cap first keeps the jitter window proportional and decorrelates retries across callers; the jittered value can briefly exceed `maxBackoff` by up to the jitter span, which is the intended spread.
+The nominal delay before the retry following attempt `i` (0-based) is `base * 2^i`, capped at `maxBackoff`. The cap is applied **before** jitter. Default jitter is multiplicative: the capped delay is multiplied by a random factor in `[0.5, 1.5)`. `WithEqualJitter` uses equal jitter instead: after the cap, `d = d/2 + rand*(d/2)`, so the delay lands in `[d/2, d)`. `WithDelayFunc` replaces exponential backoff and jitter entirely when set — it is a caller-supplied duration, not an HTTP `Retry-After` parser.
 
 ## Normative Contracts
 
@@ -113,10 +121,13 @@ The nominal delay before the retry following attempt `i` (0-based) is `base * 2^
 | -------------------------- | -------------------------------------------------------------------------------- |
 | Attempt budget             | `fn` is invoked at most `maxAttempts` times (floored to 1)                       |
 | First-attempt cancellation | A pre-cancelled context returns `ErrCancelled` without invoking `fn`             |
+| Last-attempt cancellation  | After a failed attempt, including the last, a done context returns `ErrCancelled` rather than `ErrExhausted` |
 | Backoff cancellation       | Cancellation during a backoff sleep returns `ErrCancelled` immediately           |
 | Retryability               | Without `WithRetryIf`, every error is retried; with it, the predicate decides    |
 | Abort                      | `RetryController.Abort` stops after the current attempt and returns `ErrAborted` |
 | Panic safety               | A panicking attempt becomes a `*panix.PanicError`, handled as a normal failure   |
+| OnRetry safety             | `OnRetry` runs synchronously under recover; a panic becomes `*panix.PanicError` and stops retrying |
+| Max elapsed                | The first attempt always runs; later attempts are skipped with `ErrMaxElapsed` when the wall-clock cap is hit |
 | Error wrapping             | Every terminal error joins the underlying cause (test with `errors.Is`)          |
 | `attempts=` semantics      | `ErrExhausted` reports the stopping attempt; full budget exhaustion reports `maxAttempts` |
 | Controller scope           | A `RetryController` is valid only during its attempt; do not retain it           |
@@ -240,14 +251,18 @@ _, err := retryx.Do(ctx, func(ctx context.Context, _ retryx.RetryController) (Re
 | `WithMaxAttempts`     | `func WithMaxAttempts(n int) Option`                                              | Total attempts including the first; ≤ 0 → 1                             |
 | `WithBackoff`         | `func WithBackoff(d time.Duration) Option`                                        | Base backoff; ≤ 0 ignored                                               |
 | `WithMaxBackoff`      | `func WithMaxBackoff(d time.Duration) Option`                                     | Cap on any single delay; ≤ 0 ignored                                    |
-| `WithJitter`          | `func WithJitter(enabled bool) Option`                                            | Enable/disable `[0.5, 1.5)` jitter                                      |
+| `WithJitter`          | `func WithJitter(enabled bool) Option`                                            | Enable/disable multiplicative `[0.5, 1.5)` jitter                       |
+| `WithEqualJitter`     | `func WithEqualJitter() Option`                                                   | Equal jitter after cap: `[d/2, d)`                                      |
+| `WithMaxElapsed`      | `func WithMaxElapsed(d time.Duration) Option`                                     | Wall-clock cap across attempts; ≤ 0 ignored; first attempt always runs  |
+| `WithDelayFunc`       | `func WithDelayFunc(fn func(attempt int, err error) time.Duration) Option`        | Replaces exponential+jitter; nil ignored; attempt is 1-based            |
 | `WithRetryIf`         | `func WithRetryIf(fn func(error) bool) Option`                                   | Predicate deciding retryability                                         |
-| `WithOnRetry`         | `func WithOnRetry(fn func(attempt int, err error)) Option`                        | Callback after each retryable failure                                   |
+| `WithOnRetry`         | `func WithOnRetry(fn func(attempt int, err error)) Option`                        | Callback after each retryable failure; panic-safe, stops on panic       |
 | `WithOp`              | `func WithOp(op string) Option`                                                  | Operation name in `*panix.PanicError`; empty ignored                     |
 | `ErrExhausted`        | `var ErrExhausted error`                                                          | All attempts failed or a non-retryable error stopped the loop           |
-| `ErrCancelled`        | `var ErrCancelled error`                                                          | Context cancelled or expired before/during retry                        |
+| `ErrCancelled`        | `var ErrCancelled error`                                                          | Context cancelled or expired, including after a failed last attempt     |
 | `ErrAborted`          | `var ErrAborted error`                                                            | Callback invoked `RetryController.Abort`                              |
 | `ErrNilFunc`          | `var ErrNilFunc error`                                                            | Supplied callback was nil                                               |
+| `ErrMaxElapsed`       | `var ErrMaxElapsed error`                                                         | Wall-clock cap hit before a later attempt                               |
 
 
 ### RetryController
@@ -269,10 +284,13 @@ _, err := retryx.Do(ctx, func(ctx context.Context, _ retryx.RetryController) (Re
 | `WithMaxAttempts(n)` | `DefaultMaxAttempts` (3)   | Total attempts including the first; ≤ 0 degrades to 1           |
 | `WithBackoff(d)`     | `DefaultBackoff` (100 ms)  | Base for exponential backoff; ≤ 0 ignored                       |
 | `WithMaxBackoff(d)`  | `DefaultMaxBackoff` (10 s) | Upper bound on a single delay; ≤ 0 ignored                      |
-| `WithJitter(b)`      | enabled                    | Multiply the capped delay by a random `[0.5, 1.5)` factor       |
-| `WithRetryIf(fn)`    | nil (retry all)            | Predicate deciding whether an error is retryable                |
-| `WithOnRetry(fn)`    | nil                        | Callback invoked after each retryable failure, before the sleep |
-| `WithOp(op)`         | `"retryx.Do"`              | Operation name in `*panix.PanicError`; empty strings ignored    |
+| `WithJitter(b)`       | enabled                    | Multiply the capped delay by a random `[0.5, 1.5)` factor       |
+| `WithEqualJitter()`   | off (multiplicative)       | After cap, delay is in `[d/2, d)`; DelayFunc still wins         |
+| `WithMaxElapsed(d)`   | none                       | Wall-clock cap; ≤ 0 ignored; first attempt always runs          |
+| `WithDelayFunc(fn)`   | nil                        | Caller-supplied delay (not Retry-After); nil ignored            |
+| `WithRetryIf(fn)`     | nil (retry all)            | Predicate deciding whether an error is retryable                |
+| `WithOnRetry(fn)`     | nil                        | After each retryable failure, before sleep; panics stop retrying |
+| `WithOp(op)`          | `"retryx.Do"`              | Operation name in `*panix.PanicError`; empty strings ignored    |
 
 
 ## Errors
@@ -281,9 +299,10 @@ _, err := retryx.Do(ctx, func(ctx context.Context, _ retryx.RetryController) (Re
 | Error          | Condition                                                                                   |
 | -------------- | ------------------------------------------------------------------------------------------- |
 | `ErrExhausted` | Every attempt failed, or a non-retryable error stopped the loop (wraps the last cause). The message includes `attempts=N`: when [WithRetryIf] rejects an error, `N` is the 1-based attempt that stopped the loop; when the full budget is consumed, `N` equals `maxAttempts`. |
-| `ErrCancelled` | The context was cancelled or expired, before an attempt or during backoff (wraps `ctx.Err()`) |
+| `ErrCancelled` | The context was cancelled or expired, before an attempt, after a failed attempt (including the last), or during backoff (wraps `ctx.Err()`) |
 | `ErrAborted`   | The callback called `RetryController.Abort` (wraps the last cause; message includes `attempt=N`) |
 | `ErrNilFunc`   | The supplied function was nil                                                               |
+| `ErrMaxElapsed`| `WithMaxElapsed` expired before a later attempt (wraps the last cause). The first attempt always runs. |
 
 
 A panicking attempt that exhausts the budget surfaces as `ErrExhausted` wrapping a `*panix.PanicError` (reach it with `errors.As`).
@@ -296,11 +315,23 @@ A panicking attempt that exhausts the budget surfaces as `ErrExhausted` wrapping
 > [!WARNING]
 > **The default retries everything.** Without `WithRetryIf`, permanent failures (validation, auth) burn the full attempt budget. Always classify errors in production.
 
+> [!WARNING]
+> **A cancelled last attempt is `ErrCancelled`, not `ErrExhausted`.** If `fn` returns after `ctx` is done — including `MaxAttempts(1)` — `Do` checks `ctx.Err()` before treating the budget as exhausted. Match on `ErrCancelled` / `context.Canceled` when the caller gave up; do not assume a last failure is `ErrExhausted`.
+
+> [!WARNING]
+> **`OnRetry` panics stop retrying.** The hook runs synchronously under recover. A panicking hook becomes a `*panix.PanicError` from `Do` and no further attempts run. Keep `OnRetry` small (metrics, logs); do not block.
+
+> [!NOTE]
+> **`WithMaxElapsed` is a wall-clock cap, not a substitute for `WithMaxAttempts`.** The first attempt always runs. Later attempts are skipped when elapsed time is already ≥ the cap, and the backoff sleep is shortened to the remaining budget. You still need an attempt budget.
+
+> [!NOTE]
+> **`WithDelayFunc` is caller-supplied.** It replaces exponential backoff and jitter; it is not an HTTP `Retry-After` parser. Parse protocol headers in the caller and return a duration.
+
 > [!NOTE]
 > **retryx does not impose a per-attempt deadline.** A single attempt can block indefinitely if `fn` ignores `ctx`. Wrap each attempt with `toutx.Execute` for a hard per-try timeout.
 
 > [!NOTE]
-> **Jitter can exceed `maxBackoff` slightly.** Because jitter is applied after the cap, a delay can reach up to `1.5 × maxBackoff`. This is intentional decorrelation, not a bug.
+> **Default multiplicative jitter can exceed `maxBackoff` slightly.** Because that jitter is applied after the cap, a delay can reach up to `1.5 × maxBackoff`. Equal jitter stays in `[d/2, d]` after the cap. This is intentional decorrelation, not a bug.
 
 ## Safety and Concurrency
 
@@ -345,7 +376,7 @@ Three environments, two hardware classes, two operating systems. All values are 
 
 | Metric         | Value                          |
 | -------------- | ------------------------------ |
-| Test functions | 42                             |
+| Test functions | 54                             |
 | Benchmarks     | 4                              |
 | Fuzz targets   | 1                              |
 | Examples       | 4                              |
@@ -361,7 +392,7 @@ retryx/
 ├── retryx.go           # package doc + Do[T] + backoff/sleep/isRetryable
 ├── options.go          # config, Option, defaults, WithXxx
 ├── types.go            # RetryController + private attempt impl
-├── errors.go           # ErrExhausted, ErrCancelled, ErrAborted, ErrNilFunc
+├── errors.go           # ErrExhausted, ErrCancelled, ErrAborted, ErrNilFunc, ErrMaxElapsed
 ├── retryx_test.go      # unit + table-driven tests
 ├── errors_test.go      # sentinel wrapper contract tests
 ├── bench_test.go       # benchmarks (sequential + parallel)

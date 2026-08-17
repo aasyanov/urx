@@ -7,19 +7,33 @@ import (
 	"time"
 )
 
-// shortGroupMinLen is the minimum token length that triggers POSIX grouped
-// short-flag expansion: "-" + at least two characters (e.g. "-vh").
-const shortGroupMinLen = 2
+const (
+	// shortGroupMinLen is the minimum token length that triggers POSIX grouped
+	// short-flag expansion: "-" + at least two characters (e.g. "-vh").
+	shortGroupMinLen = 2
 
-// noNegationPrefix is the prefix used to negate a bool flag: "--no-verbose".
-const noNegationPrefix = "no-"
+	// noNegationPrefix is the prefix used to negate a bool flag: "--no-verbose".
+	noNegationPrefix = "no-"
 
-// longHelpFlag is the POSIX long option that triggers [ErrHelp].
-const longHelpFlag = "--help"
+	longHelpFlag     = "--help"
+	shortHelpFlag    = "-h"
+	longVersionFlag  = "--version"
+	shortVersionFlag = "-V"
+
+	// positionalStdinArg is the POSIX / flag.FlagSet convention for stdin
+	// as a positional operand: a lone dash.
+	positionalStdinArg = "-"
+
+	helpFlagName     = "help"
+	helpFlagShort    = "h"
+	versionFlagName  = "version"
+	versionFlagShort = "V"
+)
 
 // parseArgs walks the argument list, dispatching to subcommands, resolving
 // flags (including inherited ones and --no-* negation), and collecting
-// positional arguments. It does NOT execute the matched action.
+// positional arguments. A lone "-" is a positional (stdin convention),
+// matching flag.FlagSet. It does NOT execute the matched action.
 func parseArgs(cmd *Command, args []string, p *Parser) error {
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
@@ -29,14 +43,25 @@ func parseArgs(cmd *Command, args []string, p *Parser) error {
 			break
 		}
 
-		if arg == longHelpFlag || arg == "-h" {
+		if isHelpToken(arg) {
 			p.matched = cmd
 			return ErrHelp
 		}
 
-		if p.version != "" && (arg == "--version" || arg == "-V") {
+		if p.version != "" && isVersionToken(arg) {
 			p.matched = cmd
 			return ErrVersion
+		}
+
+		if arg == positionalStdinArg {
+			// Same as flag.FlagSet: "-" is a positional, not a flag.
+			// On a routing node (subcommands, no action) it cannot be a
+			// command name, so it is still [ErrUnknownCommand].
+			if len(cmd.subcommands) > 0 && cmd.action == nil {
+				return errUnknownCommand(arg, cmd.subOrder)
+			}
+			cmd.args = append(cmd.args, arg)
+			continue
 		}
 
 		if !strings.HasPrefix(arg, "-") {
@@ -76,9 +101,13 @@ func parseShortGroup(cmd *Command, args []string, i *int, p *Parser) error {
 	chars := args[*i][1:]
 	for ci := 0; ci < len(chars); ci++ {
 		short := string(chars[ci])
-		if short == "h" {
+		if short == helpFlagShort {
 			p.matched = cmd
 			return ErrHelp
+		}
+		if p.version != "" && short == versionFlagShort {
+			p.matched = cmd
+			return ErrVersion
 		}
 		canonical, ok := resolveShort(cmd, short)
 		if !ok {
@@ -97,11 +126,11 @@ func parseShortGroup(cmd *Command, args []string, i *int, p *Parser) error {
 		if ci+1 < len(chars) {
 			return meta.setFunc(chars[ci+1:])
 		}
-		if *i+1 >= len(args) {
-			return errMissingValue("-" + short)
+		val, err := takeNextFlagValue(args, i, "-"+short)
+		if err != nil {
+			return err
 		}
-		*i++
-		return meta.setFunc(args[*i])
+		return meta.setFunc(val)
 	}
 	return nil
 }
@@ -123,7 +152,7 @@ func parseLongOrShort(cmd *Command, args []string, i *int, arg string) error {
 	meta, ok := resolveFlag(cmd, name)
 	if !ok && strings.HasPrefix(arg, "--") && strings.HasPrefix(name, noNegationPrefix) {
 		if negated, found := resolveFlag(cmd, name[len(noNegationPrefix):]); found && negated.isBool {
-			return negated.setFunc("false")
+			return applyBoolNegation(negated, name, inlineVal, hasEq)
 		}
 	}
 	if !ok {
@@ -140,11 +169,46 @@ func parseLongOrShort(cmd *Command, args []string, i *int, arg string) error {
 	if hasEq {
 		return meta.setFunc(inlineVal)
 	}
+	val, err := takeNextFlagValue(args, i, arg)
+	if err != nil {
+		return err
+	}
+	return meta.setFunc(val)
+}
+
+// takeNextFlagValue consumes args[*i+1] as a non-bool flag value. A missing
+// token or a token that looks like another flag yields [ErrMissingValue]
+// (use --flag=value to bind a dash-prefixed string). Signed numbers such as
+// -5 or -1s are values, not flags. A bare "-" (stdin convention) is a value.
+func takeNextFlagValue(args []string, i *int, flagTok string) (string, error) {
 	if *i+1 >= len(args) {
-		return errMissingValue(arg)
+		return "", errMissingValue(flagTok)
+	}
+	next := args[*i+1]
+	if nextTokenLooksLikeFlag(next) {
+		return "", errMissingValue(flagTok)
 	}
 	*i++
-	return meta.setFunc(args[*i])
+	return next, nil
+}
+
+// nextTokenLooksLikeFlag reports whether arg would be parsed as a flag or
+// the "--" terminator rather than a scalar value.
+func nextTokenLooksLikeFlag(arg string) bool {
+	if arg == "" || arg == positionalStdinArg {
+		return false
+	}
+	if strings.HasPrefix(arg, "--") {
+		return true
+	}
+	if arg[0] != '-' || len(arg) < 2 {
+		return false
+	}
+	return !isASCIIDigit(arg[1])
+}
+
+func isASCIIDigit(b byte) bool {
+	return b >= '0' && b <= '9'
 }
 
 // checkRequired walks the command chain and returns [ErrRequired] for the
@@ -158,6 +222,43 @@ func checkRequired(cmd *Command) error {
 		}
 	}
 	return nil
+}
+
+// isHelpToken reports whether arg is the built-in help flag, including the
+// inline form (--help=true, -h=true). "--helpers" is not help.
+func isHelpToken(arg string) bool {
+	return tokenIs(arg, longHelpFlag, shortHelpFlag)
+}
+
+// isVersionToken reports whether arg is the built-in version flag, including
+// the inline form (--version=1, -V=1).
+func isVersionToken(arg string) bool {
+	return tokenIs(arg, longVersionFlag, shortVersionFlag)
+}
+
+// tokenIs matches an exact long/short flag or the same flag with an inline
+// "=value" suffix.
+func tokenIs(arg, long, short string) bool {
+	return arg == long || arg == short ||
+		strings.HasPrefix(arg, long+"=") ||
+		strings.HasPrefix(arg, short+"=")
+}
+
+// applyBoolNegation sets a bool flag from a --no-<name> token. A bare
+// --no-<name> writes false. An inline value is parsed as a bool: --no-x=true
+// writes false, --no-x=false writes true.
+func applyBoolNegation(meta *flagMeta, name, inlineVal string, hasEq bool) error {
+	if !hasEq {
+		return meta.setFunc("false")
+	}
+	parsed, err := strconv.ParseBool(inlineVal)
+	if err != nil {
+		return errInvalidValue(name, inlineVal, err)
+	}
+	if parsed {
+		return meta.setFunc("false")
+	}
+	return meta.setFunc("true")
 }
 
 // splitFlag strips leading dashes from a flag token and splits on the first

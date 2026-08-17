@@ -22,8 +22,11 @@
 // # Supported types
 //
 // Bind supports string, bool, int, int32, int64, uint, float64,
-// [time.Duration], [time.Time] (RFC3339), and []string (comma-separated,
-// whitespace-trimmed).
+// exact [time.Duration] (ParseDuration, unit required), [time.Time] and
+// named types convertible to it (RFC3339), and []string (comma-separated,
+// whitespace-trimmed), plus defined types whose underlying kind is a
+// supported builtin (named int64 parses as an integer, not a duration),
+// and types whose pointer implements [encoding.TextUnmarshaler].
 //
 // # Overlaying onto a config struct (cfgx → envx → clix)
 //
@@ -58,10 +61,13 @@ import "errors"
 
 // New creates an [Env] with the given options.
 // Default configuration: no prefix, lookup [os.LookupEnv].
+// Nil options are ignored.
 func New(opts ...Option) *Env {
 	cfg := defaultConfig()
 	for _, o := range opts {
-		o(&cfg)
+		if o != nil {
+			o(&cfg)
+		}
 	}
 	return &Env{cfg: cfg}
 }

@@ -69,3 +69,56 @@ func ExampleParser_Reset() {
 	// 5
 	// 0
 }
+
+// ExampleParser_Help shows the command legend: full USAGE path, COMMANDS
+// with aliases, user FLAGS, and the built-in --help / --version rows.
+func ExampleParser_Help() {
+	p := clix.New(nil, "app", "demo tool",
+		clix.Version("1.0.0"),
+		clix.SubCommand("serve", "start the server",
+			clix.Alias("s"),
+			clix.Run(func(*clix.Context) error { return nil }),
+		),
+	)
+	fmt.Print(p.Help())
+	// Output:
+	// USAGE: app [flags] [command]
+	//
+	// demo tool
+	//
+	// COMMANDS:
+	//   serve, s       start the server
+	//
+	// FLAGS:
+	//   --help, -h                        show help
+	//   --version, -V                     print version
+}
+
+// ExampleWithHelpLabels replaces help chrome without translating command names.
+func ExampleWithHelpLabels() {
+	p := clix.New(nil, "app", "demo",
+		clix.WithHelpLabels(clix.HelpLabels{
+			Usage:          "SYNOPSIS",
+			Commands:       "SUBCOMMANDS",
+			Flags:          "OPTIONS",
+			HelpFlag:       "show this help text",
+			VersionFlag:    "print version number",
+			FlagsMetavar:   "[options]",
+			CommandMetavar: "[subcommand]",
+		}),
+		clix.Version("1.0.0"),
+		clix.SubCommand("run", "start the server", clix.Run(func(*clix.Context) error { return nil })),
+	)
+	fmt.Print(p.Help())
+	// Output:
+	// SYNOPSIS: app [options] [subcommand]
+	//
+	// demo
+	//
+	// SUBCOMMANDS:
+	//   run            start the server
+	//
+	// OPTIONS:
+	//   --help, -h                        show this help text
+	//   --version, -V                     print version number
+}

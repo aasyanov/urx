@@ -53,7 +53,8 @@ type config struct {
 // newConfig resolves the effective configuration: defaults first, then each
 // option applied in order, with the per-key burst floor applied last so every
 // created bucket matches [ratex.Limiter] semantics. Positive fractional rates
-// are preserved; only a non-positive rate falls back to [DefaultRate].
+// are preserved; only a non-positive rate falls back to [DefaultRate]. A nil
+// Option in opts is skipped.
 func newConfig(opts []Option) config {
 	cfg := config{
 		rate:             DefaultRate,
@@ -64,7 +65,9 @@ func newConfig(opts []Option) config {
 		evictionInterval: DefaultEvictionInterval,
 	}
 	for _, opt := range opts {
-		opt(&cfg)
+		if opt != nil {
+			opt(&cfg)
+		}
 	}
 	if cfg.rate <= 0 {
 		cfg.rate = DefaultRate
@@ -143,7 +146,8 @@ func WithEvictionInterval(d time.Duration) Option {
 
 // WithOnMaxKeys registers a callback invoked when admission for a new key is
 // denied because the [WithMaxKeys] cap is reached. The callback receives the
-// rejected key and runs on the caller's goroutine, so it must not block.
+// rejected key and runs synchronously on the caller's goroutine, so it must
+// not block. Panics are recovered; they do not crash the process.
 // Default: none.
 func WithOnMaxKeys(fn func(key string)) Option {
 	return func(c *config) {

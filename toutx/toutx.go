@@ -50,7 +50,9 @@ const opExecute = "toutx.Execute"
 // default to [DefaultTimeout]). Later options override earlier values.
 //
 // The callback receives a deadline-scoped context and a [TimeoutController].
-// If fn returns before the deadline, its result is returned unchanged. If the
+// If fn returns before the deadline, its result is returned unchanged — including
+// when that result is context.DeadlineExceeded or context.Canceled produced by
+// fn itself while this call's timeout context is still live. If the
 // deadline fires first, Execute returns [ErrDeadlineExceeded] unless fn's
 // result is already available. If the parent ctx is cancelled first, Execute
 // returns [ErrCancelled] wrapping ctx.Err().
@@ -82,7 +84,7 @@ func Execute[T any](
 	}
 
 	start := time.Now()
-	tctx, cancel := context.WithTimeout(ctx, cfg.timeout)
+	tctx, cancel := context.WithTimeoutCause(ctx, cfg.timeout, ErrDeadlineExceeded)
 	defer cancel()
 
 	tc := &execution{
@@ -126,11 +128,11 @@ func awaitResult[T any](
 	var zero T
 	select {
 	case r := <-done:
-		return normalizeResult(zero, parent, op, timeout, r)
+		return normalizeResult(zero, tctx, parent, op, timeout, r)
 	case <-tctx.Done():
 		select {
 		case r := <-done:
-			return normalizeResult(zero, parent, op, timeout, r)
+			return normalizeResult(zero, tctx, parent, op, timeout, r)
 		default:
 			if cause := context.Cause(parent); cause != nil {
 				return zero, errCancelled(op, cause)
@@ -142,13 +144,22 @@ func awaitResult[T any](
 
 // normalizeResult maps a finished callback outcome to the package error
 // vocabulary. A nil callback error is returned as-is so a result that lands
-// in the same instant as expiry is not discarded. Context cancellation errors
-// from the callback are upgraded to [ErrCancelled] or [ErrDeadlineExceeded].
-func normalizeResult[T any](zero T, parent context.Context, op string, timeout time.Duration, r execResult[T]) (T, error) {
+// in the same instant as expiry is not discarded.
+//
+// context.DeadlineExceeded is remapped to [ErrDeadlineExceeded] only when
+// tctx has already expired (this call's timeout fired). If fn returns
+// DeadlineExceeded while tctx is still live, the original error and value
+// pass through. context.Canceled is remapped to [ErrCancelled] only when the
+// parent is done or tctx is done; an inner Canceled while both are live
+// propagates unchanged.
+func normalizeResult[T any](zero T, tctx, parent context.Context, op string, timeout time.Duration, r execResult[T]) (T, error) {
 	if r.err == nil {
 		return r.val, nil
 	}
 	if errors.Is(r.err, context.Canceled) {
+		if parent.Err() == nil && tctx.Err() == nil {
+			return r.val, r.err
+		}
 		cause := context.Cause(parent)
 		if cause == nil {
 			cause = context.Canceled
@@ -156,6 +167,9 @@ func normalizeResult[T any](zero T, parent context.Context, op string, timeout t
 		return zero, errCancelled(op, cause)
 	}
 	if errors.Is(r.err, context.DeadlineExceeded) {
+		if tctx.Err() == nil {
+			return r.val, r.err
+		}
 		if cause := context.Cause(parent); cause != nil && !errors.Is(cause, context.DeadlineExceeded) {
 			return zero, errCancelled(op, cause)
 		}

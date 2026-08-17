@@ -78,6 +78,8 @@ func TestNew_CachedStrategyAllocatesShards(t *testing.T) {
 	fb := New(WithCached[int](time.Minute, 16), WithShards[int](4))
 	defer func() { _ = fb.Close() }()
 	assert.Len(t, fb.shards, 4)
+	fb.initCache()
+	assert.Len(t, fb.shards, 4, "initCache is idempotent")
 }
 
 func TestSeed_StaticStrategyIsNoOp(t *testing.T) {
@@ -191,13 +193,21 @@ func TestExecute_CachedReplaysLastSuccess(t *testing.T) {
 	fb := New(WithCached[int](time.Minute, 16))
 	defer func() { _ = fb.Close() }()
 
-	got, err := Execute(fb, context.Background(), okFn(7))
+	var primaryCalls atomic.Int64
+	got, err := Execute(fb, context.Background(), func(context.Context, FallController) (int, error) {
+		primaryCalls.Add(1)
+		return 7, nil
+	})
 	require.NoError(t, err)
 	assert.Equal(t, 7, got)
 
-	got, err = Execute(fb, context.Background(), failFn[int](errPrimary))
+	got, err = Execute(fb, context.Background(), func(context.Context, FallController) (int, error) {
+		primaryCalls.Add(1)
+		return 0, errPrimary
+	})
 	require.NoError(t, err)
 	assert.Equal(t, 7, got)
+	assert.Equal(t, int64(2), primaryCalls.Load(), "primary runs on success and on the failing replay call")
 
 	st := fb.Stats()
 	assert.Equal(t, int64(1), st.CacheHits)
@@ -428,6 +438,52 @@ func TestClose_Idempotent(t *testing.T) {
 	assert.True(t, fb.IsClosed())
 }
 
+func TestNew_Cached_NoSweeperByDefault(t *testing.T) {
+	fb := New(WithCached[int](time.Minute, 16))
+	defer func() { _ = fb.Close() }()
+
+	assert.Nil(t, fb.stopCleanup)
+	assert.Nil(t, fb.cleanupDone)
+	assert.Equal(t, time.Duration(0), fb.cfg.cleanupInterval)
+	assert.False(t, fb.IsClosed())
+}
+
+func TestWithCleanupInterval_CloseStopsLoop(t *testing.T) {
+	fb := New(
+		WithCached[int](time.Minute, 16),
+		WithCleanupInterval[int](5*time.Millisecond),
+	)
+	require.NotNil(t, fb.stopCleanup)
+	require.NotNil(t, fb.cleanupDone)
+	require.NoError(t, fb.Close())
+	require.NoError(t, fb.Close(), "Close remains idempotent with a sweeper")
+
+	select {
+	case <-fb.cleanupDone:
+	default:
+		t.Fatal("cleanup loop must have stopped after Close")
+	}
+
+	_, err := Execute(fb, context.Background(), okFn(1))
+	require.ErrorIs(t, err, ErrClosed)
+}
+
+func TestWithCleanupInterval_SweepsExpired(t *testing.T) {
+	fb := New(
+		WithCached[int](20*time.Millisecond, 16),
+		WithCleanupInterval[int](5*time.Millisecond),
+	)
+	defer func() { _ = fb.Close() }()
+
+	fb.Seed("k", 1)
+	require.Equal(t, 1, fb.Stats().CacheSize)
+
+	testx.Eventually(t, func() bool {
+		return fb.Stats().CacheSize == 0
+	}, time.Second)
+	assert.GreaterOrEqual(t, fb.Stats().CacheEvictions, int64(1))
+}
+
 // --- Context behavior ---
 //
 // fallx never adds a deadline of its own and never short-circuits on a
@@ -442,6 +498,39 @@ func TestExecute_CancelledCtxStillRunsFallback(t *testing.T) {
 		func(ctx context.Context, _ FallController) (string, error) {
 			return "", ctx.Err() // primary respects cancellation
 		})
+	require.NoError(t, err)
+	assert.Equal(t, "backup", got)
+	assert.Equal(t, int64(1), fb.Stats().FallbackUsed)
+}
+
+func TestWithFallbackIf_SkipCanceledReturnsPrimaryError(t *testing.T) {
+	fb := New(
+		WithStatic("backup"),
+		WithFallbackIf[string](func(err error) bool {
+			return !errors.Is(err, context.Canceled)
+		}),
+	)
+	defer func() { _ = fb.Close() }()
+
+	got, err := Execute(fb, testx.CancelledCtx(),
+		func(ctx context.Context, _ FallController) (string, error) {
+			return "", ctx.Err()
+		})
+	require.ErrorIs(t, err, context.Canceled)
+	assert.Empty(t, got)
+	assert.Equal(t, int64(0), fb.Stats().FallbackUsed)
+}
+
+func TestWithFallbackIf_StillFallsBackOnBoom(t *testing.T) {
+	fb := New(
+		WithStatic("backup"),
+		WithFallbackIf[string](func(err error) bool {
+			return !errors.Is(err, context.Canceled)
+		}),
+	)
+	defer func() { _ = fb.Close() }()
+
+	got, err := Execute(fb, context.Background(), failFn[string](errPrimary))
 	require.NoError(t, err)
 	assert.Equal(t, "backup", got)
 	assert.Equal(t, int64(1), fb.Stats().FallbackUsed)
@@ -565,6 +654,19 @@ func TestWithOnFallback_NilIgnored(t *testing.T) {
 	assert.Equal(t, int64(1), fired.Load())
 }
 
+func TestWithOnFallback_RecoversPanic(t *testing.T) {
+	fb := New(
+		WithStatic("backup"),
+		WithOnFallback[string](func(error, Strategy) { panic("hook boom") }),
+	)
+	defer func() { _ = fb.Close() }()
+
+	got, err := Execute(fb, context.Background(), failFn[string](errPrimary))
+	require.NoError(t, err)
+	assert.Equal(t, "backup", got)
+	assert.Equal(t, int64(1), fb.Stats().FallbackUsed)
+}
+
 func TestWithOp_LabelsPrimaryPanic(t *testing.T) {
 	fb := New(WithFunc(func(_ context.Context, fc FallController) (int, error) {
 		// Surface the primary panic by re-failing; assert via Error path below.
@@ -617,6 +719,18 @@ func TestOptions_Defaults(t *testing.T) {
 	assert.Equal(t, DefaultCacheTTL, cfg.cacheTTL)
 	assert.Equal(t, DefaultMaxCacheSize, cfg.maxCacheSize)
 	assert.Equal(t, DefaultShards, cfg.shardCount)
+	assert.Equal(t, time.Duration(0), cfg.cleanupInterval)
+}
+
+func TestNewConfig_SkipsNilOption(t *testing.T) {
+	cfg := newConfig([]Option[int]{nil, WithStatic(3), nil})
+	assert.Equal(t, StrategyStatic, cfg.strategy)
+	assert.Equal(t, 3, cfg.staticValue)
+}
+
+func TestNewConfig_FloorsShardCount(t *testing.T) {
+	cfg := newConfig([]Option[int]{func(c *config[int]) { c.shardCount = 0 }})
+	assert.Equal(t, minShards, cfg.shardCount)
 }
 
 func TestOptions_ShardClamping(t *testing.T) {
@@ -729,4 +843,64 @@ func TestEvictIfNeeded_ResyncsOnStaleHeapEntry(t *testing.T) {
 	fb.evictIfNeeded()
 	assert.LessOrEqual(t, fb.Stats().CacheSize, 4)
 	assertCacheSizeConsistent(t, fb)
+}
+
+func TestEvictIfNeeded_UnderCapacityIsNoop(t *testing.T) {
+	fb := New(WithCached[int](time.Minute, 16))
+	defer func() { _ = fb.Close() }()
+	fb.Seed("k", 1)
+	fb.evictIfNeeded()
+	assert.Equal(t, 1, fb.Stats().CacheSize)
+}
+
+func TestEvictIfNeeded_EmptyHeapsResyncsCounter(t *testing.T) {
+	fb := New(WithCached[int](time.Minute, 4), WithShards[int](1))
+	defer func() { _ = fb.Close() }()
+	fb.cacheSize.Store(100)
+	fb.evictIfNeeded()
+	assert.Equal(t, 0, fb.Stats().CacheSize)
+	assertCacheSizeConsistent(t, fb)
+}
+
+func TestCached_PointerAliasWithoutClone(t *testing.T) {
+	type box struct{ n int }
+	fb := New(WithCached[*box](time.Minute, 16))
+	defer func() { _ = fb.Close() }()
+
+	orig := &box{n: 1}
+	_, err := Execute(fb, context.Background(), okFn(orig))
+	require.NoError(t, err)
+
+	orig.n = 99
+	got, err := Execute(fb, context.Background(), failFn[*box](errPrimary))
+	require.NoError(t, err)
+	assert.Same(t, orig, got, "without WithClone the cache shares the stored pointer")
+	assert.Equal(t, 99, got.n)
+}
+
+func TestCached_WithCloneIsolates(t *testing.T) {
+	type box struct{ n int }
+	fb := New(
+		WithCached[*box](time.Minute, 16),
+		WithClone(func(v *box) *box {
+			cp := *v
+			return &cp
+		}),
+	)
+	defer func() { _ = fb.Close() }()
+
+	orig := &box{n: 1}
+	_, err := Execute(fb, context.Background(), okFn(orig))
+	require.NoError(t, err)
+
+	orig.n = 99
+	got, err := Execute(fb, context.Background(), failFn[*box](errPrimary))
+	require.NoError(t, err)
+	assert.NotSame(t, orig, got)
+	assert.Equal(t, 1, got.n)
+
+	got.n = 7
+	got2, err := Execute(fb, context.Background(), failFn[*box](errPrimary))
+	require.NoError(t, err)
+	assert.Equal(t, 1, got2.n, "replay clone must not share the previously returned pointer")
 }

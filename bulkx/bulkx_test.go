@@ -73,6 +73,19 @@ func TestNewConfig_ConcurrencyFlooredToMin(t *testing.T) {
 	assert.Equal(t, minConcurrent, cfg.maxConcurrent)
 }
 
+func TestNewConfig_SkipsNilOption(t *testing.T) {
+	cfg := newConfig([]Option{WithMaxConcurrent(3), nil, WithTimeout(time.Second)})
+	assert.Equal(t, 3, cfg.maxConcurrent)
+	assert.Equal(t, time.Second, cfg.timeout)
+}
+
+func TestNewConfig_MaxWaitersZeroMeansUnlimited(t *testing.T) {
+	assert.Equal(t, 0, newConfig(nil).maxWaiters)
+	assert.Equal(t, 0, newConfig([]Option{WithMaxWaiters(0)}).maxWaiters)
+	assert.Equal(t, 0, newConfig([]Option{WithMaxWaiters(-4)}).maxWaiters)
+	assert.Equal(t, 7, newConfig([]Option{WithMaxWaiters(7)}).maxWaiters)
+}
+
 func TestWithOp_OverridesDefault(t *testing.T) {
 	assert.Equal(t, opExecute, newConfig(nil).opOrDefault())
 	assert.Equal(t, "api.search", newConfig([]Option{WithOp("api.search")}).opOrDefault())
@@ -593,6 +606,27 @@ func TestToken_NilReleaseIsNoop(t *testing.T) {
 	assert.NotPanics(t, tok.Release)
 }
 
+func TestSlotWait_IsMinOfTimeoutAndDeadline(t *testing.T) {
+	assert.Equal(t, time.Second, slotWait(context.Background(), time.Second))
+
+	long, cancel := context.WithTimeout(context.Background(), time.Hour)
+	defer cancel()
+	assert.Equal(t, 20*time.Millisecond, slotWait(long, 20*time.Millisecond))
+
+	expired, cancel2 := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel2()
+	assert.Equal(t, time.Duration(0), slotWait(expired, time.Hour))
+}
+
+func TestStopTimer_DrainsFiredTimer(t *testing.T) {
+	timer := time.NewTimer(time.Millisecond)
+	<-timer.C
+	stopTimer(timer) // must not block; covers the drain branch
+
+	live := time.NewTimer(time.Hour)
+	stopTimer(live)
+}
+
 // --- Allow ---
 
 func TestAllow_ReflectsOccupancy(t *testing.T) {
@@ -643,6 +677,7 @@ func TestStats_Snapshot(t *testing.T) {
 	st := b.Stats()
 	assert.Equal(t, 100, st.MaxConcurrent)
 	assert.Equal(t, 3, st.Active)
+	assert.Equal(t, 0, st.Waiters)
 }
 
 func TestResetStats_ZeroesCounters(t *testing.T) {
@@ -749,6 +784,223 @@ func TestExecute_NeverExceedsMaxConcurrent(t *testing.T) {
 		"active (%d) exceeded max concurrent (%d)", maxSeen.Load(), maxConcurrent)
 	assert.Equal(t, 0, b.Active())
 }
+
+// TestExecute_ActiveNeverExceedsMaxDuringRelease spins on Active() while
+// holders return. Decrementing active before freeing the semaphore is what
+// keeps the observed count from briefly exceeding maxConcurrent=1.
+func TestExecute_ActiveNeverExceedsMaxDuringRelease(t *testing.T) {
+	const maxConcurrent = 1
+	b := New(WithMaxConcurrent(maxConcurrent), WithTimeout(5*time.Second))
+	defer func() { require.NoError(t, b.Close()) }()
+
+	var (
+		maxSeen atomic.Int64
+		stop    atomic.Bool
+		spinWG  sync.WaitGroup
+	)
+	spinWG.Add(1)
+	go func() {
+		defer spinWG.Done()
+		for !stop.Load() {
+			cur := int64(b.Active())
+			for {
+				prev := maxSeen.Load()
+				if cur <= prev || maxSeen.CompareAndSwap(prev, cur) {
+					break
+				}
+			}
+		}
+	}()
+
+	var wg sync.WaitGroup
+	for range 32 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for range 80 {
+				_, _ = Execute(b, context.Background(),
+					func(context.Context, BulkController) (int, error) { return 1, nil })
+			}
+		}()
+	}
+	wg.Wait()
+	stop.Store(true)
+	spinWG.Wait()
+
+	assert.LessOrEqual(t, maxSeen.Load(), int64(maxConcurrent),
+		"active (%d) exceeded max concurrent (%d) during release", maxSeen.Load(), maxConcurrent)
+	assert.Equal(t, 0, b.Active())
+}
+
+func TestExecute_RejectsWhenWaitersExceeded(t *testing.T) {
+	b := New(WithMaxConcurrent(1), WithMaxWaiters(1), WithTimeout(time.Minute))
+	defer func() { require.NoError(t, b.Close()) }()
+
+	tokens := fill(t, b, 1)
+	defer release(tokens)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	waiting := make(chan struct{})
+	errCh := make(chan error, 1)
+	go func() {
+		close(waiting)
+		_, err := Execute(b, ctx,
+			func(context.Context, BulkController) (int, error) { return 1, nil })
+		errCh <- err
+	}()
+	<-waiting
+	testx.Eventually(t, func() bool { return b.Stats().Waiters == 1 }, time.Second)
+
+	_, err := Execute(b, context.Background(),
+		func(context.Context, BulkController) (int, error) { return 1, nil })
+	require.ErrorIs(t, err, ErrWaitersExceeded)
+	assert.Equal(t, uint64(1), b.Stats().Rejected)
+
+	cancel()
+	require.ErrorIs(t, <-errCh, ErrCancelled)
+}
+
+func TestAcquire_RejectsWhenWaitersExceeded(t *testing.T) {
+	b := New(WithMaxConcurrent(1), WithMaxWaiters(1), WithTimeout(time.Minute))
+	defer func() { require.NoError(t, b.Close()) }()
+
+	tokens := fill(t, b, 1)
+	defer release(tokens)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := b.Acquire(ctx)
+		errCh <- err
+	}()
+	testx.Eventually(t, func() bool { return b.Stats().Waiters == 1 }, time.Second)
+
+	_, err := b.Acquire(context.Background())
+	require.ErrorIs(t, err, ErrWaitersExceeded)
+
+	cancel()
+	require.ErrorIs(t, <-errCh, ErrCancelled)
+}
+
+func TestTryExecute_DoesNotBargeAheadOfWaiter(t *testing.T) {
+	b := New(WithMaxConcurrent(2), WithTimeout(time.Second))
+	defer func() { require.NoError(t, b.Close()) }()
+
+	// One slot held, one free — TryExecute would succeed without anti-barge.
+	tok := fill(t, b, 1)[0]
+	defer tok.Release()
+
+	b.waiters.Store(1)
+	called := false
+	ok, _, err := TryExecute(b, context.Background(),
+		func(context.Context, BulkController) (int, error) {
+			called = true
+			return 1, nil
+		})
+	require.NoError(t, err)
+	assert.False(t, ok, "TryExecute must not take a free slot while waiters exist")
+	assert.False(t, called)
+	assert.Equal(t, uint64(1), b.Stats().Rejected)
+	assert.Equal(t, 1, b.Active())
+}
+
+func TestReserve_WaitIsMinOfTimeoutAndDeadline(t *testing.T) {
+	b := New(WithMaxConcurrent(1), WithTimeout(time.Hour))
+	defer func() { require.NoError(t, b.Close()) }()
+
+	tokens := fill(t, b, 1)
+	defer release(tokens)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	_, err := b.reserve(ctx)
+	elapsed := time.Since(start)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, ErrCancelled) || errors.Is(err, ErrTimeout),
+		"short deadline must not wait the full timeout: %v", err)
+	assert.Less(t, elapsed, 2*time.Second, "must not wait the full configured timeout")
+}
+
+func TestReserve_TimerFirePrefersCtxErr(t *testing.T) {
+	b := New(WithMaxConcurrent(1), WithTimeout(20*time.Millisecond))
+	defer func() { require.NoError(t, b.Close()) }()
+
+	tokens := fill(t, b, 1)
+	defer release(tokens)
+
+	ctx := &errAfterNCtx{Context: context.Background(), after: 1}
+	_, err := b.reserve(ctx)
+	require.ErrorIs(t, err, ErrCancelled)
+	require.ErrorIs(t, err, context.Canceled)
+	assert.NotErrorIs(t, err, ErrTimeout)
+}
+
+func TestExecute_ShortDeadlineDoesNotWaitFullTimeout(t *testing.T) {
+	b := New(WithMaxConcurrent(1), WithTimeout(time.Hour))
+	defer func() { require.NoError(t, b.Close()) }()
+
+	tokens := fill(t, b, 1)
+	defer release(tokens)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	_, err := Execute(b, ctx,
+		func(context.Context, BulkController) (int, error) { return 1, nil })
+	elapsed := time.Since(start)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, ErrCancelled) || errors.Is(err, ErrTimeout),
+		"short deadline must not wait the full timeout: %v", err)
+	assert.Less(t, elapsed, 2*time.Second)
+}
+
+func TestExecute_CancelledAfterSlotClaimRefunds(t *testing.T) {
+	b := New(WithMaxConcurrent(10))
+	defer func() { require.NoError(t, b.Close()) }()
+
+	_, err := Execute(b, &errOnSecondCheckCtx{Context: context.Background()},
+		func(context.Context, BulkController) (int, error) { return 1, nil })
+	require.ErrorIs(t, err, ErrCancelled)
+	require.ErrorIs(t, err, context.Canceled)
+	assert.Equal(t, 0, b.Active())
+	assert.True(t, b.Allow(), "refunded slot must be reusable")
+}
+
+func TestAcquire_CancelledAfterSlotClaimRefunds(t *testing.T) {
+	b := New(WithMaxConcurrent(10))
+	defer func() { require.NoError(t, b.Close()) }()
+
+	_, err := b.Acquire(&errOnSecondCheckCtx{Context: context.Background()})
+	require.ErrorIs(t, err, ErrCancelled)
+	require.ErrorIs(t, err, context.Canceled)
+	assert.Equal(t, 0, b.Active())
+	assert.True(t, b.Allow(), "refunded slot must be reusable")
+}
+
+// errAfterNCtx returns nil from Err for the first `after` calls, then
+// context.Canceled. Done never fires, so a timer expiry is what observes the
+// delayed cancellation.
+type errAfterNCtx struct {
+	context.Context
+	n     atomic.Int32
+	after int32
+}
+
+func (c *errAfterNCtx) Err() error {
+	if c.n.Add(1) > c.after {
+		return context.Canceled
+	}
+	return nil
+}
+
+func (c *errAfterNCtx) Done() <-chan struct{} { return nil }
 
 // --- BulkController ---
 

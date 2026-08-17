@@ -299,6 +299,166 @@ func TestDo_OnRetryNotCalledOnLastAttempt(t *testing.T) {
 	assert.Equal(t, int64(2), retries.Load())
 }
 
+func TestDo_CancelledOnLastAttemptReturnsErrCancelled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var calls atomic.Int64
+	_, err := Do(ctx, func(context.Context, RetryController) (int, error) {
+		if calls.Add(1) == 2 {
+			cancel()
+			return 0, errors.New("last fail")
+		}
+		return 0, errors.New("fail")
+	}, fastOpts(WithMaxAttempts(2))...)
+	require.ErrorIs(t, err, ErrCancelled)
+	require.ErrorIs(t, err, context.Canceled)
+	assert.NotErrorIs(t, err, ErrExhausted)
+	assert.Equal(t, int64(2), calls.Load())
+}
+
+func TestDo_LastAttemptCtxErrNotExhausted(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		cancel()
+	}()
+	var calls atomic.Int64
+	_, err := Do(ctx, func(ctx context.Context, _ RetryController) (int, error) {
+		calls.Add(1)
+		<-ctx.Done()
+		return 0, ctx.Err()
+	}, WithMaxAttempts(1))
+	require.ErrorIs(t, err, ErrCancelled)
+	require.ErrorIs(t, err, context.Canceled)
+	assert.NotErrorIs(t, err, ErrExhausted)
+	assert.Equal(t, int64(1), calls.Load())
+}
+
+func TestDo_OnRetryPanicBecomesPanicError(t *testing.T) {
+	_, err := Do(context.Background(), func(context.Context, RetryController) (int, error) {
+		return 0, errors.New("fail")
+	}, fastOpts(
+		WithMaxAttempts(5),
+		WithOnRetry(func(int, error) { panic("hook boom") }),
+	)...)
+	testx.RequirePanicError(t, err, opDo)
+	assert.NotErrorIs(t, err, ErrExhausted)
+}
+
+func TestDo_OnRetryPanicDoesNotContinueRetrying(t *testing.T) {
+	var calls atomic.Int64
+	_, err := Do(context.Background(), func(context.Context, RetryController) (int, error) {
+		calls.Add(1)
+		return 0, errors.New("fail")
+	}, fastOpts(
+		WithMaxAttempts(5),
+		WithOnRetry(func(int, error) { panic("hook boom") }),
+	)...)
+	testx.RequirePanicError(t, err, opDo)
+	assert.Equal(t, int64(1), calls.Load(), "OnRetry panic must stop the retry loop")
+}
+
+func TestDo_MaxElapsedStopsBeforeNextAttempt(t *testing.T) {
+	base := time.Unix(1_000_000, 0)
+	var afterFirst atomic.Bool
+	cause := errors.New("still failing")
+	var calls atomic.Int64
+	_, err := Do(context.Background(), func(context.Context, RetryController) (int, error) {
+		calls.Add(1)
+		afterFirst.Store(true)
+		return 0, cause
+	},
+		WithMaxAttempts(5),
+		WithMaxElapsed(time.Minute),
+		WithBackoff(time.Hour),
+		WithJitter(false),
+		withClock(func() time.Time {
+			if afterFirst.Load() {
+				return base.Add(time.Hour)
+			}
+			return base
+		}),
+	)
+	require.ErrorIs(t, err, ErrMaxElapsed)
+	require.ErrorIs(t, err, cause)
+	assert.NotErrorIs(t, err, ErrExhausted)
+	assert.Equal(t, int64(1), calls.Load())
+}
+
+func TestDo_MaxElapsedShortensSleep(t *testing.T) {
+	cause := errors.New("fail")
+	var calls atomic.Int64
+	start := time.Now()
+	_, err := Do(context.Background(), func(context.Context, RetryController) (int, error) {
+		calls.Add(1)
+		return 0, cause
+	},
+		WithMaxAttempts(5),
+		WithMaxElapsed(40*time.Millisecond),
+		WithBackoff(time.Hour),
+		WithJitter(false),
+	)
+	require.ErrorIs(t, err, ErrMaxElapsed)
+	require.ErrorIs(t, err, cause)
+	assert.Equal(t, int64(1), calls.Load())
+	assert.Less(t, time.Since(start), time.Second, "sleep must be clamped to remaining max-elapsed")
+}
+
+func TestDo_MaxElapsedZeroUnchanged(t *testing.T) {
+	sim := testx.AlwaysFail()
+	_, err := Do(context.Background(), func(context.Context, RetryController) (int, error) {
+		return 0, sim.Call()
+	}, fastOpts(WithMaxAttempts(3), WithMaxElapsed(0))...)
+	require.ErrorIs(t, err, ErrExhausted)
+	assert.NotErrorIs(t, err, ErrMaxElapsed)
+	assert.Equal(t, int64(3), sim.Calls())
+}
+
+func TestDo_DelayFuncOverridesExponential(t *testing.T) {
+	var (
+		seenAttempt int
+		seenErr     error
+		calls       atomic.Int64
+	)
+	cause := errors.New("transient")
+	start := time.Now()
+	_, err := Do(context.Background(), func(context.Context, RetryController) (int, error) {
+		calls.Add(1)
+		return 0, cause
+	},
+		WithMaxAttempts(2),
+		WithBackoff(time.Hour),
+		WithJitter(false),
+		WithDelayFunc(func(attempt int, err error) time.Duration {
+			seenAttempt = attempt
+			seenErr = err
+			return 0
+		}),
+	)
+	require.ErrorIs(t, err, ErrExhausted)
+	assert.Equal(t, 1, seenAttempt, "DelayFunc attempt is 1-based like OnRetry")
+	require.ErrorIs(t, seenErr, cause)
+	assert.Equal(t, int64(2), calls.Load())
+	assert.Less(t, time.Since(start), time.Second, "DelayFunc must replace hour-long exponential backoff")
+}
+
+func TestDo_DelayFuncNilIgnored(t *testing.T) {
+	sim := testx.FailUntil(1)
+	start := time.Now()
+	_, err := Do(context.Background(), func(context.Context, RetryController) (int, error) {
+		return 1, sim.Call()
+	},
+		WithMaxAttempts(3),
+		WithBackoff(40*time.Millisecond),
+		WithMaxBackoff(time.Hour),
+		WithJitter(false),
+		WithDelayFunc(nil),
+	)
+	require.NoError(t, err)
+	assert.GreaterOrEqual(t, time.Since(start), 40*time.Millisecond)
+	assert.Equal(t, int64(2), sim.Calls())
+}
+
 // --- Options ---
 
 func TestNewConfig_Defaults(t *testing.T) {
@@ -306,9 +466,11 @@ func TestNewConfig_Defaults(t *testing.T) {
 	assert.Equal(t, DefaultMaxAttempts, cfg.maxAttempts)
 	assert.Equal(t, DefaultBackoff, cfg.backoff)
 	assert.Equal(t, DefaultMaxBackoff, cfg.maxBackoff)
-	assert.True(t, cfg.jitter)
+	assert.Equal(t, jitterModeMultiplicative, cfg.jitterMode)
+	assert.Zero(t, cfg.maxElapsed)
 	assert.Nil(t, cfg.retryIf)
 	assert.Nil(t, cfg.onRetry)
+	assert.Nil(t, cfg.delayFunc)
 }
 
 func TestNewConfig_AttemptFloor(t *testing.T) {
@@ -333,9 +495,12 @@ func TestOptions_IgnoreNonPositive(t *testing.T) {
 	cfg := newConfig([]Option{
 		WithBackoff(-1),
 		WithMaxBackoff(0),
+		WithMaxElapsed(0),
+		WithMaxElapsed(-time.Second),
 	})
 	assert.Equal(t, DefaultBackoff, cfg.backoff)
 	assert.Equal(t, DefaultMaxBackoff, cfg.maxBackoff)
+	assert.Zero(t, cfg.maxElapsed)
 }
 
 func TestNewConfig_SkipsNilOption(t *testing.T) {
@@ -345,7 +510,7 @@ func TestNewConfig_SkipsNilOption(t *testing.T) {
 		WithJitter(false),
 	})
 	assert.Equal(t, 5, cfg.maxAttempts)
-	assert.False(t, cfg.jitter)
+	assert.Equal(t, jitterModeOff, cfg.jitterMode)
 }
 
 func TestOptions_ApplyCustomValues(t *testing.T) {
@@ -360,32 +525,52 @@ func TestOptions_ApplyCustomValues(t *testing.T) {
 		{
 			name: "custom backoff",
 			opts: []Option{WithBackoff(500 * time.Millisecond)},
-			want: config{maxAttempts: DefaultMaxAttempts, backoff: 500 * time.Millisecond, maxBackoff: DefaultMaxBackoff, jitter: true},
+			want: config{maxAttempts: DefaultMaxAttempts, backoff: 500 * time.Millisecond, maxBackoff: DefaultMaxBackoff, jitterMode: jitterModeMultiplicative},
 		},
 		{
 			name: "custom max backoff",
 			opts: []Option{WithMaxBackoff(30 * time.Second)},
-			want: config{maxAttempts: DefaultMaxAttempts, backoff: DefaultBackoff, maxBackoff: 30 * time.Second, jitter: true},
+			want: config{maxAttempts: DefaultMaxAttempts, backoff: DefaultBackoff, maxBackoff: 30 * time.Second, jitterMode: jitterModeMultiplicative},
 		},
 		{
 			name: "jitter disabled",
 			opts: []Option{WithJitter(false)},
-			want: config{maxAttempts: DefaultMaxAttempts, backoff: DefaultBackoff, maxBackoff: DefaultMaxBackoff, jitter: false},
+			want: config{maxAttempts: DefaultMaxAttempts, backoff: DefaultBackoff, maxBackoff: DefaultMaxBackoff, jitterMode: jitterModeOff},
+		},
+		{
+			name: "jitter re-enabled",
+			opts: []Option{WithJitter(false), WithJitter(true)},
+			want: config{maxAttempts: DefaultMaxAttempts, backoff: DefaultBackoff, maxBackoff: DefaultMaxBackoff, jitterMode: jitterModeMultiplicative},
 		},
 		{
 			name: "custom max attempts",
 			opts: []Option{WithMaxAttempts(9)},
-			want: config{maxAttempts: 9, backoff: DefaultBackoff, maxBackoff: DefaultMaxBackoff, jitter: true},
+			want: config{maxAttempts: 9, backoff: DefaultBackoff, maxBackoff: DefaultMaxBackoff, jitterMode: jitterModeMultiplicative},
 		},
 		{
 			name: "custom op",
 			opts: []Option{WithOp("api.fetch")},
-			want: config{maxAttempts: DefaultMaxAttempts, backoff: DefaultBackoff, maxBackoff: DefaultMaxBackoff, jitter: true, op: "api.fetch"},
+			want: config{maxAttempts: DefaultMaxAttempts, backoff: DefaultBackoff, maxBackoff: DefaultMaxBackoff, jitterMode: jitterModeMultiplicative, op: "api.fetch"},
 		},
 		{
 			name: "retryIf and onRetry wired",
 			opts: []Option{WithRetryIf(retryIf), WithOnRetry(onRetry)},
-			want: config{maxAttempts: DefaultMaxAttempts, backoff: DefaultBackoff, maxBackoff: DefaultMaxBackoff, jitter: true, retryIf: retryIf, onRetry: onRetry},
+			want: config{maxAttempts: DefaultMaxAttempts, backoff: DefaultBackoff, maxBackoff: DefaultMaxBackoff, jitterMode: jitterModeMultiplicative, retryIf: retryIf, onRetry: onRetry},
+		},
+		{
+			name: "equal jitter",
+			opts: []Option{WithEqualJitter()},
+			want: config{maxAttempts: DefaultMaxAttempts, backoff: DefaultBackoff, maxBackoff: DefaultMaxBackoff, jitterMode: jitterModeEqual},
+		},
+		{
+			name: "max elapsed",
+			opts: []Option{WithMaxElapsed(time.Second)},
+			want: config{maxAttempts: DefaultMaxAttempts, backoff: DefaultBackoff, maxBackoff: DefaultMaxBackoff, jitterMode: jitterModeMultiplicative, maxElapsed: time.Second},
+		},
+		{
+			name: "delay func",
+			opts: []Option{WithDelayFunc(func(int, error) time.Duration { return time.Second })},
+			want: config{maxAttempts: DefaultMaxAttempts, backoff: DefaultBackoff, maxBackoff: DefaultMaxBackoff, jitterMode: jitterModeMultiplicative},
 		},
 	}
 	for _, tt := range tests {
@@ -394,7 +579,8 @@ func TestOptions_ApplyCustomValues(t *testing.T) {
 			assert.Equal(t, tt.want.maxAttempts, got.maxAttempts)
 			assert.Equal(t, tt.want.backoff, got.backoff)
 			assert.Equal(t, tt.want.maxBackoff, got.maxBackoff)
-			assert.Equal(t, tt.want.jitter, got.jitter)
+			assert.Equal(t, tt.want.jitterMode, got.jitterMode)
+			assert.Equal(t, tt.want.maxElapsed, got.maxElapsed)
 			assert.Equal(t, tt.want.op, got.op)
 			if tt.want.retryIf != nil {
 				assert.NotNil(t, got.retryIf)
@@ -406,6 +592,11 @@ func TestOptions_ApplyCustomValues(t *testing.T) {
 			} else {
 				assert.Nil(t, got.onRetry)
 			}
+			if tt.name == "delay func" {
+				assert.NotNil(t, got.delayFunc)
+			} else {
+				assert.Nil(t, got.delayFunc)
+			}
 		})
 	}
 }
@@ -416,27 +607,53 @@ func TestNewConfig_OpOrDefault(t *testing.T) {
 	assert.Equal(t, opDo, newConfig([]Option{WithOp("")}).opOrDefault())
 }
 
+func TestNewConfig_WithClockNilIgnored(t *testing.T) {
+	cfg := newConfig([]Option{withClock(nil)})
+	assert.Nil(t, cfg.nowFn)
+}
+
 // --- Backoff ---
 
 func TestBackoff_ExponentialWithoutJitter(t *testing.T) {
-	cfg := config{backoff: 100 * time.Millisecond, maxBackoff: time.Hour, jitter: false}
+	cfg := config{backoff: 100 * time.Millisecond, maxBackoff: time.Hour, jitterMode: jitterModeOff}
 	assert.Equal(t, 100*time.Millisecond, backoff(&cfg, 0))
 	assert.Equal(t, 200*time.Millisecond, backoff(&cfg, 1))
 	assert.Equal(t, 400*time.Millisecond, backoff(&cfg, 2))
 }
 
 func TestBackoff_CapsAtMax(t *testing.T) {
-	cfg := config{backoff: time.Second, maxBackoff: 3 * time.Second, jitter: false}
+	cfg := config{backoff: time.Second, maxBackoff: 3 * time.Second, jitterMode: jitterModeOff}
 	assert.Equal(t, 3*time.Second, backoff(&cfg, 10))
 }
 
 func TestBackoff_JitterWithinWindow(t *testing.T) {
-	cfg := config{backoff: 100 * time.Millisecond, maxBackoff: time.Hour, jitter: true}
+	cfg := config{backoff: 100 * time.Millisecond, maxBackoff: time.Hour, jitterMode: jitterModeMultiplicative}
 	base := 200 * time.Millisecond // attempt 1 nominal
 	for range 1000 {
 		d := backoff(&cfg, 1)
 		assert.GreaterOrEqual(t, d, time.Duration(float64(base)*jitterFloor))
 		assert.Less(t, d, time.Duration(float64(base)*(jitterFloor+jitterSpan)))
+	}
+}
+
+func TestBackoff_EqualJitterWithinHalfToFull(t *testing.T) {
+	cfg := config{backoff: 100 * time.Millisecond, maxBackoff: time.Hour, jitterMode: jitterModeEqual}
+	base := 200 * time.Millisecond // attempt 1 nominal
+	for range 1000 {
+		d := backoff(&cfg, 1)
+		assert.GreaterOrEqual(t, d, base/2)
+		assert.Less(t, d, base)
+	}
+}
+
+func TestBackoff_DefaultJitterUnchanged(t *testing.T) {
+	cfg := newConfig(nil)
+	assert.Equal(t, jitterModeMultiplicative, cfg.jitterMode)
+	base := float64(DefaultBackoff)
+	for range 200 {
+		d := backoff(&cfg, 0)
+		assert.GreaterOrEqual(t, d, time.Duration(base*jitterFloor))
+		assert.Less(t, d, time.Duration(base*(jitterFloor+jitterSpan)))
 	}
 }
 

@@ -70,13 +70,17 @@ func errInvalidInput(param, reason string) error {
 }
 
 // errValidationFailed joins the non-nil causes under [ErrValidationFailed],
-// keeping the path for context. Returns nil when there are no causes, so
-// callers can return its result directly.
-func errValidationFailed(path string, causes []error) error {
+// keeping the file path and optional field path for context. Returns nil when
+// there are no causes, so callers can return its result directly.
+func errValidationFailed(file, field string, causes []error) error {
 	var errs []error
 	for _, cause := range causes {
 		if cause != nil {
-			errs = append(errs, fmt.Errorf("%w: %s: %w", ErrValidationFailed, path, cause))
+			if field == "" {
+				errs = append(errs, fmt.Errorf("%w: %s: %w", ErrValidationFailed, file, cause))
+			} else {
+				errs = append(errs, fmt.Errorf("%w: %s: %s: %w", ErrValidationFailed, file, field, cause))
+			}
 		}
 	}
 	return errors.Join(errs...)

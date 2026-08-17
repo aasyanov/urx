@@ -59,6 +59,7 @@ type config struct {
 	onCapChange func(oldCap, newCap float64)
 	onComplete  func()
 	op          string
+	now         func() time.Time
 }
 
 // newConfig resolves the effective configuration: defaults first, then options
@@ -73,7 +74,9 @@ func newConfig(opts []Option) config {
 		expFactor: DefaultExpFactor,
 	}
 	for _, opt := range opts {
-		opt(&cfg)
+		if opt != nil {
+			opt(&cfg)
+		}
 	}
 	if cfg.maxCap < cfg.minCap {
 		cfg.maxCap = cfg.minCap
@@ -176,15 +179,17 @@ func WithExpFactor(f float64) Option {
 	}
 }
 
-// WithOnCapacityChange registers a callback invoked asynchronously when
-// capacity changes by more than 1%. Callbacks run in their own goroutine and
-// may be delivered out of order. Default: nil.
+// WithOnCapacityChange registers a callback invoked synchronously on the ramp
+// goroutine (or the StartAt caller when completing immediately) when capacity
+// changes by more than 1%. The hook must not block or panic; panics are
+// recovered. Default: nil.
 func WithOnCapacityChange(fn func(oldCap, newCap float64)) Option {
 	return func(c *config) { c.onCapChange = fn }
 }
 
-// WithOnComplete registers a callback invoked asynchronously once warmup
-// reaches full capacity. The callback runs in its own goroutine. Default: nil.
+// WithOnComplete registers a callback invoked synchronously once warmup
+// reaches full capacity. The hook must not block or panic; panics are
+// recovered. Default: nil.
 func WithOnComplete(fn func()) Option {
 	return func(c *config) { c.onComplete = fn }
 }
@@ -196,6 +201,16 @@ func WithOp(op string) Option {
 	return func(c *config) {
 		if op != "" {
 			c.op = op
+		}
+	}
+}
+
+// withClock injects a clock for tests. Do not export; production always uses
+// time.Now.
+func withClock(now func() time.Time) Option {
+	return func(c *config) {
+		if now != nil {
+			c.now = now
 		}
 	}
 }

@@ -18,38 +18,58 @@
 //
 // The canonical 12-factor order is: built-in defaults, then file, then
 // environment, then command-line flags — each layer overriding the previous.
-// Because every layer writes through pointers into the same struct, the whole
-// chain is just four lines in main():
+// Because every layer writes through pointers into the same struct, a
+// composition root looks like this:
 //
-//	cfg := DefaultConfig()                       // 1. defaults
-//	_ = cfgx.Load("config.yaml", &cfg,           //    file
-//	    cfgx.WithCreateIfMissing())
+//	cfg := DefaultConfig() // compiled-in defaults
 //
-//	env := envx.New(envx.WithPrefix("APP"))      // 2. environment
-//	envx.BindTo(env, "PORT", &cfg.Port)          //    APP_PORT overrides cfg.Port
+//	if err := cfgx.Load("config.yaml", &cfg, cfgx.WithCreateIfMissing()); err != nil {
+//	    if !errors.Is(err, cfgx.ErrValidationFailed) {
+//	        log.Fatal(err) // I/O / parse / format — do not continue on partial decode
+//	    }
+//	    // optional: still continue so env/flags can repair file-only validation
+//	}
+//
+//	env := envx.New(envx.WithPrefix("APP"))
+//	envx.BindTo(env, "PORT", &cfg.Port) // absent keeps file
 //	envx.BindTo(env, "HOST", &cfg.Host)
 //
-//	p := clix.New(os.Args[1:], "app", "my app",  // 3. flags (highest priority)
-//	    clix.AddFlag(&cfg.Port, "port", "p", cfg.Port, "listen port"),
+//	p := clix.New(os.Args[1:], "app", "my service",
+//	    clix.AddFlag(&cfg.Port, "port", "p", cfg.Port, "listen port"), // def MUST be live field
 //	    clix.AddFlag(&cfg.Host, "host", "", cfg.Host, "bind host"),
 //	)
 //
+//	if errors.Is(p.Err(), clix.ErrHelp) {
+//	    fmt.Print(p.Help())
+//	    return
+//	}
+//	if errors.Is(p.Err(), clix.ErrVersion) {
+//	    fmt.Println(p.Version())
+//	    return
+//	}
 //	if err := errors.Join(env.Validate(), p.Err()); err != nil {
 //	    log.Fatal(err)
 //	}
-//	// cfg now reflects file < env < flags. Validate once at the end:
-//	if errs := cfg.Validate(false); len(errs) > 0 {
-//	    log.Fatal(errors.Join(errs...))
+//	if err := cfgx.Validate(&cfg, false); err != nil {
+//	    log.Fatal(err)
 //	}
+//
+// clix.Required is CLI-presence only. Share only string, int, bool, float64,
+// time.Duration, and time.Time with clix.AddFlag. YAML duration 30s works;
+// JSON needs nanoseconds or a string you parse. Do not [Validate] with
+// fix=true after flags.
 //
 // Each layer is independent and testable in isolation; cfgx provides only the
 // file/byte step and the [Validator] seam they all share.
 //
 // # Validate and autofix
 //
-// If the destination struct implements [Validator], [Load] calls it after
-// unmarshalling. With [WithAutoFix] the call uses fix=true so the struct can
-// repair itself; otherwise it reports only.
+// If the destination struct or any exported nested field implements
+// [Validator], [Load] calls each one after unmarshalling (children first,
+// then parent), including elements of slices, arrays, and maps of structs.
+// With [WithAutoFix] the call uses fix=true so the struct can repair itself;
+// otherwise it reports only. Re-run the same walk after env and flags with
+// [Validate] (pass [WithFormat] to keep path prefixes aligned with the file).
 //
 //	func (c *Config) Validate(fix bool) []error {
 //	    if c.Port <= 0 {
@@ -81,21 +101,22 @@
 package cfgx
 
 import (
+	"errors"
+	"io/fs"
 	"os"
 	"reflect"
 )
 
-// pointerKind is reflect.Pointer (Kind iota value 22, stable across Go releases).
-const pointerKind = reflect.Kind(22)
-
-// Load reads a config file at path into dst and applies the [Validator]
-// seam. The format is detected from the file extension unless overridden
-// with [WithFormat].
+// Load reads a config file at path into dst and applies the nested
+// [Validator] walk. The format is detected from the file extension unless
+// overridden with [WithFormat].
 //
 // If the file does not exist and [WithCreateIfMissing] is set, dst is
-// validated (if it implements [Validator]) and then written to disk in the
-// resolved format — persisting corrected defaults. Without that option a
-// missing file returns [ErrNotFound].
+// walked for [Validator]s and then written to disk in the resolved format —
+// persisting corrected defaults. Remaining validation errors abort the write
+// even when [WithAutoFix] repaired some fields in memory. Without
+// [WithCreateIfMissing] a missing file returns [ErrNotFound]. The default
+// writer creates missing parent directories.
 //
 // Errors: [ErrInvalidInput] (dst not a non-nil pointer), [ErrUnsupportedFormat]
 // (unknown extension), [ErrNotFound], [ErrReadFailed], [ErrParseFailed],
@@ -105,10 +126,7 @@ func Load(path string, dst any, opts ...Option) error {
 		return err
 	}
 
-	cfg := defaultConfig()
-	for _, o := range opts {
-		o(&cfg)
-	}
+	cfg := newConfig(opts)
 
 	format, err := resolveFormat(cfg.format, path)
 	if err != nil {
@@ -124,29 +142,29 @@ func Load(path string, dst any, opts ...Option) error {
 		return errParseFailed(path, unmarshalErr)
 	}
 
-	return runValidator(path, dst, cfg.autoFix)
+	return runValidator(path, dst, cfg.autoFix, format)
 }
 
 // loadMissing handles the read-error branch of [Load]: it either creates the
 // file from defaults (when [WithCreateIfMissing] is set) or maps the OS error
 // to a sentinel.
 func loadMissing(path string, dst any, format Format, cfg *config, readErr error) error {
-	if os.IsNotExist(readErr) && cfg.createOK {
-		if err := runValidator(path, dst, cfg.autoFix); err != nil {
+	if errors.Is(readErr, fs.ErrNotExist) && cfg.createOK {
+		if err := runValidator(path, dst, cfg.autoFix, format); err != nil {
 			return err
 		}
 		return save(path, dst, format, cfg.fileMode, cfg.writer)
 	}
-	if os.IsNotExist(readErr) {
+	if errors.Is(readErr, fs.ErrNotExist) {
 		return errNotFound(path)
 	}
 	return errReadFailed(path, readErr)
 }
 
 // Parse decodes data into dst without touching the filesystem and applies the
-// [Validator] seam. The format must be explicit via [WithFormat]; passing
-// [FormatAuto] (the default) returns [ErrUnsupportedFormat] because there is
-// no path to infer it from.
+// nested [Validator] walk. The format must be explicit via [WithFormat];
+// passing [FormatAuto] (the default) returns [ErrUnsupportedFormat] because
+// there is no path to infer it from.
 //
 // Parse is the in-memory counterpart of [Load]: ideal for embedded defaults,
 // network-sourced config, and tests.
@@ -155,20 +173,16 @@ func Parse(data []byte, dst any, opts ...Option) error {
 		return err
 	}
 
-	cfg := defaultConfig()
-	for _, o := range opts {
-		o(&cfg)
-	}
-
-	if cfg.format == FormatAuto {
-		return errUnsupportedFormat("<bytes>", "")
+	cfg := newConfig(opts)
+	if err := requireExplicitFormat(cfg.format, pathBytes); err != nil {
+		return err
 	}
 
 	if unmarshalErr := unmarshal(data, dst, cfg.format); unmarshalErr != nil {
-		return errParseFailed("<bytes>", unmarshalErr)
+		return errParseFailed(pathBytes, unmarshalErr)
 	}
 
-	return runValidator("<bytes>", dst, cfg.autoFix)
+	return runValidator(pathBytes, dst, cfg.autoFix, cfg.format)
 }
 
 // Save writes src to path in the format detected from the extension (or
@@ -181,14 +195,11 @@ func Save(path string, src any, opts ...Option) error {
 		return errInvalidInput("src", "must be non-nil")
 	}
 	rv := reflect.ValueOf(src)
-	if rv.Kind() == pointerKind && rv.IsNil() {
+	if rv.Kind() == reflect.Pointer && rv.IsNil() {
 		return errInvalidInput("src", "must be non-nil")
 	}
 
-	cfg := defaultConfig()
-	for _, o := range opts {
-		o(&cfg)
-	}
+	cfg := newConfig(opts)
 
 	format, err := resolveFormat(cfg.format, path)
 	if err != nil {
@@ -200,18 +211,22 @@ func Save(path string, src any, opts ...Option) error {
 
 // Marshal encodes src to bytes in the given format. The format must be
 // explicit ([FormatYAML], [FormatJSON], or [FormatTOML]); [FormatAuto]
-// returns [ErrUnsupportedFormat]. Marshal is the in-memory counterpart of
-// [Save].
+// returns [ErrUnsupportedFormat]. A nil src, including a typed nil pointer,
+// returns [ErrInvalidInput]. Marshal is the in-memory counterpart of [Save].
 func Marshal(src any, format Format) ([]byte, error) {
 	if src == nil {
 		return nil, errInvalidInput("src", "must be non-nil")
 	}
-	if format == FormatAuto {
-		return nil, errUnsupportedFormat("<bytes>", "")
+	rv := reflect.ValueOf(src)
+	if rv.Kind() == reflect.Pointer && rv.IsNil() {
+		return nil, errInvalidInput("src", "must be non-nil")
+	}
+	if err := requireExplicitFormat(format, pathBytes); err != nil {
+		return nil, err
 	}
 	data, err := marshal(src, format)
 	if err != nil {
-		return nil, errWriteFailed("<bytes>", err)
+		return nil, errWriteFailed(pathBytes, err)
 	}
 	return data, nil
 }
@@ -229,22 +244,13 @@ func save(path string, src any, format Format, mode os.FileMode, writer func(str
 	return nil
 }
 
-// runValidator invokes [Validator] on dst when implemented, joining any
-// remaining errors under [ErrValidationFailed].
-func runValidator(path string, dst any, fix bool) error {
-	if v, ok := dst.(Validator); ok {
-		return errValidationFailed(path, v.Validate(fix))
-	}
-	return nil
-}
-
 // requirePointer returns [ErrInvalidInput] unless v is a non-nil pointer.
 func requirePointer(param string, v any) error {
 	if v == nil {
 		return errInvalidInput(param, "must be a non-nil pointer")
 	}
 	rv := reflect.ValueOf(v)
-	if rv.Kind() != pointerKind || rv.IsNil() {
+	if rv.Kind() != reflect.Pointer || rv.IsNil() {
 		return errInvalidInput(param, "must be a non-nil pointer")
 	}
 	return nil

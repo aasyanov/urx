@@ -75,7 +75,8 @@ type CircuitController interface {
 	// SkipFailure tells the breaker not to count the returned error as a circuit
 	// failure. Use it for business-logic errors (a "not found", a validation
 	// rejection) that signal a healthy downstream and must not trip the breaker.
-	// Safe to call multiple times; only the first call has an effect.
+	// SkipFailure always wins over [WithFailureIf]. Safe to call multiple times;
+	// only the first call has an effect.
 	SkipFailure()
 
 	// Trip forces the breaker to [Open] regardless of the returned error or the
@@ -89,8 +90,9 @@ type CircuitController interface {
 
 // CircuitFunc is the unit of work run by [Execute] and [TryExecute]. It receives the call context
 // and a [CircuitController], and runs under panic recovery: a panicking function
-// becomes a [*panix.PanicError] and is treated as a failure (subject to
-// [CircuitController.SkipFailure]).
+// becomes a [*panix.PanicError] and is treated as a counted failure (subject to
+// [CircuitController.SkipFailure]). A returned [context.Canceled] is not counted
+// unless the breaker was built with [WithCountCanceled].
 type CircuitFunc[T any] func(ctx context.Context, cc CircuitController) (T, error)
 
 // execution is the private implementation of [CircuitController]. One instance
@@ -138,7 +140,8 @@ type Stats struct {
 	// Successes is the cumulative number of calls that succeeded.
 	Successes uint64 `json:"successes"`
 	// TotalFail is the cumulative number of calls counted as failures
-	// (excluding those suppressed by [CircuitController.SkipFailure]).
+	// (excluding those suppressed by [CircuitController.SkipFailure], ignored
+	// [context.Canceled], and errors rejected by [WithFailureIf]).
 	TotalFail uint64 `json:"total_failures"`
 	// Rejected is the cumulative number of calls rejected by [Execute] with
 	// [ErrOpen] or by [TryExecute] with (false, zero, nil).

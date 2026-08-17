@@ -12,8 +12,9 @@ import (
 // instantiation.
 func TestFootprint(t *testing.T) {
 	testx.AssertFootprint(t, []testx.SizeEntry{
-		{Name: "Env", Size: testx.Sizeof[Env](), Max: 48},
-		{Name: "Var[int]", Size: testx.Sizeof[Var[int]](), Max: 72},
-		{Name: "config", Size: testx.Sizeof[config](), Max: 24},
+		{Name: "Env", Size: testx.Sizeof[Env](), Max: 72},
+		{Name: "Var[int]", Size: testx.Sizeof[Var[int]](), Max: 88},
+		{Name: "config", Size: testx.Sizeof[config](), Max: 48},
+		{Name: "Field", Size: testx.Sizeof[Field](), Max: 48},
 	})
 }

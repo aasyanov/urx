@@ -34,7 +34,7 @@ func BenchmarkDo_SuccessAfterOneRetry(b *testing.B) {
 }
 
 func BenchmarkBackoff(b *testing.B) {
-	cfg := config{backoff: 100 * time.Millisecond, maxBackoff: 10 * time.Second, jitter: true}
+	cfg := config{backoff: 100 * time.Millisecond, maxBackoff: 10 * time.Second, jitterMode: jitterModeMultiplicative}
 	b.ResetTimer()
 	for b.Loop() {
 		_ = backoff(&cfg, 3)

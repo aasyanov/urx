@@ -30,3 +30,10 @@ func TestErrAborted_WrapsSentinelAndCause(t *testing.T) {
 	require.ErrorIs(t, err, cause)
 	assert.ErrorContains(t, err, "attempt=2")
 }
+
+func TestErrMaxElapsed_WrapsSentinelAndCause(t *testing.T) {
+	cause := errors.New("upstream down")
+	err := errMaxElapsed(cause)
+	require.ErrorIs(t, err, ErrMaxElapsed)
+	require.ErrorIs(t, err, cause)
+}

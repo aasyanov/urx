@@ -45,8 +45,12 @@
 // (--port=8080, -p=8080) forms. POSIX-style grouped short flags are
 // supported: -vdq expands to -v -d -q. The last flag in a group may be
 // non-bool and consume the next argument or the rest of the group as its
-// value (e.g. -vp 3000 or -vp3000). A bare "--" stops flag parsing and
-// sends the remaining tokens to positional arguments.
+// value (e.g. -vp 3000 or -vp3000). A following token that looks like a
+// flag is [ErrMissingValue], not a value; bind "--raw" with --name=--raw.
+// Signed numbers (-5, -1s) and a bare "-" are values. A lone "-" token is
+// a positional argument (stdin convention), matching flag.FlagSet; "-5"
+// as a token is still an unknown flag. A bare "--" stops flag parsing
+// and sends the remaining tokens to positional arguments.
 //
 // # Bool negation
 //
@@ -86,6 +90,7 @@
 //
 // [Parser.IsSet] reports whether a flag was provided on the command line,
 // distinguishing a user-supplied zero value (--port 0) from the default.
+// The name may be the long flag or the short alias.
 //
 // # Subcommand aliases
 //
@@ -152,15 +157,22 @@
 // Programming mistakes are caught at construction time via panics:
 // empty command or flag names, duplicate flag names or short aliases,
 // shadowing an inherited flag on a subcommand, duplicate subcommand names,
-// duplicate [Run] on the same command, unsupported flag types, and enum
-// type mismatches. These fire on the very first run, making
+// duplicate [Run] or [Version] on the same command, unsupported flag types, enum
+// type mismatches, reserved --help / -h (and --version / -V when
+// [Version] is set), multi-character short aliases, and [WithHelpLabels]
+// on a [SubCommand]. These fire on the very first run, making
 // misconfiguration impossible to ship.
 //
 // # Help output
 //
 // [Parser.Help] returns a formatted string with USAGE, COMMANDS, FLAGS,
 // and GLOBAL FLAGS sections. It is generated for whichever command was
-// matched (or root if none). Column widths adapt to the actual content.
+// matched (or root if none). The USAGE line is the full command path
+// (root plus any matched subcommands). FLAGS always includes the built-in
+// --help / -h control flag, and --version / -V when [Version] was set.
+// Column widths adapt to the actual content. Headings and built-in flag
+// usage can be replaced via [WithHelpLabels] without translating command
+// or flag names.
 //
 // # Zero dependencies
 //
@@ -187,6 +199,9 @@ func New(osArgs []string, name, desc string, opts ...Option) *Parser {
 	}
 	root := newCommand(name, desc)
 	for _, opt := range opts {
+		if opt == nil {
+			continue
+		}
 		opt(root)
 	}
 
@@ -203,8 +218,10 @@ func (p *Parser) Err() error { return p.parseErr }
 
 // Help returns the formatted help string for whichever command was matched
 // during parsing. If no subcommand was matched, it returns help for root.
-// The output includes USAGE, COMMANDS, FLAGS, and GLOBAL FLAGS sections
-// as applicable.
+// The output includes USAGE (full command path), COMMANDS, FLAGS (always
+// including built-in --help / -h, and --version / -V when [Version] was
+// set), and GLOBAL FLAGS for flags inherited from ancestors. Headings and
+// built-in usage strings come from [WithHelpLabels] when set.
 func (p *Parser) Help() string { return p.matched.help() }
 
 // Version returns the version string set via [Version], or "" if none.
@@ -216,10 +233,16 @@ func (p *Parser) Command() *Command { return p.matched }
 
 // IsSet reports whether the named flag was explicitly provided on the
 // command line for the matched command (or any ancestor, via inheritance).
-// It distinguishes a user-supplied zero value such as "--port 0" from the
-// flag's default. Unknown flag names return false.
+// name may be the long flag or the short alias. It distinguishes a
+// user-supplied zero value such as "--port 0" from the flag's default.
+// Unknown flag names return false.
 func (p *Parser) IsSet(name string) bool {
 	meta, ok := resolveFlag(p.matched, name)
+	if !ok {
+		if canonical, found := resolveShort(p.matched, name); found {
+			meta, ok = resolveFlag(p.matched, canonical)
+		}
+	}
 	if !ok {
 		return false
 	}

@@ -58,12 +58,13 @@ const opTryExecute = "bulkx.TryExecute"
 // enforced by a buffered channel semaphore; the surrounding counters live in
 // lock-free atomics.
 type Bulkhead struct {
-	cfg      config
-	sem      chan struct{}
-	active   atomic.Int64
-	executed atomic.Uint64
-	rejected atomic.Uint64
-	timeouts atomic.Uint64
+	cfg       config
+	sem       chan struct{}
+	active    atomic.Int64
+	waiters   atomic.Int64
+	executed  atomic.Uint64
+	rejected  atomic.Uint64
+	timeouts  atomic.Uint64
 	closed    atomic.Bool
 	closeOnce sync.Once
 	closedCh  chan struct{}
@@ -113,7 +114,8 @@ type Token struct {
 // The caller owns the returned token and must release it.
 //
 // Returns [ErrClosed] if the bulkhead is closed, [ErrCancelled] if the context
-// is cancelled while waiting, and [ErrTimeout] if the timeout fires first.
+// is cancelled while waiting, [ErrTimeout] if the timeout fires first, and
+// [ErrWaitersExceeded] if [WithMaxWaiters] is set and the waiter cap is full.
 func (b *Bulkhead) Acquire(ctx context.Context) (*Token, error) {
 	if _, err := b.reserve(ctx); err != nil {
 		return nil, err
@@ -128,8 +130,7 @@ func (t *Token) Release() {
 	if t == nil || !t.done.CompareAndSwap(false, true) {
 		return
 	}
-	t.bulkhead.active.Add(-1)
-	<-t.bulkhead.sem
+	t.bulkhead.releaseSlot()
 }
 
 // reserve performs the three-phase slot acquisition shared by [Execute] and
@@ -151,27 +152,92 @@ func (b *Bulkhead) reserve(ctx context.Context) (waited bool, err error) {
 		return false, errCancelled(cerr)
 	}
 
-	select {
-	case b.sem <- struct{}{}:
-		return b.commitSlot(false)
-	default:
+	if b.waiters.Load() == 0 {
+		select {
+		case b.sem <- struct{}{}:
+			return b.finishReserve(ctx, false)
+		default:
+		}
 	}
 
-	timer := time.NewTimer(b.cfg.timeout)
-	defer timer.Stop()
+	return b.reserveSlow(ctx)
+}
 
+// reserveSlow waits for a slot with a timer. It always counts this caller as a
+// waiter so [TryExecute] and the reserve fast path cannot barge ahead. When
+// [WithMaxWaiters] is set, excess waiters are rejected immediately.
+func (b *Bulkhead) reserveSlow(ctx context.Context) (waited bool, err error) {
+	n := b.waiters.Add(1)
+	defer b.waiters.Add(-1)
+	if b.cfg.maxWaiters > 0 && n > int64(b.cfg.maxWaiters) {
+		b.rejected.Add(1)
+		return false, ErrWaitersExceeded
+	}
+
+	timer := time.NewTimer(slotWait(ctx, b.cfg.timeout))
 	select {
 	case b.sem <- struct{}{}:
-		return b.commitSlot(true)
+		stopTimer(timer)
+		return b.finishReserve(ctx, true)
 	case <-ctx.Done():
+		stopTimer(timer)
 		b.rejected.Add(1)
 		return false, errCancelled(ctx.Err())
 	case <-timer.C:
+		if err := ctx.Err(); err != nil {
+			b.rejected.Add(1)
+			return false, errCancelled(err)
+		}
 		b.timeouts.Add(1)
 		return false, ErrTimeout
 	case <-b.closedCh:
+		stopTimer(timer)
 		b.rejected.Add(1)
 		return false, ErrClosed
+	}
+}
+
+// finishReserve validates the bulkhead is still open and the context is still
+// live after a semaphore send. A closed bulkhead or a cancelled context refunds
+// the slot so no operation is admitted after shutdown or cancel.
+func (b *Bulkhead) finishReserve(ctx context.Context, waited bool) (bool, error) {
+	if _, err := b.commitSlot(waited); err != nil {
+		return false, err
+	}
+	if err := ctx.Err(); err != nil {
+		b.releaseUncommittedSlot()
+		b.rejected.Add(1)
+		return false, errCancelled(err)
+	}
+	return waited, nil
+}
+
+// slotWait returns min(timeout, time remaining until ctx's deadline). A
+// deadline that has already passed yields a zero duration so the timer fires
+// immediately; the caller still re-checks ctx.Err() on timer expiry.
+func slotWait(ctx context.Context, timeout time.Duration) time.Duration {
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return timeout
+	}
+	remaining := time.Until(deadline)
+	if remaining < timeout {
+		if remaining < 0 {
+			return 0
+		}
+		return remaining
+	}
+	return timeout
+}
+
+// stopTimer stops t and drains its channel when the timer already fired, so
+// the runtime can reclaim the timer goroutine promptly.
+func stopTimer(t *time.Timer) {
+	if !t.Stop() {
+		select {
+		case <-t.C:
+		default:
+		}
 	}
 }
 
@@ -188,8 +254,19 @@ func (b *Bulkhead) commitSlot(waited bool) (bool, error) {
 }
 
 // releaseUncommittedSlot returns a semaphore token that was acquired but not
-// yet handed to a callback or token owner.
+// yet handed to a callback or token owner. Active is not decremented because
+// it was never incremented for this reservation.
 func (b *Bulkhead) releaseUncommittedSlot() {
+	<-b.sem
+}
+
+// releaseSlot drops the in-flight count first, then frees the semaphore. The
+// order is load-bearing: freeing the semaphore first lets another goroutine
+// claim a slot and increment active before this caller decrements, so
+// [Bulkhead.Active] can briefly exceed maxConcurrent. Token.Release and the
+// [run] defer share this helper.
+func (b *Bulkhead) releaseSlot() {
+	b.active.Add(-1)
 	<-b.sem
 }
 
@@ -197,8 +274,7 @@ func (b *Bulkhead) releaseUncommittedSlot() {
 // and releasing the slot on return — even if fn panics.
 func run[T any](b *Bulkhead, ctx context.Context, waited bool, op string, fn func(ctx context.Context, bc BulkController) (T, error)) (T, error) {
 	active := b.active.Add(1)
-	defer b.active.Add(-1)
-	defer func() { <-b.sem }()
+	defer b.releaseSlot()
 	b.executed.Add(1)
 
 	bc := &execution{
@@ -226,7 +302,8 @@ func run[T any](b *Bulkhead, ctx context.Context, waited bool, op string, fn fun
 //
 // Returns [ErrClosed] if the bulkhead is closed, [ErrNilFunc] if fn is nil,
 // [ErrCancelled] if the context is cancelled before a slot is acquired (no slot
-// consumed), or [ErrTimeout] if the timeout fires before a slot frees up.
+// consumed), [ErrTimeout] if the timeout fires before a slot frees up, or
+// [ErrWaitersExceeded] if [WithMaxWaiters] is set and the waiter cap is full.
 func Execute[T any](b *Bulkhead, ctx context.Context, fn func(ctx context.Context, bc BulkController) (T, error)) (T, error) {
 	var zero T
 	if b.closed.Load() {
@@ -243,9 +320,10 @@ func Execute[T any](b *Bulkhead, ctx context.Context, fn func(ctx context.Contex
 }
 
 // TryExecute attempts to run fn without blocking. If a slot is immediately
-// available the function executes and TryExecute returns (true, val, err). If
-// no slot is free it returns (false, zero, nil) without invoking fn and counts
-// a rejection.
+// available and no caller is waiting on the slow path, the function executes
+// and TryExecute returns (true, val, err). If no slot is free, or waiters are
+// already queued, it returns (false, zero, nil) without invoking fn and counts
+// a rejection. Fast-path callers never barge ahead of a waiter.
 //
 // Returns (false, zero, [ErrClosed]) if the bulkhead is closed,
 // (false, zero, [ErrNilFunc]) if fn is nil, and (false, zero, [ErrCancelled])
@@ -263,14 +341,15 @@ func TryExecute[T any](b *Bulkhead, ctx context.Context, fn func(ctx context.Con
 		return false, zero, errCancelled(err)
 	}
 
+	if b.waiters.Load() > 0 {
+		b.rejected.Add(1)
+		return false, zero, nil
+	}
+
 	select {
 	case b.sem <- struct{}{}:
-		if _, err := b.commitSlot(false); err != nil {
+		if _, err := b.finishReserve(ctx, false); err != nil {
 			return false, zero, err
-		}
-		if err := ctx.Err(); err != nil {
-			b.releaseUncommittedSlot()
-			return false, zero, errCancelled(err)
 		}
 		val, err := run(b, ctx, false, b.cfg.opOrDefaultTry(), fn)
 		return true, val, err
@@ -301,6 +380,7 @@ func (b *Bulkhead) Load() float64 {
 type Stats struct {
 	MaxConcurrent int    `json:"max_concurrent"`
 	Active        int    `json:"active"`
+	Waiters       int    `json:"waiters"`
 	Executed      uint64 `json:"executed"`
 	Rejected      uint64 `json:"rejected"`
 	Timeouts      uint64 `json:"timeouts"`
@@ -311,6 +391,7 @@ func (b *Bulkhead) Stats() Stats {
 	return Stats{
 		MaxConcurrent: b.cfg.maxConcurrent,
 		Active:        int(b.active.Load()),
+		Waiters:       int(b.waiters.Load()),
 		Executed:      b.executed.Load(),
 		Rejected:      b.rejected.Load(),
 		Timeouts:      b.timeouts.Load(),

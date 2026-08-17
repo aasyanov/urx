@@ -120,7 +120,8 @@ type Stats struct {
 	// PrimarySuccess is the number of calls whose primary attempt succeeded.
 	PrimarySuccess int64 `json:"primary_success"`
 	// FallbackUsed is the number of calls that entered the fallback path
-	// because the primary failed.
+	// because the primary failed and [WithFallbackIf] (if set) accepted the
+	// error.
 	FallbackUsed int64 `json:"fallback_used"`
 	// FallbackSuccess is the number of fallback paths that produced a result.
 	FallbackSuccess int64 `json:"fallback_success"`

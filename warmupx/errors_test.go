@@ -34,3 +34,7 @@ func TestErrCancelled_WrapsCustomCause(t *testing.T) {
 	require.ErrorIs(t, err, ErrCancelled)
 	require.ErrorIs(t, err, cause)
 }
+
+func TestErrClosed_ComparableWithIs(t *testing.T) {
+	require.ErrorIs(t, ErrClosed, ErrClosed)
+}

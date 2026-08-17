@@ -68,6 +68,7 @@ type Shedder struct {
 	shed     atomic.Int64
 	degraded atomic.Int64
 	closed   atomic.Bool
+	shedding atomic.Bool
 }
 
 // New creates a [Shedder] with the given options applied on top of the package
@@ -242,14 +243,20 @@ func TryExecute[T any](s *Shedder, ctx context.Context, priority Priority, fn Sh
 // runAfterAdmit executes fn after a slot has been reserved. The caller must
 // have incremented admitted; this helper decrements inflight on return.
 func runAfterAdmit[T any](s *Shedder, ctx context.Context, priority Priority, n int64, op string, fn ShedFunc[T]) (T, error) {
-	defer s.inflight.Add(-1)
-
 	sc := &execution{
+		shedder:  s,
 		priority: priority,
 		load:     float64(n-1) / float64(s.cfg.capacity),
 		inFlight: n - 1,
 		capacity: s.cfg.capacity,
 	}
+	defer func() {
+		if sc.released {
+			return
+		}
+		sc.released = true
+		s.inflight.Add(-1)
+	}()
 
 	val, err := panix.Safe(op, func() (T, error) {
 		return fn(ctx, sc)
@@ -264,17 +271,41 @@ func runAfterAdmit[T any](s *Shedder, ctx context.Context, priority Priority, n 
 // post-reservation in-flight count (inclusive of the candidate). Critical
 // requests always pass. Below the threshold everything passes; above it, each
 // priority is admitted only while the overload fraction stays under its cutoff.
-// It is pure: the count is supplied by the caller after reserving a slot.
+//
+// When [WithHysteresis] is set, crossing the threshold latches a shedding
+// state that stays on until load falls below (threshold − hysteresis). While
+// latched, the below-threshold admit-all shortcut is skipped and cutoffs apply.
 func (s *Shedder) admits(priority Priority, inflight int64) bool {
 	if priority == PriorityCritical {
 		return true
 	}
 
 	load := float64(inflight) / float64(s.cfg.capacity)
+	if s.cfg.hysteresis > 0 {
+		if s.shedding.Load() {
+			if load < s.cfg.threshold-s.cfg.hysteresis {
+				s.shedding.Store(false)
+				return true
+			}
+			return s.applyCutoffs(load, priority)
+		}
+		if load < s.cfg.threshold {
+			return true
+		}
+		s.shedding.Store(true)
+		return s.applyCutoffs(load, priority)
+	}
+
 	if load < s.cfg.threshold {
 		return true
 	}
+	return s.applyCutoffs(load, priority)
+}
 
+// applyCutoffs admits a non-critical request while its overload fraction stays
+// strictly below the configured cutoff. A threshold of 1.0 (zero-width band)
+// sheds every non-critical request at or above capacity.
+func (s *Shedder) applyCutoffs(load float64, priority Priority) bool {
 	band := thresholdCeil - s.cfg.threshold
 	if band <= 0 {
 		return false

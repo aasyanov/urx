@@ -2,6 +2,7 @@
 
 [CI](https://github.com/aasyanov/urx/actions/workflows/ci.yml)
 [Go Reference](https://pkg.go.dev/github.com/aasyanov/urx/circuitx)
+[Changelog](../CHANGELOG.md)
 [License: MIT](../LICENSE)
 
 A thread-safe circuit breaker that stops hammering a failing downstream: it counts consecutive failures, trips open to reject calls instantly, and after a cooldown admits a bounded number of probe calls to test recovery. Lock-free state machine, `Execute`/`TryExecute` with a controller for per-call decisions, a state-change hook for observability, and panic recovery. Go 1.24+. Zero external dependencies (depends only on the urx `panix` package; testify in tests only).
@@ -32,6 +33,7 @@ A circuit breaker solves all three. It observes failures, and once they cross a 
 ✅ Execute[T]         — admit + run a callback under the breaker, recording the outcome
 ✅ TryExecute[T]      — non-blocking admission: run now or return (false, zero, nil)
 ✅ CircuitController  — state/failure snapshot + SkipFailure() and Trip() per call
+✅ WithFailureIf      — classify which remaining errors count as failures
 ✅ WithOnStateChange  — observability hook fired on every state transition
 ✅ panic safety       — a panicking callback becomes a *panix.PanicError, counted as a failure
 
@@ -39,6 +41,7 @@ A circuit breaker solves all three. It observes failures, and once they cross a 
 ❌ NOT a rate limiter — it does not bound requests-per-second (see ratex)
 ❌ NOT a bulkhead     — it does not cap concurrency (see bulkx / shedx)
 ❌ NOT a timeout      — it does not abort a slow call (compose with toutx)
+❌ NOT a failure-rate / sliding-window trip — consecutive failures only
 ❌ NOT per-key        — one Breaker guards one logical dependency; shard them yourself
 ```
 
@@ -71,12 +74,15 @@ A circuit breaker solves all three. It observes failures, and once they cross a 
                          Breaker
    ┌─────────────────────────────────────────────────────┐
    │ cfg              maxFailures, resetTimeout,         │
-   │                  halfOpenMax, onStateChange, op     │
+   │                  halfOpenMax, successThreshold,     │
+   │                  failureIf, countCanceled,          │
+   │                  onStateChange, op                  │
    │                                                     │
    │ state            atomic.Uint32  (Closed/Open/Half)  │
    │ failures         atomic.Int32   (consecutive)       │
    │ lastOpen         atomic.Int64   (UnixNano of trip)  │
    │ halfOpenInflight atomic.Int32   (probe budget used) │
+   │ generation       atomic.Uint64  (HalfOpen epoch)    │
    │                                                     │
    │ successes/totalFail/rejected/trips  atomic.Uint64   │
    │ closed           atomic.Bool    (lifecycle)         │
@@ -84,7 +90,7 @@ A circuit breaker solves all three. It observes failures, and once they cross a 
    └─────────────────────────────────────────────────────┘
 ```
 
-The hot path is lock-free: admission reads `state`, `failures`, and `halfOpenInflight` with plain atomic loads and a compare-and-swap to reserve a probe slot. The single mutex is taken only on a *state transition* (a trip or a close), so it never contends under steady-state traffic — it exists purely to make each edge atomic with respect to the trip counter and the `onStateChange` hook, guaranteeing the hook fires exactly once per edge.
+The hot path is lock-free: admission reads `state`, `failures`, and `halfOpenInflight` with plain atomic loads and a compare-and-swap to reserve a probe slot. A `generation` counter is bumped on every `Open → HalfOpen` promotion and on `Reset` to `Closed`, so a probe that outlives its epoch cannot heal or re-open a newer generation. The single mutex is taken only on a *state transition* (a trip or a close), so it never contends under steady-state traffic — it exists purely to make each edge atomic with respect to the trip counter and the `onStateChange` hook, guaranteeing the hook fires exactly once per edge. A panicking hook is recovered; it must not block.
 
 ## How It Works
 
@@ -109,10 +115,18 @@ The hot path is lock-free: admission reads `state`, `failures`, and `halfOpenInf
 A call flows through `[Execute](#api)` or `[TryExecute](#api)` like this:
 
 1. **Guard.** If the breaker is `Close`d → `[ErrClosed](#errors)`; if `fn` is nil → `[ErrNilFunc](#errors)`; if `ctx` is already cancelled → `[ErrCancelled](#errors)`. None of these touch the state machine.
-2. **Admission.** Read the state. In `Open`, reject — `[Execute](#api)` returns `[ErrOpen](#errors)`, `[TryExecute](#api)` returns `(false, zero, nil)`. In `HalfOpen`, atomically reserve one of `halfOpenMax` probe slots — if the budget is exhausted, reject the same way. In `Closed`, always admit.
-3. **Lazy promotion.** Reading the state while `Open` checks whether `resetTimeout` has elapsed since the trip; if so, a single compare-and-swap promotes `Open → HalfOpen` and fires the hook. No background goroutine or timer is needed.
-4. **Run.** `fn` runs under `[panix.Safe](../panix)`; a panic becomes a `*panix.PanicError` treated as a failure.
-5. **Record.** On success in `Closed`, clear the failure counter. On success in `HalfOpen`, increment the consecutive probe-success counter and heal to `Closed` only once it reaches `successThreshold` (default 1). On failure (not suppressed by `SkipFailure`), increment the consecutive failure count and trip to `Open` if the failure threshold is reached, the failure was a `HalfOpen` probe (which also resets the probe-success counter), or the callback called `Trip`. The callback's return value is always passed through together with any error.
+2. **Admission.** Read the state. In `Open`, reject — `[Execute](#api)` returns `[ErrOpen](#errors)`, `[TryExecute](#api)` returns `(false, zero, nil)`. In `HalfOpen`, atomically reserve one of `halfOpenMax` probe slots — if the budget is exhausted, reject the same way. In `Closed`, always admit. The live `generation` is captured so a later settlement can be ignored if the epoch moved on.
+3. **Lazy promotion.** Reading the state while `Open` checks whether `resetTimeout` has elapsed since the trip; if so, a single compare-and-swap promotes `Open → HalfOpen`, bumps `generation`, zeroes the probe counters, and fires the hook. No background goroutine or timer is needed.
+4. **Run.** `fn` runs under `[panix.Safe](../panix)`; a panic becomes a `*panix.PanicError` treated as a counted failure.
+5. **Record.** On success in `Closed`, clear the failure counter. On success in `HalfOpen`, increment the consecutive probe-success counter and heal to `Closed` only once it reaches `successThreshold` (default 1) — one success does not always close the breaker. On a *counted* failure, increment the consecutive failure count and trip to `Open` if the failure threshold is reached, the failure was a `HalfOpen` probe (which also resets the probe-success counter), or the callback called `Trip`. A probe whose captured generation does not match the live generation does not heal and does not re-open. The callback's return value is always passed through together with any error.
+
+**What counts as a failure (after admission):**
+
+- `[CircuitController.SkipFailure](#api)` always wins: the error reaches the caller but is not counted.
+- `context.Canceled` is **not** counted unless `[WithCountCanceled](#configuration)` is set. `WithFailureIf` is not asked for an ignored cancel.
+- `context.DeadlineExceeded` **is** counted (unless `SkipFailure` or a `WithFailureIf` predicate returns false).
+- A recovered panic always counts and is not passed to `WithFailureIf`.
+- When `WithFailureIf` is set, it classifies remaining errors; when unset, every remaining error counts.
 
 ```text
 TryExecute(b, ctx, fn)
@@ -158,6 +172,9 @@ TryExecute(b, ctx, fn)
 | Open rejects without `fn`       | A call rejected in `Open` or budget-exhausted `HalfOpen` never invokes `fn`; `Execute` returns `ErrOpen`, `TryExecute` returns `(false, zero, nil)`. |
 | Probe budget                    | At most `WithHalfOpenMax` callbacks run concurrently in `HalfOpen`; the rest are rejected the same way.                                              |
 | Heal threshold                  | `HalfOpen → Closed` requires `WithSuccessThreshold` consecutive probe successes; a probe failure resets that counter and re-opens.                   |
+| HalfOpen generation             | `generation` bumps on `Open → HalfOpen` and on `Reset` to `Closed`. A stale probe must not heal or re-open the new epoch; its slot release is a no-op. |
+| Cancel is not a failure         | Post-admission `context.Canceled` is returned but not counted unless `WithCountCanceled`. Pre-admission cancel is `ErrCancelled` and never counted.   |
+| `WithFailureIf` classification  | When set, remaining errors (not ignored cancel, not panic) count only if the predicate returns true. `SkipFailure` always wins.                       |
 | Non-blocking reject             | `TryExecute` returns `(false, zero, nil)` when the circuit rejects — rejection is a return value, not `ErrOpen`.                                     |
 | Single trip per edge            | Concurrent failures that cross the threshold record exactly one trip and fire the hook once.                                                         |
 | `SkipFailure` excludes counting | A skipped failure reaches the caller unchanged but never increments the failure count or trips.                                                      |
@@ -304,6 +321,9 @@ return use(resp)
 | Symbol                          | Signature                                                                                | Description                                                                |
 | ------------------------------- | ---------------------------------------------------------------------------------------- | -------------------------------------------------------------------------- |
 | `New`                           | `New(opts ...Option) *Breaker`                                                           | Construct a breaker (defaults applied, options clamped).                   |
+| `Breaker`                       | `type Breaker struct`                                                                    | Concurrent circuit breaker.                                                |
+| `State`                         | `type State uint8`                                                                       | `Closed`, `Open`, `HalfOpen`.                                              |
+| `Closed` / `Open` / `HalfOpen`  | `const State`                                                                            | Healthy / tripped / probing.                                               |
 | `Execute`                       | `Execute[T any](b *Breaker, ctx context.Context, fn CircuitFunc[T]) (T, error)`          | Admit and run `fn` under the breaker; reject with `ErrOpen`.               |
 | `TryExecute`                    | `TryExecute[T any](b *Breaker, ctx context.Context, fn CircuitFunc[T]) (bool, T, error)` | Non-blocking admit; reject with `(false, zero, nil)`.                      |
 | `Breaker.State`                 | `State() State`                                                                          | Current state; lazily promotes `Open → HalfOpen` when the timeout elapses. |
@@ -313,13 +333,20 @@ return use(resp)
 | `Breaker.ResetStats`            | `ResetStats()`                                                                           | Zero the cumulative counters (state untouched).                            |
 | `Breaker.Close`                 | `Close() error`                                                                          | Permanently disable; subsequent `Execute`/`TryExecute` return `ErrClosed`. |
 | `Breaker.IsClosed`              | `IsClosed() bool`                                                                        | Whether `Close` was called (≠ `Closed` state).                             |
+| `CircuitController`             | `interface { State; Failures; MaxFailures; SkipFailure; Trip }`                          | Per-call admission snapshot and outcome controls.                          |
 | `CircuitController.State`       | `State() State`                                                                          | State at admission (`Closed` or `HalfOpen`).                               |
 | `CircuitController.Failures`    | `Failures() int`                                                                         | Failure count at admission.                                                |
 | `CircuitController.MaxFailures` | `MaxFailures() int`                                                                      | Configured failure threshold.                                              |
 | `CircuitController.SkipFailure` | `SkipFailure()`                                                                          | Do not count this call's error as a failure.                               |
 | `CircuitController.Trip`        | `Trip()`                                                                                 | Force the breaker `Open` after this call.                                  |
+| `Option`                        | `func(*config)`                                                                          | Functional option for `New`. Nil entries are skipped.                      |
 | `State.String`                  | `String() string`                                                                        | `"closed"`, `"open"`, `"half_open"`.                                       |
 | `CircuitFunc[T]`                | `func(ctx, cc CircuitController) (T, error)`                                             | The unit of work run by `Execute` and `TryExecute`.                        |
+| `Stats`                         | `struct { State; Failures; MaxFailures; Successes; TotalFail; Rejected; Trips }`         | Read-only snapshot from `Breaker.Stats`.                                   |
+| `DefaultMaxFailures`            | `const = 5`                                                                              | Default consecutive-failure trip threshold.                                |
+| `DefaultResetTimeout`           | `const = 10s`                                                                            | Default `Open` cooldown.                                                   |
+| `DefaultHalfOpenMax`            | `const = 1`                                                                              | Default concurrent probe budget.                                           |
+| `DefaultSuccessThreshold`       | `const = 1`                                                                              | Default consecutive probe successes to heal.                               |
 
 
 
@@ -333,7 +360,9 @@ return use(resp)
 | `WithResetTimeout(d time.Duration)`          | `10s`                                          | How long `Open` lasts before a probe is admitted. Values `<= 0` ignored.                                           |
 | `WithHalfOpenMax(n int)`                     | `1`                                            | Concurrent probes admitted in `HalfOpen`. Values `< 1` floored to 1.                                               |
 | `WithSuccessThreshold(n int)`                | `1`                                            | Consecutive probe successes in `HalfOpen` required to heal to `Closed`. Values `<= 0` ignored; `< 1` floored to 1. |
-| `WithOnStateChange(fn func(from, to State))` | none                                           | Hook fired on each transition (not by `Stats`). Must not block or panic.                                           |
+| `WithFailureIf(fn func(error) bool)`         | nil (count remaining errors)                   | Classify remaining errors. Not asked for ignored `Canceled`. Nil ignored. Panic always counts.                     |
+| `WithCountCanceled()`                        | off                                            | Count post-admission `context.Canceled` as a failure (opt-in; default is ignore).                                  |
+| `WithOnStateChange(fn func(from, to State))` | none                                           | Hook fired on each transition (not by `Stats`). Synchronous; must not block; panics recovered.                     |
 | `WithOp(op string)`                          | `"circuitx.Execute"` / `"circuitx.TryExecute"` | Operation label attached to panic reports (`TryExecute` defaults to `"circuitx.TryExecute"`).                      |
 
 
@@ -352,7 +381,7 @@ return use(resp)
 
 All errors are comparable with `==` and `errors.Is`. `ErrCancelled` wraps the underlying `context` cause; reach it with `errors.Unwrap` or test with `errors.Is(err, context.Canceled)`.
 
-`TryExecute` does not return `ErrOpen` — when the circuit rejects a call it returns `(false, zero, nil)`, leaving the decision to the caller. A panicking callback surfaces as a `*panix.PanicError` returned by `Execute` or `TryExecute` (reach it with `errors.As`); the probe slot is still released.
+A cancel **after** admission is not `ErrCancelled`: `fn` ran, its `context.Canceled` is returned as-is, and (by default) the breaker does not count it. `TryExecute` does not return `ErrOpen` — when the circuit rejects a call it returns `(false, zero, nil)`, leaving the decision to the caller. A panicking callback surfaces as a `*panix.PanicError` returned by `Execute` or `TryExecute` (reach it with `errors.As`); the probe slot is still released.
 
 ## Pitfalls
 
@@ -366,7 +395,10 @@ All errors are comparable with `==` and `errors.Is`. `ErrCancelled` wraps the un
 > `Stats()` **is not** `State()`**.** `Breaker.Stats` returns a read-only snapshot and never promotes `Open → HalfOpen` or fires `onStateChange`. Use `Stats` for metrics middleware; use `State()` when admission logic needs the live (possibly promoted) state.
 
 > [!WARNING]
-> **The** `onStateChange` **hook runs on the caller's goroutine.** It fires synchronously inside `Execute`/`TryExecute`/`State`/`Reset` while no lock relevant to the hot path is held, but a slow or panicking hook will stall the calling request. Keep it to a counter increment or a non-blocking send.
+> **The** `onStateChange` **hook runs on the caller's goroutine.** It fires synchronously inside `Execute`/`TryExecute`/`State`/`Reset`. A slow hook stalls the calling request. A panic in the hook is recovered and discarded so it cannot crash the caller, but it is still the wrong place for blocking I/O. Keep it to a counter increment or a non-blocking send.
+
+> [!WARNING]
+> **Caller cancel is not a downstream outage.** After a call is admitted, `context.Canceled` is returned to the caller but does not increment the consecutive-failure counter (unless `WithCountCanceled`). `context.DeadlineExceeded` still counts — a timeout is evidence the downstream did not answer in time.
 
 > [!NOTE]
 > **One breaker guards one dependency.** A `Breaker` aggregates failures globally. To isolate failures per host, per tenant, or per endpoint, create one breaker per key (e.g. in a `syncx.Map[string, *circuitx.Breaker]`).
@@ -375,7 +407,7 @@ All errors are comparable with `==` and `errors.Is`. `ErrCancelled` wraps the un
 
 ## Safety and Concurrency
 
-A `Breaker` is safe for concurrent use from any number of goroutines. State, failure count, probe budget, and all counters are `sync/atomic` values. The hot paths are lock-free: a successful call through a healthy `Closed` breaker, and a rejection by an `Open` breaker, take no mutex at all. The single `sync.Mutex` is acquired only when a state transition or failure settlement actually occurs (`recordFailure`, `recordSuccess` healing/forgiving, `openFrom`, `Reset`), making each edge atomic so the trip counter and `WithOnStateChange` hook fire exactly once. Crucially, every state-changing helper re-reads the live state under the lock, so a success can never silently re-close a breaker that a concurrent failure just tripped. Lazy `Open → HalfOpen` promotion rides a single compare-and-swap with no lock and is driven only by `State()`, `Execute`, and `TryExecute` — never by `Stats`. Half-open probe slots use a clamped release so `Reset` during an in-flight probe cannot corrupt the budget. There are no background goroutines and no timers: promotion is evaluated whenever the state is read for admission, so a `Breaker` needs no `Close` to avoid leaks (`Close` exists only to disable it).
+A `Breaker` is safe for concurrent use from any number of goroutines. State, failure count, probe budget, generation, and all counters are `sync/atomic` values. The hot paths are lock-free: a successful call through a healthy `Closed` breaker, and a rejection by an `Open` breaker, take no mutex at all. The single `sync.Mutex` is acquired only when a state transition or failure settlement actually occurs (`recordFailure`, `recordSuccess` healing/forgiving, `openFrom`, `Reset`), making each edge atomic so the trip counter and `WithOnStateChange` hook fire exactly once. Crucially, every state-changing helper re-reads the live state under the lock, so a success can never silently re-close a breaker that a concurrent failure just tripped, and a probe whose generation does not match is ignored. Lazy `Open → HalfOpen` promotion rides a single compare-and-swap with no lock, bumps `generation`, and is driven only by `State()`, `Execute`, and `TryExecute` — never by `Stats`. Half-open probe slots use a generation-aware clamped release so `Reset` during an in-flight probe cannot corrupt the budget or let a stale success heal. `WithOnStateChange` runs synchronously on the driving goroutine; panics are recovered. There are no background goroutines and no timers: promotion is evaluated whenever the state is read for admission, so a `Breaker` needs no `Close` to avoid leaks (`Close` exists only to disable it).
 
 ## Benchmarks
 
@@ -432,15 +464,24 @@ Three environments, two hardware classes, two operating systems. All values are 
 
 | Metric         | Value                          |
 | -------------- | ------------------------------ |
-| Test functions | 60                             |
+| Test functions | 77                             |
 | Benchmarks     | 10                             |
 | Fuzz targets   | 2                              |
 | Examples       | 5                              |
 | Coverage       | 100.0%                         |
-| Race detector  | All pass                       |
-| External deps  | 0 (panix; testify in dev only) |
+| Race detector  | All pass (`go test -race -count=1 ./circuitx/`) |
+| External deps  | 0 (panix; testify in tests only) |
+| Gate           | M evidenced; craft 0-2 green locally |
 
 
+```
+go test -race -count=1 ./circuitx/
+golangci-lint run ./circuitx/
+go test ./circuitx/ -coverprofile=cover.out
+go test ./circuitx/ -run='^$' -bench=. -benchmem -count=3
+go test ./circuitx/ -fuzz=FuzzExecute -fuzztime=30s
+go test ./circuitx/ -fuzz=FuzzTryExecute -fuzztime=30s
+```
 
 
 ## File Structure

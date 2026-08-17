@@ -27,9 +27,11 @@ var (
 	// compare with == or [errors.Is].
 	ErrUnknownCommand = errors.New("clix: unknown command")
 
-	// ErrMissingValue is returned when a non-bool flag is the last token or
-	// is followed by another flag, leaving it without a value. Safe to
-	// compare with == or [errors.Is].
+	// ErrMissingValue is returned when a non-bool flag has no value: it is
+	// the last token, or the next token looks like another flag (starts with
+	// "-" but is not a signed number such as -5 / -1s). Bind a dash-prefixed
+	// string with the inline form (--name=--raw). Safe to compare with == or
+	// [errors.Is].
 	ErrMissingValue = errors.New("clix: missing value for flag")
 
 	// ErrInvalidValue is returned when a flag value cannot be parsed into the

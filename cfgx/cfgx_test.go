@@ -2,7 +2,9 @@ package cfgx
 
 import (
 	"errors"
+	"fmt"
 	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -374,14 +376,18 @@ func TestMarshal_ErrorPaths(t *testing.T) {
 		_, err := Marshal(&testConfig{}, FormatAuto)
 		require.ErrorIs(t, err, ErrUnsupportedFormat)
 	})
-		t.Run("unencodable value", func(t *testing.T) {
-			_, err := Marshal(map[string]any{"fn": func() {}}, FormatJSON)
-			require.ErrorIs(t, err, ErrWriteFailed)
-		})
-		t.Run("unencodable value yaml", func(t *testing.T) {
-			_, err := Marshal(map[string]any{"fn": func() {}}, FormatYAML)
-			require.ErrorIs(t, err, ErrWriteFailed)
-		})
+	t.Run("unencodable value", func(t *testing.T) {
+		_, err := Marshal(map[string]any{"fn": func() {}}, FormatJSON)
+		require.ErrorIs(t, err, ErrWriteFailed)
+	})
+	t.Run("unencodable value yaml", func(t *testing.T) {
+		_, err := Marshal(map[string]any{"fn": func() {}}, FormatYAML)
+		require.ErrorIs(t, err, ErrWriteFailed)
+	})
+	t.Run("unencodable value toml", func(t *testing.T) {
+		_, err := Marshal(map[string]any{"fn": func() {}}, FormatTOML)
+		require.ErrorIs(t, err, ErrWriteFailed)
+	})
 }
 
 func TestFormat_String(t *testing.T) {
@@ -564,4 +570,191 @@ func TestMarshal_UnresolvedFormatPanics(t *testing.T) {
 	require.Panics(t, func() {
 		_, _ = marshal(&testConfig{}, FormatAuto)
 	})
+}
+
+func TestLoad_NilOptionsIgnored(t *testing.T) {
+	var cfg testConfig
+	var none Option
+	err := Load("c.json", &cfg,
+		none,
+		WithFormat(FormatJSON),
+		WithReader(staticReader([]byte(`{"port":3}`), nil)),
+	)
+	require.NoError(t, err)
+	assert.Equal(t, 3, cfg.Port)
+}
+
+func TestLoad_InvalidFormat(t *testing.T) {
+	var cfg testConfig
+	err := Load("c.yaml", &cfg, WithFormat(Format(99)), WithReader(staticReader([]byte("port: 1\n"), nil)))
+	require.ErrorIs(t, err, ErrUnsupportedFormat)
+}
+
+func TestParse_InvalidFormat(t *testing.T) {
+	var cfg testConfig
+	err := Parse([]byte(`{"port":1}`), &cfg, WithFormat(Format(99)))
+	require.ErrorIs(t, err, ErrUnsupportedFormat)
+}
+
+func TestSave_InvalidFormat(t *testing.T) {
+	err := Save("o.conf", &testConfig{}, WithFormat(Format(99)), WithWriter(func(string, []byte, os.FileMode) error {
+		t.Fatal("writer must not run")
+		return nil
+	}))
+	require.ErrorIs(t, err, ErrUnsupportedFormat)
+}
+
+func TestMarshal_InvalidFormat(t *testing.T) {
+	_, err := Marshal(&testConfig{}, Format(99))
+	require.ErrorIs(t, err, ErrUnsupportedFormat)
+}
+
+func TestSave_CreatesParentDirectories(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "nested", "out.yaml")
+	cfg := testConfig{Port: 8, Host: "h"}
+	require.NoError(t, Save(path, &cfg))
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	assert.Contains(t, string(data), "port: 8")
+}
+
+func TestSave_BareFilenameNoMkdirAll(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	cfg := testConfig{Port: 2}
+	require.NoError(t, Save("out.yaml", &cfg))
+	data, err := os.ReadFile("out.yaml")
+	require.NoError(t, err)
+	assert.Contains(t, string(data), "port: 2")
+}
+
+func TestLoad_CreateIfMissingAutoFixRemainingDoesNotWrite(t *testing.T) {
+	c := &fixConfig{Port: -5}
+	wrote := false
+	err := Load("new.yaml", c,
+		WithCreateIfMissing(),
+		WithAutoFix(),
+		WithReader(staticReader(nil, os.ErrNotExist)),
+		WithWriter(func(string, []byte, os.FileMode) error { wrote = true; return nil }),
+	)
+	require.ErrorIs(t, err, ErrValidationFailed)
+	assert.Equal(t, 8080, c.Port, "autofix still repairs in memory")
+	assert.False(t, wrote, "must not persist when validation errors remain")
+}
+
+func TestLoad_PreservesDefaultsJSON(t *testing.T) {
+	cfg := testConfig{Port: 8080, Host: "localhost"}
+	err := Load("config.json", &cfg, WithReader(staticReader([]byte(`{"port":3000}`), nil)))
+	require.NoError(t, err)
+	assert.Equal(t, 3000, cfg.Port)
+	assert.Equal(t, "localhost", cfg.Host, "absent field keeps default")
+}
+
+func TestLoad_PreservesDefaultsTOML(t *testing.T) {
+	cfg := testConfig{Port: 8080, Host: "localhost"}
+	err := Load("config.toml", &cfg, WithReader(staticReader([]byte("port = 3000\n"), nil)))
+	require.NoError(t, err)
+	assert.Equal(t, 3000, cfg.Port)
+	assert.Equal(t, "localhost", cfg.Host, "absent field keeps default")
+}
+
+func TestParse_JSONNullDoesNotZeroScalar(t *testing.T) {
+	cfg := testConfig{Port: 8080, Host: "localhost"}
+	err := Parse([]byte(`{"port":null}`), &cfg, WithFormat(FormatJSON))
+	require.NoError(t, err)
+	assert.Equal(t, 8080, cfg.Port)
+	assert.Equal(t, "localhost", cfg.Host)
+}
+
+func TestParse_YAMLNullDoesNotZeroScalar(t *testing.T) {
+	tests := []struct {
+		name string
+		data string
+	}{
+		{name: "null", data: "port: null\n"},
+		{name: "tilde", data: "port: ~\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := testConfig{Port: 8080, Host: "localhost"}
+			err := Parse([]byte(tt.data), &cfg, WithFormat(FormatYAML))
+			require.NoError(t, err)
+			assert.Equal(t, 8080, cfg.Port)
+			assert.Equal(t, "localhost", cfg.Host)
+		})
+	}
+}
+
+func TestParse_YAMLEmptyKeyDoesNotZeroScalar(t *testing.T) {
+	cfg := testConfig{Port: 8080, Host: "localhost"}
+	err := Parse([]byte("port:\n"), &cfg, WithFormat(FormatYAML))
+	require.NoError(t, err)
+	assert.Equal(t, 8080, cfg.Port)
+	assert.Equal(t, "localhost", cfg.Host)
+}
+
+func TestParse_YAMLQuotedEmptyZerosString(t *testing.T) {
+	cfg := testConfig{Port: 8080, Host: "localhost"}
+	err := Parse([]byte("host: \"\"\n"), &cfg, WithFormat(FormatYAML))
+	require.NoError(t, err)
+	assert.Equal(t, 8080, cfg.Port)
+	assert.Equal(t, "", cfg.Host)
+}
+
+func TestParse_JSONNullPointerBecomesNil(t *testing.T) {
+	keep := "keep"
+	cfg := struct {
+		Host *string `json:"host"`
+	}{Host: &keep}
+	err := Parse([]byte(`{"host":null}`), &cfg, WithFormat(FormatJSON))
+	require.NoError(t, err)
+	assert.Nil(t, cfg.Host)
+}
+
+func TestParse_YAMLNullPointerBecomesNil(t *testing.T) {
+	keep := "keep"
+	cfg := struct {
+		Host *string `yaml:"host"`
+	}{Host: &keep}
+	err := Parse([]byte("host: null\n"), &cfg, WithFormat(FormatYAML))
+	require.NoError(t, err)
+	assert.Nil(t, cfg.Host)
+}
+
+func TestParse_UnknownJSONKeyIgnored(t *testing.T) {
+	cfg := testConfig{Port: 8080, Host: "localhost"}
+	err := Parse([]byte(`{"port":9,"unknown":true}`), &cfg, WithFormat(FormatJSON))
+	require.NoError(t, err)
+	assert.Equal(t, 9, cfg.Port)
+	assert.Equal(t, "localhost", cfg.Host)
+}
+
+func TestMarshal_NilPointerRejected(t *testing.T) {
+	var p *testConfig
+	_, err := Marshal(p, FormatJSON)
+	require.ErrorIs(t, err, ErrInvalidInput)
+}
+
+func TestLoad_WrappedNotExistCreatesIfMissing(t *testing.T) {
+	var written []byte
+	cfg := testConfig{Port: 8080, Host: "localhost"}
+	err := Load("new.yaml", &cfg,
+		WithCreateIfMissing(),
+		WithReader(staticReader(nil, fmt.Errorf("missing: %w", os.ErrNotExist))),
+		WithWriter(func(_ string, d []byte, _ os.FileMode) error {
+			written = d
+			return nil
+		}),
+	)
+	require.NoError(t, err)
+	require.NotEmpty(t, written)
+	assert.Contains(t, string(written), "port: 8080")
+}
+
+func TestLoad_WrappedNotExistWithoutCreate(t *testing.T) {
+	var cfg testConfig
+	err := Load("missing.yaml", &cfg, WithReader(staticReader(nil, fmt.Errorf("missing: %w", os.ErrNotExist))))
+	require.ErrorIs(t, err, ErrNotFound)
+	require.NotErrorIs(t, err, ErrReadFailed)
 }

@@ -1,5 +1,7 @@
 package ratex
 
+import "time"
+
 const (
 	// DefaultRate is the sustained rate in requests per second applied when
 	// [WithRate] is not supplied.
@@ -22,19 +24,23 @@ type Option func(*config)
 type config struct {
 	rate  float64
 	burst int
+	now   func() time.Time
 }
 
 // newConfig resolves the effective configuration: defaults first, then options
 // in order, with the burst floor applied last so the bucket is always usable.
 // Positive fractional rates are preserved; only a non-positive rate falls back
-// to [DefaultRate].
+// to [DefaultRate]. A nil Option in opts is skipped.
 func newConfig(opts []Option) config {
 	cfg := config{
 		rate:  DefaultRate,
 		burst: DefaultBurst,
+		now:   time.Now,
 	}
 	for _, opt := range opts {
-		opt(&cfg)
+		if opt != nil {
+			opt(&cfg)
+		}
 	}
 	if cfg.rate <= 0 {
 		cfg.rate = DefaultRate
@@ -65,5 +71,16 @@ func WithRate(r float64) Option {
 func WithBurst(n int) Option {
 	return func(c *config) {
 		c.burst = n
+	}
+}
+
+// withClock replaces the time source used for token accrual. A nil now is
+// ignored so the limiter keeps the real clock. Unexported: production callers
+// must not inject a clock; tests use it to drive refill without sleeping.
+func withClock(now func() time.Time) Option {
+	return func(c *config) {
+		if now != nil {
+			c.now = now
+		}
 	}
 }

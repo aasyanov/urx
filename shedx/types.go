@@ -76,19 +76,28 @@ type ShedController interface {
 	// Shed records that the callback served a degraded response because of
 	// load. It does not abort execution — the callback still returns normally.
 	// Use it to count graceful degradations in [Stats]. Safe to call multiple
-	// times; only the first call is counted.
+	// times; only the first call is counted. Shed does not release the in-flight
+	// slot; use [ShedController.SkipSlot] for an early release.
 	Shed()
+
+	// SkipSlot releases the in-flight slot immediately so a cheap or cached
+	// path does not occupy capacity for the rest of the callback. Idempotent
+	// with the deferred release after the callback returns. It does not record
+	// degradation — use [ShedController.Shed] for that.
+	SkipSlot()
 }
 
 // execution is the private implementation of [ShedController]. It is created
 // once per [Execute] or [TryExecute] call and accessed only from the callback goroutine, so it
 // needs no synchronization.
 type execution struct {
+	shedder  *Shedder
 	priority Priority
 	load     float64
 	inFlight int64
 	capacity int
 	degraded bool
+	released bool
 }
 
 // Priority implements [ShedController].
@@ -105,6 +114,15 @@ func (e *execution) Capacity() int { return e.capacity }
 
 // Shed implements [ShedController].
 func (e *execution) Shed() { e.degraded = true }
+
+// SkipSlot implements [ShedController].
+func (e *execution) SkipSlot() {
+	if e.released {
+		return
+	}
+	e.released = true
+	e.shedder.inflight.Add(-1)
+}
 
 // compile-time assertion that execution satisfies the public interface.
 var _ ShedController = (*execution)(nil)

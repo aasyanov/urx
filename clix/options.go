@@ -22,6 +22,9 @@ func SubCommand(name, desc string, opts ...Option) Option {
 		child := newCommand(name, desc)
 		child.parent = parent
 		for _, opt := range opts {
+			if opt == nil {
+				continue
+			}
 			opt(child)
 		}
 		parent.subcommands[name] = child
@@ -67,26 +70,47 @@ func Alias(names ...string) Option {
 
 // Version enables --version / -V handling. When the user passes --version
 // or -V, parsing returns [ErrVersion] and [Parser.Version] returns the
-// string. Pass as an option to [New]:
+// string. Pass as an option to [New] only — applying [Version] to a
+// [SubCommand] panics. A second [Version] on the same command panics.
 //
 //	clix.New(os.Args[1:], "myapp", "my tool", clix.Version("1.2.3"))
 func Version(v string) Option {
-	return func(c *Command) { c.version = v }
+	return func(c *Command) {
+		if c.parent != nil {
+			panic("clix: Version must be passed to New, not SubCommand")
+		}
+		if c.version != "" {
+			panic("clix: duplicate Version")
+		}
+		if v == "" {
+			return
+		}
+		assertNoVersionCollision(c)
+		c.version = v
+	}
 }
 
 // AddFlag registers a typed flag on the command and binds it to target.
-// The default value def is applied immediately; parsing overwrites it.
+// The default value def is applied immediately to *target; parsing
+// overwrites it. After cfgx.Load / envx.BindTo, pass the current field
+// value as def so a missing flag does not wipe file/env.
 //
 // Supported types: string, int, bool, float64, [time.Duration], and
-// [time.Time] (parsed as [time.RFC3339]).
+// [time.Time] (parsed as [time.RFC3339]). Named types, []string, and
+// int64 panic at construction.
 //
-// The optional extras modify the flag metadata. Built-in extras are
-// [Required] (makes the flag mandatory) and [Enum] (restricts the value
-// to a closed set). Custom extras may implement [FlagOption].
+// The optional extras modify the flag metadata. The extras defined in this
+// package are [Required] (makes the flag mandatory) and [Enum] (restricts
+// the value to a closed set). [FlagOption] is an internal callback type —
+// callers outside this package cannot write additional extras because the
+// receiver type is unexported.
 //
 // AddFlag panics at construction time if:
 //   - T is not one of the supported types;
 //   - name is empty;
+//   - short is longer than one character;
+//   - name or short collides with a built-in (--help / -h, or --version / -V
+//     when [Version] is set);
 //   - a flag with the same long or short name already exists on this command;
 //   - a flag with the same long or short name is already defined on an ancestor;
 //   - an [Enum] value has a different type than T.
@@ -96,9 +120,13 @@ func AddFlag[T any](target *T, name, short string, def T, usage string, extras .
 		if name == "" {
 			panic("clix: empty flag name")
 		}
+		if short != "" && len(short) != 1 {
+			panic(fmt.Sprintf("clix: short flag %q must be a single character", short))
+		}
 		if target == nil {
 			panic(fmt.Sprintf("clix: nil target for --%s", name))
 		}
+		assertNotReserved(c, name, short)
 		if _, dup := c.flagMap[name]; dup {
 			panic(fmt.Sprintf("clix: duplicate flag --%s", name))
 		}
@@ -118,6 +146,9 @@ func AddFlag[T any](target *T, name, short string, def T, usage string, extras .
 			isBool:   isBool,
 		}
 		for _, ex := range extras {
+			if ex == nil {
+				continue
+			}
 			ex(meta)
 		}
 
@@ -150,8 +181,10 @@ func AddFlag[T any](target *T, name, short string, def T, usage string, extras .
 	}
 }
 
-// Required marks a flag as mandatory. When the flag is not provided by the
-// user, parsing fails with an [ErrRequired] error. Returns a [FlagOption]
+// Required marks a flag as mandatory. Required means the flag appeared
+// on argv, not that the bound pointer already has a value — a prefilled
+// target from cfgx/envx does not satisfy it. When the flag is absent
+// from argv, parsing fails with [ErrRequired]. Returns a [FlagOption]
 // for use as an extra to [AddFlag]:
 //
 //	clix.AddFlag(&host, "host", "", "localhost", "server host", clix.Required())
@@ -166,6 +199,33 @@ func Required() FlagOption { return func(f *flagMeta) { f.required = true } }
 //	    clix.Enum("debug", "info", "warn", "error"),
 //	)
 func Enum(vals ...any) FlagOption { return func(f *flagMeta) { f.enumValues = vals } }
+
+// assertNotReserved panics when name or short collides with a built-in
+// control flag. --help / -h are always reserved. --version / -V are reserved
+// once [Version] has been applied on the root command.
+func assertNotReserved(c *Command, name, short string) {
+	if name == helpFlagName || short == helpFlagShort {
+		panic(fmt.Sprintf("clix: flag --%s / -%s is reserved for help", helpFlagName, helpFlagShort))
+	}
+	if c.root().version != "" && (name == versionFlagName || short == versionFlagShort) {
+		panic(fmt.Sprintf("clix: flag --%s / -%s is reserved for version", versionFlagName, versionFlagShort))
+	}
+}
+
+// assertNoVersionCollision panics when any command in the tree already
+// registered --version or -V. Called from [Version] so option order cannot
+// sneak a user flag past the reservation.
+func assertNoVersionCollision(cmd *Command) {
+	if _, ok := cmd.flagMap[versionFlagName]; ok {
+		panic(fmt.Sprintf("clix: flag --%s is reserved for version", versionFlagName))
+	}
+	if _, ok := cmd.shortMap[versionFlagShort]; ok {
+		panic(fmt.Sprintf("clix: short flag -%s is reserved for version", versionFlagShort))
+	}
+	for _, name := range cmd.subOrder {
+		assertNoVersionCollision(cmd.subcommands[name])
+	}
+}
 
 // assertNoShadowFlag panics when name or short would hide an inherited flag
 // from an ancestor command. Shadowing would make help ambiguous and split

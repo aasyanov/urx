@@ -38,11 +38,13 @@ type HedgeController interface {
 	// behind it started.
 	Elapsed() time.Duration
 
-	// Cancel withdraws this copy from the race. The copy's eventual result is
-	// discarded and never counted as the winner or as a failure, exactly as if
-	// the copy had been cancelled by a winning sibling. It does not stop the
-	// goroutine — the function should return promptly after calling Cancel.
-	// Safe to call multiple times; only the first call has an effect.
+	// Cancel withdraws this copy from the race and cancels this copy's
+	// context so a well-behaved function can observe ctx.Done() and return.
+	// The copy's eventual result is still reaped (it is neither winner nor
+	// failure). Sibling copies keep a live context. On the synchronous
+	// MaxParallel==1 path there is no per-copy context, so Cancel only sets
+	// the withdrawn flag. Safe to call multiple times; only the first call
+	// has an effect.
 	Cancel()
 }
 
@@ -52,10 +54,11 @@ type HedgeController interface {
 // withdrawn flag is an atomic because Cancel may be observed from the dispatch
 // goroutine that reaps results.
 type execution struct {
-	attempt   int
-	backends  int
-	start     time.Time
-	withdrawn atomic.Bool
+	attempt    int
+	backends   int
+	start      time.Time
+	copyCancel context.CancelFunc
+	withdrawn  atomic.Bool
 }
 
 // Attempt implements [HedgeController].
@@ -71,7 +74,11 @@ func (e *execution) Backends() int { return e.backends }
 func (e *execution) Elapsed() time.Duration { return time.Since(e.start) }
 
 // Cancel implements [HedgeController].
-func (e *execution) Cancel() { e.withdrawn.Store(true) }
+func (e *execution) Cancel() {
+	if e.withdrawn.CompareAndSwap(false, true) && e.copyCancel != nil {
+		e.copyCancel()
+	}
+}
 
 // isWithdrawn reports whether the copy removed itself from the race.
 func (e *execution) isWithdrawn() bool { return e.withdrawn.Load() }

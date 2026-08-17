@@ -265,6 +265,14 @@ func TestWithLookup_NilIgnored(t *testing.T) {
 	assert.NotNil(t, cfg.lookup)
 }
 
+func TestNew_NilOptionIgnored(t *testing.T) {
+	assert.NotPanics(t, func() { _ = New(nil) })
+	env := New(nil, WithPrefix("APP"), WithLookup(MapLookup(map[string]string{
+		"APP_PORT": "9",
+	})))
+	assert.Equal(t, 9, Bind(env, "PORT", 0).Value())
+}
+
 func TestParseList_TrimsAndDropsEmpty(t *testing.T) {
 	tests := []struct {
 		name string
@@ -299,4 +307,73 @@ func TestBind_EmptyStringValueIsFound(t *testing.T) {
 	v := Bind(env, "OPT", "default")
 	assert.True(t, v.Found())
 	assert.Equal(t, "", v.Value(), "explicit empty string overrides default")
+}
+
+func TestWithFallbackPrefix_PrimaryWins(t *testing.T) {
+	env := mapEnv(map[string]string{
+		"SMCORE_PORT": "9090",
+		"SMP_PORT":    "8080",
+	}, WithPrefix("SMCORE"), WithFallbackPrefix("SMP"))
+	v := Bind(env, "PORT", 0)
+	assert.Equal(t, 9090, v.Value())
+	assert.Equal(t, "SMCORE_PORT", v.Key())
+	require.NoError(t, env.Validate())
+}
+
+func TestWithFallbackPrefix_FallbackWhenPrimaryUnset(t *testing.T) {
+	env := mapEnv(map[string]string{
+		"SMP_PORT": "8080",
+	}, WithPrefix("SMCORE"), WithFallbackPrefix("SMP"))
+	v := Bind(env, "PORT", 0)
+	assert.Equal(t, 8080, v.Value())
+	assert.Equal(t, "SMP_PORT", v.Key())
+	assert.Equal(t, []string{"SMP_PORT"}, env.Vars())
+	require.NoError(t, env.Validate())
+}
+
+func TestWithFallbackPrefix_BothUnsetBindKeepsDefault(t *testing.T) {
+	env := mapEnv(map[string]string{}, WithPrefix("SMCORE"), WithFallbackPrefix("SMP"))
+	v := Bind(env, "PORT", 8080)
+	assert.Equal(t, 8080, v.Value())
+	assert.Equal(t, "SMCORE_PORT", v.Key())
+	assert.False(t, v.Found())
+	require.NoError(t, env.Validate())
+}
+
+func TestWithFallbackPrefix_BothUnsetRequiredListsKeys(t *testing.T) {
+	env := mapEnv(map[string]string{}, WithPrefix("SMCORE"), WithFallbackPrefix("SMP"))
+	BindRequired[string](env, "TOKEN")
+	err := env.Validate()
+	require.ErrorIs(t, err, ErrMissing)
+	assert.Contains(t, err.Error(), "SMCORE_TOKEN")
+	assert.Contains(t, err.Error(), "SMP_TOKEN")
+}
+
+func TestWithFallbackPrefix_EmptyPrimary(t *testing.T) {
+	env := mapEnv(map[string]string{
+		"SMP_PORT": "7070",
+	}, WithPrefix(""), WithFallbackPrefix("SMP"))
+	v := Bind(env, "PORT", 0)
+	assert.Equal(t, 7070, v.Value())
+	assert.Equal(t, "SMP_PORT", v.Key())
+}
+
+func TestWithFallbackPrefix_TwoFallbacks(t *testing.T) {
+	env := mapEnv(map[string]string{
+		"LEGACY_PORT": "6000",
+	}, WithPrefix("SMCORE"), WithFallbackPrefix("SMP"), WithFallbackPrefix("LEGACY"))
+	v := Bind(env, "PORT", 0)
+	assert.Equal(t, 6000, v.Value())
+	assert.Equal(t, "LEGACY_PORT", v.Key())
+}
+
+func TestWithFallbackPrefix_EmptyStringOnPrimaryIsFound(t *testing.T) {
+	env := mapEnv(map[string]string{
+		"SMCORE_HOST": "",
+		"SMP_HOST":    "fallback.local",
+	}, WithPrefix("SMCORE"), WithFallbackPrefix("SMP"))
+	v := Bind(env, "HOST", "default")
+	assert.True(t, v.Found())
+	assert.Equal(t, "", v.Value(), "empty primary is Found and must not fall through")
+	assert.Equal(t, "SMCORE_HOST", v.Key())
 }

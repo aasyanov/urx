@@ -69,6 +69,12 @@ func TestNew_NilOptionIgnored(t *testing.T) {
 	assert.Equal(t, 3, b.cfg.maxFailures)
 }
 
+func TestNewConfig_SkipsNilOption(t *testing.T) {
+	cfg := newConfig([]Option{nil, WithMaxFailures(3), nil})
+	assert.Equal(t, 3, cfg.maxFailures)
+	assert.Equal(t, DefaultResetTimeout, cfg.resetTimeout)
+}
+
 // --- Options ---
 
 func TestWithMaxFailures(t *testing.T) {
@@ -417,6 +423,93 @@ func TestExecute_SkipFailureReturnsValue(t *testing.T) {
 	assert.Equal(t, uint64(0), b.Stats().TotalFail)
 }
 
+func TestExecute_CanceledAfterAdmitNotCounted(t *testing.T) {
+	var asked atomic.Bool
+	b := New(
+		WithMaxFailures(1),
+		WithFailureIf(func(error) bool {
+			asked.Store(true)
+			return true
+		}),
+	)
+	ctx := context.Background()
+
+	_, err := Execute(b, ctx, func(context.Context, CircuitController) (int, error) {
+		return 0, context.Canceled
+	})
+	require.ErrorIs(t, err, context.Canceled)
+	assert.False(t, asked.Load(), "WithFailureIf must not be asked for Canceled")
+	assert.Equal(t, 0, b.Failures())
+	assert.Equal(t, Closed, b.State())
+	assert.Equal(t, uint64(0), b.Stats().TotalFail)
+}
+
+func TestExecute_DeadlineExceededAfterAdmitCounts(t *testing.T) {
+	b := New(WithMaxFailures(1))
+	ctx := context.Background()
+
+	_, err := Execute(b, ctx, func(context.Context, CircuitController) (int, error) {
+		return 0, context.DeadlineExceeded
+	})
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	assert.Equal(t, Open, b.State())
+	assert.Equal(t, uint64(1), b.Stats().TotalFail)
+}
+
+func TestWithFailureIf_SkipsBusinessError(t *testing.T) {
+	errBiz := errors.New("not found")
+	b := New(WithMaxFailures(1), WithFailureIf(func(err error) bool {
+		return !errors.Is(err, errBiz)
+	}))
+	ctx := context.Background()
+
+	for range 5 {
+		_, err := Execute(b, ctx, func(context.Context, CircuitController) (int, error) {
+			return 0, errBiz
+		})
+		require.ErrorIs(t, err, errBiz)
+	}
+	assert.Equal(t, Closed, b.State())
+	assert.Equal(t, 0, b.Failures())
+	assert.Equal(t, uint64(0), b.Stats().TotalFail)
+}
+
+func TestWithFailureIf_CountsWhenTrue(t *testing.T) {
+	b := New(WithMaxFailures(1), WithFailureIf(func(error) bool { return true }))
+	ctx := context.Background()
+
+	_, err := Execute(b, ctx, fail[int]())
+	require.ErrorIs(t, err, errBoom)
+	assert.Equal(t, Open, b.State())
+	assert.Equal(t, uint64(1), b.Stats().TotalFail)
+}
+
+func TestSkipFailure_WinsOverFailureIf(t *testing.T) {
+	b := New(WithMaxFailures(1), WithFailureIf(func(error) bool { return true }))
+	ctx := context.Background()
+
+	_, err := Execute(b, ctx, func(_ context.Context, cc CircuitController) (int, error) {
+		cc.SkipFailure()
+		return 0, errBoom
+	})
+	require.ErrorIs(t, err, errBoom)
+	assert.Equal(t, Closed, b.State())
+	assert.Equal(t, 0, b.Failures())
+	assert.Equal(t, uint64(0), b.Stats().TotalFail)
+}
+
+func TestWithCountCanceled_OptIn(t *testing.T) {
+	b := New(WithMaxFailures(1), WithCountCanceled())
+	ctx := context.Background()
+
+	_, err := Execute(b, ctx, func(context.Context, CircuitController) (int, error) {
+		return 0, context.Canceled
+	})
+	require.ErrorIs(t, err, context.Canceled)
+	assert.Equal(t, Open, b.State())
+	assert.Equal(t, uint64(1), b.Stats().TotalFail)
+}
+
 // --- Controller: Trip ---
 
 func TestExecute_TripForcesOpenOnSuccess(t *testing.T) {
@@ -757,13 +850,131 @@ func TestReleaseProbe_NeverNegative(t *testing.T) {
 	b := New()
 
 	b.halfOpenInflight.Store(1)
-	b.releaseProbe()
+	b.releaseProbe(b.generation.Load())
 	assert.Equal(t, int32(0), b.halfOpenInflight.Load())
 
 	b.halfOpenInflight.Store(0)
-	b.releaseProbe()
+	b.releaseProbe(b.generation.Load())
 	assert.Equal(t, int32(0), b.halfOpenInflight.Load(),
 		"release after Reset-cleared budget is a no-op")
+}
+
+func TestReleaseProbe_IgnoresStaleGeneration(t *testing.T) {
+	b := New()
+	b.generation.Store(5)
+	b.halfOpenInflight.Store(3)
+
+	b.releaseProbe(4)
+	assert.Equal(t, int32(3), b.halfOpenInflight.Load(), "stale generation must not decrement")
+
+	b.releaseProbe(5)
+	assert.Equal(t, int32(2), b.halfOpenInflight.Load())
+}
+
+func TestExecute_StaleProbeSuccessDoesNotHealNewGeneration(t *testing.T) {
+	b := New(
+		WithMaxFailures(1),
+		WithResetTimeout(20*time.Millisecond),
+		WithHalfOpenMax(2),
+	)
+	ctx := context.Background()
+
+	_, _ = Execute(b, ctx, fail[int]())
+	testx.Eventually(t, func() bool { return b.State() == HalfOpen }, time.Second)
+
+	releaseA := make(chan struct{})
+	enteredA := make(chan struct{})
+	doneA := make(chan error, 1)
+	go func() {
+		_, err := Execute(b, ctx, func(context.Context, CircuitController) (int, error) {
+			close(enteredA)
+			<-releaseA
+			return 1, nil
+		})
+		doneA <- err
+	}()
+	<-enteredA
+
+	_, err := Execute(b, ctx, fail[int]())
+	require.ErrorIs(t, err, errBoom)
+	require.Equal(t, Open, b.State(), "probe B failure re-opens")
+
+	testx.Eventually(t, func() bool { return b.State() == HalfOpen }, time.Second)
+
+	close(releaseA)
+	require.NoError(t, <-doneA)
+	assert.NotEqual(t, Closed, b.State(), "stale probe A success must not heal the new generation")
+	assert.Equal(t, HalfOpen, b.State())
+}
+
+func TestExecute_StaleProbeTripDoesNotOpenNewGeneration(t *testing.T) {
+	b := New(
+		WithMaxFailures(1),
+		WithResetTimeout(20*time.Millisecond),
+		WithHalfOpenMax(2),
+	)
+	ctx := context.Background()
+
+	_, _ = Execute(b, ctx, fail[int]())
+	testx.Eventually(t, func() bool { return b.State() == HalfOpen }, time.Second)
+
+	releaseA := make(chan struct{})
+	enteredA := make(chan struct{})
+	doneA := make(chan error, 1)
+	go func() {
+		_, err := Execute(b, ctx, func(_ context.Context, cc CircuitController) (int, error) {
+			close(enteredA)
+			<-releaseA
+			cc.Trip()
+			return 1, nil
+		})
+		doneA <- err
+	}()
+	<-enteredA
+
+	_, err := Execute(b, ctx, fail[int]())
+	require.ErrorIs(t, err, errBoom)
+	require.Equal(t, Open, b.State(), "probe B failure re-opens")
+
+	testx.Eventually(t, func() bool { return b.State() == HalfOpen }, time.Second)
+	gen := b.generation.Load()
+
+	close(releaseA)
+	require.NoError(t, <-doneA)
+	assert.Equal(t, HalfOpen, b.State(), "stale probe A Trip must not open the new generation")
+	assert.Equal(t, gen, b.generation.Load())
+}
+
+func TestRecordSuccess_StaleGenerationIgnored(t *testing.T) {
+	var edges int
+	b := New(WithOnStateChange(func(State, State) { edges++ }))
+	b.state.Store(uint32(HalfOpen))
+	b.generation.Store(2)
+	b.recordSuccess(1)
+	assert.Equal(t, HalfOpen, State(b.state.Load()))
+	assert.Equal(t, 0, edges)
+}
+
+func TestRecordFailure_StaleGenerationIgnored(t *testing.T) {
+	b := New(WithMaxFailures(1))
+	b.state.Store(uint32(HalfOpen))
+	b.generation.Store(2)
+	b.recordFailure(false, 1)
+	assert.Equal(t, HalfOpen, State(b.state.Load()))
+	assert.Equal(t, 0, b.Failures())
+	assert.Equal(t, uint64(0), b.Stats().Trips)
+}
+
+func TestRecordFailure_AlreadyOpenIsNoop(t *testing.T) {
+	var edges int
+	b := New(WithOnStateChange(func(State, State) { edges++ }))
+	b.state.Store(uint32(Open))
+	b.lastOpen.Store(time.Now().UnixNano())
+	b.recordFailure(true, b.generation.Load())
+	assert.Equal(t, Open, State(b.state.Load()))
+	assert.Equal(t, 0, b.Failures())
+	assert.Equal(t, uint64(0), b.Stats().Trips)
+	assert.Equal(t, 0, edges)
 }
 
 // TestOpenFrom_IdempotentWhenAlreadyOpen covers the early-return branch in
@@ -772,11 +983,11 @@ func TestReleaseProbe_NeverNegative(t *testing.T) {
 func TestOpenFrom_IdempotentWhenAlreadyOpen(t *testing.T) {
 	var edges int
 	b := New(WithOnStateChange(func(State, State) { edges++ }))
-	b.openFrom(Closed)
+	b.openFrom(Closed, b.generation.Load())
 	require.Equal(t, Open, b.State())
 	require.Equal(t, 1, edges)
 
-	b.openFrom(Closed) // already Open
+	b.openFrom(Closed, b.generation.Load()) // already Open
 	assert.Equal(t, Open, b.State())
 	assert.Equal(t, 1, edges, "no second hook fire")
 	assert.Equal(t, uint64(1), b.Stats().Trips, "no second trip counted")
@@ -791,8 +1002,19 @@ func TestOpenFrom_ReconcilesAdmissionState(t *testing.T) {
 	// Live state is HalfOpen but the call was admitted in Closed: openFrom must
 	// report the live HalfOpen as the from-edge.
 	b.state.Store(uint32(HalfOpen))
-	b.openFrom(Closed)
+	b.openFrom(Closed, b.generation.Load())
 	assert.Equal(t, HalfOpen, from)
+}
+
+func TestOpenFrom_StaleGenerationIgnored(t *testing.T) {
+	var edges int
+	b := New(WithOnStateChange(func(State, State) { edges++ }))
+	b.state.Store(uint32(HalfOpen))
+	b.generation.Store(2)
+	b.openFrom(HalfOpen, 1)
+	assert.Equal(t, HalfOpen, State(b.state.Load()))
+	assert.Equal(t, 0, edges)
+	assert.Equal(t, uint64(0), b.Stats().Trips)
 }
 
 // TestRecordSuccess_ClosedClearsFailures covers the Closed branch of
@@ -801,7 +1023,7 @@ func TestRecordSuccess_ClosedClearsFailures(t *testing.T) {
 	var edges int
 	b := New(WithOnStateChange(func(State, State) { edges++ }))
 	b.failures.Store(3)
-	b.recordSuccess()
+	b.recordSuccess(b.generation.Load())
 	assert.Equal(t, 0, b.Failures())
 	assert.Equal(t, Closed, b.State())
 	assert.Equal(t, 0, edges, "no transition fired in Closed")
@@ -813,7 +1035,7 @@ func TestRecordSuccess_HalfOpenHeals(t *testing.T) {
 	b := New(WithOnStateChange(func(f, t State) { from, to = f, t }))
 	b.state.Store(uint32(HalfOpen))
 	b.failures.Store(2)
-	b.recordSuccess()
+	b.recordSuccess(b.generation.Load())
 	assert.Equal(t, Closed, b.State())
 	assert.Equal(t, 0, b.Failures())
 	assert.Equal(t, HalfOpen, from)
@@ -829,7 +1051,7 @@ func TestRecordSuccess_DoesNotClobberConcurrentTrip(t *testing.T) {
 	// timestamp so the lazy promotion in State() does not fire.
 	b.state.Store(uint32(Open))
 	b.lastOpen.Store(time.Now().UnixNano())
-	b.recordSuccess()
+	b.recordSuccess(b.generation.Load())
 	assert.Equal(t, Open, State(b.state.Load()), "success must not re-close a tripped breaker")
 	assert.Equal(t, 0, edges)
 }
@@ -864,6 +1086,30 @@ func TestState_ConcurrentPromotionLosesCAS(t *testing.T) {
 
 		require.Equal(t, HalfOpen, got[0])
 		require.Equal(t, HalfOpen, got[1])
+	}
+}
+
+func TestState_LostCASReportsLiveState(t *testing.T) {
+	b := New(WithResetTimeout(time.Nanosecond))
+	const goroutines = 16
+	const rounds = 500
+	for range rounds {
+		b.state.Store(uint32(Open))
+		b.lastOpen.Store(time.Now().Add(-time.Hour).UnixNano())
+
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		wg.Add(goroutines)
+		for range goroutines {
+			go func() {
+				defer wg.Done()
+				<-start
+				_ = b.State()
+			}()
+		}
+		close(start)
+		wg.Wait()
+		require.Equal(t, HalfOpen, State(b.state.Load()))
 	}
 }
 
@@ -946,6 +1192,16 @@ func TestOnStateChange_FullCycle(t *testing.T) {
 	assert.Equal(t, edge{Closed, Open}, edges[0])
 	assert.Equal(t, edge{Open, HalfOpen}, edges[1])
 	assert.Equal(t, edge{HalfOpen, Closed}, edges[2])
+}
+
+func TestOnStateChange_RecoversPanic(t *testing.T) {
+	b := New(
+		WithMaxFailures(1),
+		WithOnStateChange(func(State, State) { panic("hook boom") }),
+	)
+	_, err := Execute(b, context.Background(), fail[int]())
+	require.ErrorIs(t, err, errBoom)
+	assert.Equal(t, Open, b.State(), "hook panic must not prevent the trip")
 }
 
 // --- Concurrency ---

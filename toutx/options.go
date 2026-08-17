@@ -21,7 +21,9 @@ type config struct {
 func newConfig(timeout time.Duration, opts []Option) config {
 	cfg := config{timeout: DefaultTimeout}
 	for _, opt := range opts {
-		opt(&cfg)
+		if opt != nil {
+			opt(&cfg)
+		}
 	}
 	if timeout > 0 {
 		cfg.timeout = timeout

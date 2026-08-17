@@ -1,6 +1,7 @@
 package clix
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -42,6 +43,8 @@ func TestNew_BoolFlagFormsAndNegation(t *testing.T) {
 		{name: "inline true", def: false, args: []string{"--verbose=true"}, want: true},
 		{name: "inline false", def: true, args: []string{"--verbose=false"}, want: false},
 		{name: "no- negation", def: true, args: []string{"--no-verbose"}, want: false},
+		{name: "no- inline true", def: true, args: []string{"--no-verbose=true"}, want: false},
+		{name: "no- inline false", def: true, args: []string{"--no-verbose=false"}, want: true},
 		{name: "absent keeps default", def: true, args: []string{}, want: true},
 	}
 	for _, tt := range tests {
@@ -98,7 +101,24 @@ func TestNew_GroupedShortFlags(t *testing.T) {
 		require.ErrorIs(t, p.Err(), ErrUnknownFlag)
 	})
 
-	t.Run("missing value for trailing group flag", func(t *testing.T) {
+	t.Run("h in group triggers help", func(t *testing.T) {
+		var v bool
+		p := New([]string{"-vh"}, "app", "desc", AddFlag(&v, "verbose", "v", false, ""))
+		require.ErrorIs(t, p.Err(), ErrHelp)
+		assert.True(t, v, "flags before h in the group must still be set")
+	})
+
+	t.Run("V in group triggers version", func(t *testing.T) {
+		var v bool
+		p := New([]string{"-vV"}, "app", "desc",
+			Version("1.0"),
+			AddFlag(&v, "verbose", "v", false, ""),
+		)
+		require.ErrorIs(t, p.Err(), ErrVersion)
+		assert.True(t, v)
+	})
+
+	t.Run("trailing non-bool missing next arg", func(t *testing.T) {
 		var v bool
 		var port int
 		p := New([]string{"-vp"}, "app", "desc",
@@ -106,6 +126,26 @@ func TestNew_GroupedShortFlags(t *testing.T) {
 			AddFlag(&port, "port", "p", 0, ""),
 		)
 		require.ErrorIs(t, p.Err(), ErrMissingValue)
+	})
+
+	t.Run("trailing non-bool next token is a flag", func(t *testing.T) {
+		var port int
+		var verbose bool
+		p := New([]string{"-p", "-v"}, "app", "desc",
+			AddFlag(&port, "port", "p", 0, ""),
+			AddFlag(&verbose, "verbose", "v", false, ""),
+		)
+		require.ErrorIs(t, p.Err(), ErrMissingValue)
+	})
+
+	t.Run("non-bool first remainder is value", func(t *testing.T) {
+		var v bool
+		var port int
+		p := New([]string{"-pv"}, "app", "desc",
+			AddFlag(&v, "verbose", "v", false, ""),
+			AddFlag(&port, "port", "p", 0, ""),
+		)
+		require.ErrorIs(t, p.Err(), ErrInvalidValue)
 	})
 }
 
@@ -119,13 +159,46 @@ func TestNew_DoubleDashTerminator(t *testing.T) {
 	assert.Equal(t, []string{"--not-a-flag", "file.txt"}, p.Command().Args())
 }
 
+func TestNew_PositionalDashIsStdin(t *testing.T) {
+	t.Run("root accepts dash", func(t *testing.T) {
+		p := New([]string{"-"}, "app", "desc")
+		require.NoError(t, p.Err())
+		assert.Equal(t, []string{"-"}, p.Command().Args())
+	})
+	t.Run("routing node is unknown command", func(t *testing.T) {
+		p := New([]string{"-"}, "app", "desc", SubCommand("serve", "s", Run(noopAction)))
+		require.ErrorIs(t, p.Err(), ErrUnknownCommand)
+	})
+	t.Run("command with action and subs accepts dash", func(t *testing.T) {
+		p := New([]string{"-"}, "app", "desc",
+			Run(noopAction),
+			SubCommand("serve", "s", Run(noopAction)),
+		)
+		require.NoError(t, p.Err())
+		assert.Equal(t, []string{"-"}, p.Command().Args())
+	})
+}
+
+func TestNew_DashAfterTerminator(t *testing.T) {
+	p := New([]string{"--", "-"}, "app", "desc")
+	require.NoError(t, p.Err())
+	assert.Equal(t, []string{"-"}, p.Command().Args())
+}
+
+func TestNew_DashAsFlagValueStillBinds(t *testing.T) {
+	var name string
+	p := New([]string{"--name", "-"}, "app", "desc", AddFlag(&name, "name", "", "", ""))
+	require.NoError(t, p.Err())
+	assert.Equal(t, "-", name)
+}
+
 func TestNew_AllSupportedTypes(t *testing.T) {
 	var (
-		s string
-		i int
-		b bool
-		f float64
-		d time.Duration
+		s  string
+		i  int
+		b  bool
+		f  float64
+		d  time.Duration
 		ts time.Time
 	)
 	args := []string{
@@ -174,12 +247,68 @@ func TestNew_ErrorPaths(t *testing.T) {
 			wantErr: ErrUnknownFlag,
 		},
 		{
+			name: "signed number token is unknown flag",
+			build: func() *Parser {
+				return New([]string{"-5"}, "app", "desc")
+			},
+			wantErr: ErrUnknownFlag,
+		},
+		{
 			name: "missing value",
 			build: func() *Parser {
 				var port int
 				return New([]string{"--port"}, "app", "desc", AddFlag(&port, "port", "p", 0, ""))
 			},
 			wantErr: ErrMissingValue,
+		},
+		{
+			name: "missing value followed by long flag",
+			build: func() *Parser {
+				var port int
+				var verbose bool
+				return New([]string{"--port", "--verbose"}, "app", "desc",
+					AddFlag(&port, "port", "p", 0, ""),
+					AddFlag(&verbose, "verbose", "v", false, ""),
+				)
+			},
+			wantErr: ErrMissingValue,
+		},
+		{
+			name: "missing value followed by short flag",
+			build: func() *Parser {
+				var name string
+				var verbose bool
+				return New([]string{"--name", "-v"}, "app", "desc",
+					AddFlag(&name, "name", "", "", ""),
+					AddFlag(&verbose, "verbose", "v", false, ""),
+				)
+			},
+			wantErr: ErrMissingValue,
+		},
+		{
+			name: "missing value followed by terminator",
+			build: func() *Parser {
+				var name string
+				return New([]string{"--name", "--"}, "app", "desc", AddFlag(&name, "name", "", "", ""))
+			},
+			wantErr: ErrMissingValue,
+		},
+		{
+			name: "helpers is not help",
+			build: func() *Parser {
+				return New([]string{"--helpers"}, "app", "desc")
+			},
+			wantErr: ErrUnknownFlag,
+		},
+		{
+			name: "no- negation invalid bool",
+			build: func() *Parser {
+				var verbose bool
+				return New([]string{"--no-verbose=notabool"}, "app", "desc",
+					AddFlag(&verbose, "verbose", "v", false, ""),
+				)
+			},
+			wantErr: ErrInvalidValue,
 		},
 		{
 			name: "invalid value",
@@ -219,6 +348,20 @@ func TestNew_ErrorPaths(t *testing.T) {
 				return New([]string{"--help"}, "app", "desc")
 			},
 			wantErr: ErrHelp,
+		},
+		{
+			name: "help inline equals",
+			build: func() *Parser {
+				return New([]string{"--help=true"}, "app", "desc")
+			},
+			wantErr: ErrHelp,
+		},
+		{
+			name: "version inline equals",
+			build: func() *Parser {
+				return New([]string{"--version=1"}, "app", "desc", Version("1.0.0"))
+			},
+			wantErr: ErrVersion,
 		},
 		{
 			name: "help short",
@@ -327,6 +470,15 @@ func TestIsSet_DistinguishesDefaultFromExplicit(t *testing.T) {
 	})
 }
 
+func TestIsSet_ShortAlias(t *testing.T) {
+	var port int
+	p := New([]string{"-p", "9"}, "app", "desc", AddFlag(&port, "port", "p", 0, ""))
+	require.NoError(t, p.Err())
+	assert.Equal(t, 9, port)
+	assert.True(t, p.IsSet("p"))
+	assert.True(t, p.IsSet("port"))
+}
+
 func TestReset_ReparsesAgainstSameTree(t *testing.T) {
 	var port int
 	var verbose bool
@@ -423,7 +575,7 @@ func TestFormatDefault_AllTypes(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, formatDefault(tt.val))
+			assert.Equal(t, tt.want, formatDefault(tt.val, defaultLabelEmptyString))
 		})
 	}
 }
@@ -442,8 +594,9 @@ func TestHelp_RendersDefaultsRequiredAndEnum(t *testing.T) {
 	help := p.Help()
 	assert.Contains(t, help, "[localhost]")
 	assert.Contains(t, help, "(required)")
-	assert.Contains(t, help, "one of:")
+	assert.Contains(t, help, "(one of: dev, prod)")
 	assert.Contains(t, help, "[5s]")
+	assert.Contains(t, help, "--help, -h")
 }
 
 func TestHelp_SubcommandWithAliasInList(t *testing.T) {
@@ -499,6 +652,26 @@ func TestRequired_InheritedFromParent(t *testing.T) {
 	require.ErrorIs(t, p.Err(), ErrRequired)
 }
 
+func TestAddFlag_LiteralDefOverwritesPointer(t *testing.T) {
+	port := 9090
+	p := New([]string{}, "app", "desc", AddFlag(&port, "port", "p", 8080, ""))
+	require.NoError(t, p.Err())
+	assert.Equal(t, 8080, port)
+}
+
+func TestAddFlag_CurrentValueAsDefPreserves(t *testing.T) {
+	port := 9090
+	p := New([]string{}, "app", "desc", AddFlag(&port, "port", "p", port, ""))
+	require.NoError(t, p.Err())
+	assert.Equal(t, 9090, port)
+}
+
+func TestRequired_IgnoresPrefilledPointer(t *testing.T) {
+	port := 9090
+	p := New([]string{}, "app", "desc", AddFlag(&port, "port", "p", port, "", Required()))
+	require.ErrorIs(t, p.Err(), ErrRequired)
+}
+
 func TestNew_PartialParseLeavesEarlierFlags(t *testing.T) {
 	var port int
 	p := New([]string{"--port", "9090", "--nope"}, "app", "desc",
@@ -516,9 +689,10 @@ func TestHelp_SubcommandGlobalFlags(t *testing.T) {
 	)
 	require.ErrorIs(t, p.Err(), ErrHelp)
 	help := p.Help()
-	assert.Contains(t, help, "USAGE: serve")
+	assert.Contains(t, help, "USAGE: app serve")
 	assert.Contains(t, help, "GLOBAL FLAGS:")
 	assert.Contains(t, help, "--verbose, -v")
+	assert.Contains(t, help, "--help, -h")
 }
 
 func TestHelp_MatchedSubcommandLevel(t *testing.T) {
@@ -530,8 +704,10 @@ func TestHelp_MatchedSubcommandLevel(t *testing.T) {
 		),
 	)
 	require.ErrorIs(t, p.Err(), ErrHelp)
+	assert.Contains(t, p.Help(), "USAGE: app serve")
 	assert.Contains(t, p.Help(), "FLAGS:")
 	assert.Contains(t, p.Help(), "--port, -p")
+	assert.Contains(t, p.Help(), "--help, -h")
 }
 
 func TestVersionAndHelpAccessors(t *testing.T) {
@@ -544,6 +720,8 @@ func TestVersionAndHelpAccessors(t *testing.T) {
 	assert.Equal(t, "2.3.4", p.Version())
 	assert.Contains(t, p.Help(), "USAGE: myapp")
 	assert.Contains(t, p.Help(), "--verbose, -v")
+	assert.Contains(t, p.Help(), "--help, -h")
+	assert.Contains(t, p.Help(), "--version, -V")
 }
 
 func TestConstructionPanics(t *testing.T) {
@@ -668,12 +846,313 @@ func TestConstructionPanics(t *testing.T) {
 				)
 			},
 		},
+		{
+			name: "reserved help long name",
+			build: func() {
+				var x bool
+				New(nil, "app", "desc", AddFlag(&x, "help", "", false, ""))
+			},
+		},
+		{
+			name: "reserved help short",
+			build: func() {
+				var host string
+				New(nil, "app", "desc", AddFlag(&host, "host", "h", "", ""))
+			},
+		},
+		{
+			name: "reserved version after Version option",
+			build: func() {
+				var x string
+				New(nil, "app", "desc", Version("1"), AddFlag(&x, "version", "", "", ""))
+			},
+		},
+		{
+			name: "reserved V after Version option",
+			build: func() {
+				var x bool
+				New(nil, "app", "desc", Version("1"), AddFlag(&x, "verbose", "V", false, ""))
+			},
+		},
+		{
+			name: "Version after user version flag",
+			build: func() {
+				var x string
+				New(nil, "app", "desc", AddFlag(&x, "version", "", "", ""), Version("1"))
+			},
+		},
+		{
+			name: "Version on subcommand",
+			build: func() {
+				New(nil, "app", "desc",
+					SubCommand("serve", "start", Version("1"), Run(noopAction)),
+				)
+			},
+		},
+		{
+			name: "duplicate Version",
+			build: func() {
+				New(nil, "app", "desc", Version("1"), Version("2"))
+			},
+		},
+		{
+			name: "multi-character short",
+			build: func() {
+				var port int
+				New(nil, "app", "desc", AddFlag(&port, "port", "po", 0, ""))
+			},
+		},
+		{
+			name: "WithHelpLabels on subcommand",
+			build: func() {
+				New(nil, "app", "desc",
+					SubCommand("serve", "start", WithHelpLabels(HelpLabels{Usage: "U"}), Run(noopAction)),
+				)
+			},
+		},
+		{
+			name: "Version after nested user version flag",
+			build: func() {
+				var tag string
+				New(nil, "app", "desc",
+					SubCommand("serve", "start",
+						AddFlag(&tag, "version", "", "", ""),
+						Run(noopAction),
+					),
+					Version("1"),
+				)
+			},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			assert.Panics(t, tt.build)
 		})
 	}
+}
+
+func TestNew_CustomVersionFlagWithoutBuiltin(t *testing.T) {
+	var ver string
+	p := New([]string{"--version", "nightly"}, "app", "desc",
+		AddFlag(&ver, "version", "", "", "build tag"),
+	)
+	require.NoError(t, p.Err())
+	assert.Equal(t, "nightly", ver)
+	help := p.Help()
+	assert.Contains(t, help, "--version")
+	assert.Contains(t, help, "build tag")
+	assert.NotContains(t, help, "-V")
+	assert.NotContains(t, help, "print version")
+}
+
+func TestNew_NilOptionIgnored(t *testing.T) {
+	p := New(nil, "app", "desc", nil, Version("1.0.0"))
+	require.NoError(t, p.Err())
+	assert.Equal(t, "1.0.0", p.Version())
+	assert.Contains(t, p.Help(), "--version, -V")
+}
+
+func TestHelp_LegendBuiltinsAndPath(t *testing.T) {
+	t.Run("bare always lists help not version", func(t *testing.T) {
+		p := New(nil, "bare", "no flags no commands")
+		help := p.Help()
+		assert.Contains(t, help, "USAGE: bare [flags]\n")
+		assert.Contains(t, help, "FLAGS:")
+		assert.Contains(t, help, "--help, -h")
+		assert.NotContains(t, help, "--version")
+		assert.NotContains(t, help, "COMMANDS:")
+		assert.NotContains(t, help, "GLOBAL FLAGS:")
+	})
+
+	t.Run("version appears only when Version is set", func(t *testing.T) {
+		p := New(nil, "app", "desc", Version("1.2.3"))
+		assert.Contains(t, p.Help(), "--help, -h")
+		assert.Contains(t, p.Help(), "--version, -V")
+		assert.Contains(t, p.Help(), "print version")
+		assert.Contains(t, p.Help(), "show help")
+	})
+
+	t.Run("nested usage is full path and lists builtins plus globals", func(t *testing.T) {
+		var verbose bool
+		var steps int
+		p := New([]string{"db", "migrate", "--help"}, "myapp", "my awesome tool",
+			Version("1.2.3"),
+			AddFlag(&verbose, "verbose", "v", false, "verbose output"),
+			SubCommand("db", "database",
+				AddFlag(&steps, "schema", "s", 0, "schema id"),
+				SubCommand("migrate", "run migrations", Run(noopAction)),
+			),
+		)
+		require.ErrorIs(t, p.Err(), ErrHelp)
+		help := p.Help()
+		assert.Contains(t, help, "USAGE: myapp db migrate [flags]\n")
+		assert.Contains(t, help, "FLAGS:")
+		assert.Contains(t, help, "--help, -h")
+		assert.Contains(t, help, "--version, -V")
+		assert.Contains(t, help, "GLOBAL FLAGS:")
+		verboseIdx := strings.Index(help, "--verbose, -v")
+		schemaIdx := strings.Index(help, "--schema, -s")
+		require.Greater(t, verboseIdx, 0)
+		require.Greater(t, schemaIdx, 0)
+		assert.Less(t, verboseIdx, schemaIdx, "root globals must appear before parent flags")
+	})
+
+	t.Run("commands list aliases in registration order", func(t *testing.T) {
+		p := New(nil, "app", "desc",
+			SubCommand("extract", "extract data", Alias("x"), Run(noopAction)),
+			SubCommand("db", "database", Run(noopAction)),
+		)
+		help := p.Help()
+		assert.Contains(t, help, "USAGE: app [flags] [command]\n")
+		assert.Contains(t, help, "COMMANDS:")
+		extractIdx := strings.Index(help, "extract, x")
+		dbIdx := strings.Index(help, "db")
+		require.Greater(t, extractIdx, 0)
+		assert.Less(t, extractIdx, dbIdx)
+	})
+}
+
+func TestHelp_LabelsChrome(t *testing.T) {
+	var host string
+	p := New(nil, "app", "desc",
+		WithHelpLabels(HelpLabels{
+			Usage:          "ИСПОЛЬЗОВАНИЕ",
+			Commands:       "КОМАНДЫ",
+			Flags:          "ФЛАГИ",
+			GlobalFlags:    "ГЛОБАЛЬНЫЕ ФЛАГИ",
+			FlagsMetavar:   "[флаги]",
+			CommandMetavar: "[команда]",
+			HelpFlag:       "показать справку",
+			VersionFlag:    "показать версию",
+			Required:       "обязательный",
+			OneOf:          "одно из: %s",
+			EmptyString:    "<строка>",
+		}),
+		Version("1.0"),
+		AddFlag(&host, "host", "", "", "server host", Required(), Enum("a", "b")),
+		SubCommand("run", "start service", Alias("serve"), Run(noopAction)),
+	)
+	help := p.Help()
+	assert.Contains(t, help, "ИСПОЛЬЗОВАНИЕ: app [флаги] [команда]\n")
+	assert.Contains(t, help, "КОМАНДЫ:")
+	assert.NotContains(t, help, "COMMANDS:")
+	assert.Contains(t, help, "run, serve")
+	assert.Contains(t, help, "ФЛАГИ:")
+	assert.NotContains(t, help, "FLAGS:")
+	assert.Contains(t, help, "показать справку")
+	assert.Contains(t, help, "показать версию")
+	assert.NotContains(t, help, "show help")
+	assert.Contains(t, help, "(обязательный)")
+	assert.Contains(t, help, "(одно из: a, b)")
+	assert.Contains(t, help, "<строка>")
+	assert.NotContains(t, help, "<string>")
+}
+
+func TestHelp_LabelsPartialFallsBackToEnglish(t *testing.T) {
+	p := New(nil, "app", "desc",
+		WithHelpLabels(HelpLabels{Usage: "USAGEX", HelpFlag: "aide"}),
+		SubCommand("run", "start", Run(noopAction)),
+	)
+	help := p.Help()
+	assert.Contains(t, help, "USAGEX: app [flags] [command]\n")
+	assert.Contains(t, help, "COMMANDS:")
+	assert.Contains(t, help, "FLAGS:")
+	assert.Contains(t, help, "aide")
+	assert.NotContains(t, help, "show help")
+}
+
+func TestHelp_LabelsApplyToNestedHelp(t *testing.T) {
+	var verbose bool
+	p := New([]string{"run", "--help"}, "app", "desc",
+		WithHelpLabels(HelpLabels{Usage: "USAGEX", GlobalFlags: "GLOBALS", HelpFlag: "aide"}),
+		AddFlag(&verbose, "verbose", "v", false, "verbose"),
+		SubCommand("run", "start", Run(noopAction)),
+	)
+	require.ErrorIs(t, p.Err(), ErrHelp)
+	help := p.Help()
+	assert.Contains(t, help, "USAGEX: app run [flags]\n")
+	assert.Contains(t, help, "GLOBALS:")
+	assert.Contains(t, help, "--verbose, -v")
+	assert.Contains(t, help, "aide")
+}
+
+func TestHelp_LabelsOneOfWithoutPercentS(t *testing.T) {
+	var env string
+	p := New(nil, "app", "desc",
+		WithHelpLabels(HelpLabels{OneOf: "enum"}),
+		AddFlag(&env, "env", "", "dev", "target", Enum("dev", "prod")),
+	)
+	assert.Contains(t, p.Help(), "(enum dev, prod)")
+}
+
+func TestHelp_LabelsSecondCallReplaces(t *testing.T) {
+	p := New(nil, "app", "desc",
+		WithHelpLabels(HelpLabels{Usage: "FIRST", HelpFlag: "one"}),
+		WithHelpLabels(HelpLabels{Usage: "SECOND"}),
+	)
+	help := p.Help()
+	assert.Contains(t, help, "SECOND: app")
+	assert.NotContains(t, help, "FIRST:")
+	assert.Contains(t, help, "show help")
+	assert.NotContains(t, help, "one")
+}
+
+func TestNew_SignedNumericValues(t *testing.T) {
+	t.Run("negative int", func(t *testing.T) {
+		var offset int
+		p := New([]string{"--offset", "-5"}, "app", "desc",
+			AddFlag(&offset, "offset", "", 0, ""),
+		)
+		require.NoError(t, p.Err())
+		assert.Equal(t, -5, offset)
+	})
+	t.Run("negative duration", func(t *testing.T) {
+		var d time.Duration
+		p := New([]string{"--wait", "-1s"}, "app", "desc",
+			AddFlag(&d, "wait", "", time.Duration(0), ""),
+		)
+		require.NoError(t, p.Err())
+		assert.Equal(t, -time.Second, d)
+	})
+	t.Run("bare dash is a string value", func(t *testing.T) {
+		var name string
+		p := New([]string{"--name", "-"}, "app", "desc",
+			AddFlag(&name, "name", "", "", ""),
+		)
+		require.NoError(t, p.Err())
+		assert.Equal(t, "-", name)
+	})
+	t.Run("inline equals binds a flag-like string", func(t *testing.T) {
+		var name string
+		p := New([]string{"--name=--raw"}, "app", "desc",
+			AddFlag(&name, "name", "", "", ""),
+		)
+		require.NoError(t, p.Err())
+		assert.Equal(t, "--raw", name)
+	})
+}
+
+func TestNew_EmptyVersionIsNoop(t *testing.T) {
+	p := New([]string{"--version"}, "app", "desc", Version(""))
+	require.ErrorIs(t, p.Err(), ErrUnknownFlag)
+	assert.Equal(t, "", p.Version())
+}
+
+func TestFormatOneOf(t *testing.T) {
+	assert.Equal(t, "one of: a, b", formatOneOf("one of: %s", "a, b"))
+	assert.Equal(t, "enum a, b", formatOneOf("enum", "a, b"))
+	assert.Equal(t, "a, b", formatOneOf("", "a, b"))
+}
+
+func TestNextTokenLooksLikeFlag(t *testing.T) {
+	assert.False(t, nextTokenLooksLikeFlag(""))
+	assert.False(t, nextTokenLooksLikeFlag("-"))
+	assert.False(t, nextTokenLooksLikeFlag("file"))
+	assert.False(t, nextTokenLooksLikeFlag("-5"))
+	assert.False(t, nextTokenLooksLikeFlag("-1s"))
+	assert.True(t, nextTokenLooksLikeFlag("--"))
+	assert.True(t, nextTokenLooksLikeFlag("--verbose"))
+	assert.True(t, nextTokenLooksLikeFlag("-v"))
 }
 
 func noopAction(*Context) error { return nil }

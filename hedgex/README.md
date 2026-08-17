@@ -73,11 +73,12 @@ A service that fans out to a database, a cache, or a downstream RPC inherits tha
  Hedger (hedgex.go)   Option (options.go)  HedgeController
    │                  config{maxParallel,  (types.go)
  atomic counters:      delay,maxDelay,      execution{attempt,
- calls/wins/           onHedge,op}          backends,start,
- hedges/failures       │                    withdrawn}
+ calls/wins/           hedgeProb,onHedge,   backends,start,
+ hedges/failures       op}                  copyCancel,withdrawn}
    │                   WithMaxParallel       Attempt/IsHedge/
  Execute[T] /          WithDelay             Backends/Elapsed/
- ExecuteMulti[T]       WithMaxDelay          Cancel
+ ExecuteMulti[T]       WithMaxDelay          Cancel (per-copy ctx)
+   │                   WithHedgeProbability
    │                   WithOnHedge / WithOp
  lone? → runSync       │                    errors.go
  else  → dispatch      delays() schedule    ErrNilFunc/ErrAllFailed
@@ -96,7 +97,8 @@ Execute(h, ctx, fn)            ExecuteMulti(h, ctx, fns)
                                   │ ctx already done ? ─► ErrCancelled
                                   │
                   ┌───────────────┴────────────────┐
-        exactly one non-nil?                  two or more?
+        exactly one non-nil OR                    two or more AND
+        probability miss?                         probability hit?
                   │                                 │
               runSync (no goroutine)            dispatch
                   │                                 │
@@ -116,7 +118,11 @@ Execute(h, ctx, fn)            ExecuteMulti(h, ctx, fns)
                                           └───────────────────────┘
 ```
 
-A hedge is launched on **either** of two triggers, whichever comes first: the stagger timer elapses (the in-flight copy is taking too long), or every in-flight copy has already finished without a win (a fast *failure* should accelerate the next copy, not make it wait out the full delay). The first copy to return a nil error wins; `dispatch` calls the shared `cancel()`, which tears down the context handed to every other copy, and returns the winning value. Losing copies observe `ctx.Done()` and exit; their late results are dropped.
+A hedge is launched on **either** of two triggers, whichever comes first: the stagger timer elapses (the in-flight copy is taking too long), or every in-flight copy has already finished without a win (a fast *failure* should accelerate the next copy, not make it wait out the full delay). The first copy to return a nil error wins; `dispatch` calls the shared `hedgeCancel()`, which tears down every copy's parent context, and returns the winning value. Losing copies observe `ctx.Done()` and exit; their late results may be dropped. `Execute` does **not** `WaitGroup` the losers — copies that ignore their context may outlive `Execute`.
+
+Each hedge copy gets its own child of `hedgeCtx`. `HedgeController.Cancel()` withdraws that copy **and** cancels that copy's context without cancelling siblings. The copy still sends its result so `pending` is decremented. On the `MaxParallel == 1` / `runSync` path there is no per-copy context, so `Cancel` is flag-only.
+
+`WithOnHedge` runs synchronously on the dispatch goroutine under panic recovery — there is no extra goroutine per hedge. `WithHedgeProbability` (default 1.0) rolls once per call; a miss skips fan-out and runs only the original copy.
 
 ### The stagger schedule
 
@@ -124,7 +130,7 @@ A hedge is launched on **either** of two triggers, whichever comes first: the st
 
 ### Voluntary withdrawal
 
-A copy that learns it cannot win — its chosen replica is unreachable, its shard is being rebalanced — can call `HedgeController.Cancel()` and return promptly. A withdrawn copy's result is discarded: it counts as neither the winner nor a failure, exactly as if a sibling had won and cancelled it. This lets a copy free its slot honestly instead of returning a spurious error that would be recorded as the first failure.
+A copy that learns it cannot win — its chosen replica is unreachable, its shard is being rebalanced — can call `HedgeController.Cancel()`. That withdraws the copy **and** cancels this copy's context so `fn` can observe `ctx.Done()`. Sibling copies keep a live context. A withdrawn copy's result is still reaped (neither winner nor failure). On `runSync` (`MaxParallel == 1`) `Cancel` only sets the withdrawn flag.
 
 ### The synchronous fast path
 
@@ -136,15 +142,17 @@ When a call has exactly one launchable backend (`MaxParallel == 1`, or an `Execu
 | Contract              | Guarantee                                                                                                                                     |
 | --------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
 | First win returns     | The first copy to return a nil error wins; its value is returned and all other copies are cancelled                                           |
-| Loser teardown        | When a winner arrives, every other in-flight copy's context is cancelled before `Execute` returns                                             |
-| No goroutine leak     | On any exit (win, all-fail, cancellation) the shared cancel fires; copies observe `ctx.Done()` and the buffered channel never blocks a sender |
+| Loser teardown        | When a winner arrives, the shared hedge context is cancelled before `Execute` returns; copies that ignore `ctx` may still outlive the call |
+| No WaitGroup on win   | `Execute` does not wait for losing copies; honour `ctx.Done()` or the goroutine leaks past return |
 | Failure accelerates   | If every in-flight copy finishes without a win, the next copy launches immediately rather than waiting out its delay                          |
-| Withdrawal neutrality | A copy that calls `Cancel` is neither winner nor failure; its result is discarded                                                             |
+| Withdrawal            | `Cancel` withdraws the copy and cancels **that copy's** context; siblings stay live. On `runSync`, Cancel is flag-only |
+| OnHedge               | Invoked synchronously under recover just before a hedge launches; must not block or panic                             |
 | Panic safety          | A panicking copy becomes a `*panix.PanicError`, handled like an ordinary copy failure — never a crash                                         |
 | Monotonic schedule    | Hedge launch times are non-decreasing; copies past `maxDelay` are spread, not bunched                                                         |
 | Parallelism cap       | At most [WithMaxParallel] slice entries; [Backends] counts only non-nil launchables                                                           |
 | Controller scope      | A `HedgeController` is valid only during its copy's callback; do not retain it                                                                |
 | Construction safety   | `New` floors a non-positive `MaxParallel` to 1 and raises a too-small `MaxDelay` to `Delay`; it never returns an unusable hedger              |
+| Hedge probability     | Default 1.0; `p <= 0` ignored; `p > 1` clamped to 1; a miss skips fan-out and runs only the original copy |
 
 
 
@@ -261,7 +269,7 @@ val, err := toutx.Execute(ctx, 300*time.Millisecond,
 h := hedgex.New(
 	hedgex.WithDelay(20*time.Millisecond),
 	hedgex.WithOnHedge(func(attempt int) {
-		metrics.Counter("hedge_launched").Inc() // a hedge fired for this call
+		metrics.Counter("hedge_launched").Inc() // runs on the dispatch goroutine; do not block
 	}),
 )
 // ... later ...
@@ -283,6 +291,7 @@ s := h.Stats() // {Calls, Wins, Hedges, Failures}
 | `DefaultMaxParallel` | `const DefaultMaxParallel = 3`                                                            | Default max concurrent copies                |
 | `DefaultDelay`       | `const DefaultDelay = 100ms`                                                              | Default stagger between copies               |
 | `DefaultMaxDelay`    | `const DefaultMaxDelay = 1s`                                                              | Default cap on the stagger window            |
+| `DefaultHedgeProbability` | `const DefaultHedgeProbability = 1.0`                                                | Default chance of fan-out                    |
 | `Hedger.MaxParallel` | `func (h *Hedger) MaxParallel() int`                                                      | Configured max concurrent copies             |
 | `Hedger.Delay`       | `func (h *Hedger) Delay() time.Duration`                                                  | Configured stagger between copies            |
 | `Hedger.MaxDelay`    | `func (h *Hedger) MaxDelay() time.Duration`                                               | Configured cap on the stagger window         |
@@ -302,7 +311,7 @@ s := h.Stats() // {Calls, Wins, Hedges, Failures}
 | `IsHedge`  | `IsHedge() bool`          | Whether this copy is a speculative hedge                             |
 | `Backends` | `Backends() int`          | Launchable copies scheduled (non-nil entries after cap)              |
 | `Elapsed`  | `Elapsed() time.Duration` | Time since the first copy launched                                   |
-| `Cancel`   | `Cancel()`                | Withdraw this copy from the race (idempotent)                        |
+| `Cancel`   | `Cancel()`                | Withdraw this copy and cancel its context (flag-only on `runSync`) |
 
 
 
@@ -315,7 +324,8 @@ s := h.Stats() // {Calls, Wins, Hedges, Failures}
 | `WithMaxParallel(n)` | `DefaultMaxParallel` (3) | Max concurrent copies; ≤ 0 ignored, final value floored to 1 (1 disables hedging)         |
 | `WithDelay(d)`       | `DefaultDelay` (100ms)   | Stagger before the next copy; fast failures launch the next copy immediately; ≤ 0 ignored |
 | `WithMaxDelay(d)`    | `DefaultMaxDelay` (1s)   | Cap on the stagger window; copies past it are spread `delay/4` apart; ≤ 0 ignored         |
-| `WithOnHedge(fn)`    | none                     | Async, panic-safe callback fired with the attempt number when a hedge launches            |
+| `WithHedgeProbability(p)` | `DefaultHedgeProbability` (1.0) | Chance of fan-out; ≤ 0 ignored, > 1 clamped to 1                                 |
+| `WithOnHedge(fn)`    | none                     | Synchronous, panic-safe callback fired with the attempt number when a hedge launches      |
 | `WithOp(s)`          | `"hedgex.Execute"`       | Operation name attached to panic reports                                                  |
 
 
@@ -345,7 +355,10 @@ A panicking copy surfaces as a `*panix.PanicError` joined under `ErrAllFailed` (
 > **hedgex** does not impose a timeout.** It bounds the *number* of copies, not the total time. A request where every copy stalls runs until the context is cancelled. Wrap with `toutx` for a hard deadline.
 
 > [!NOTE]
-> **Losing copies are cancelled, not awaited.** When a winner returns, the other copies' context is cancelled and `Execute` returns immediately; it does not wait for the losers to observe cancellation. Ensure your function respects `ctx.Done()` so cancelled copies release their resources promptly.
+> **Losing copies are cancelled, not awaited.** When a winner returns, the other copies' context is cancelled and `Execute` returns immediately; it does **not** `WaitGroup` the losers. Copies that ignore `ctx.Done()` may outlive `Execute`. Honour the context so cancelled copies release resources promptly.
+
+> [!NOTE]
+> **`Cancel()` cancels that copy's context.** On the hedged path, a withdrawn copy observes `ctx.Done()` without cancelling siblings, and its result is still reaped. On `MaxParallel == 1` (`runSync`), `Cancel` only sets the withdrawn flag.
 
 
 
@@ -406,9 +419,9 @@ Three environments, two hardware classes, two operating systems. All values are 
 
 | Metric         | Value                                                                                                 |
 | -------------- | ----------------------------------------------------------------------------------------------------- |
-| Test functions | 51                                                                                                    |
+| Test functions | 62                                                                                                    |
 | Benchmarks     | 6                                                                                                     |
-| Fuzz targets   | 3 (`FuzzExecute`, `FuzzDelays` pass; `FuzzExecuteMulti` fails on negative len — see `testdata/fuzz/`) |
+| Fuzz targets   | 3 (`FuzzExecute`, `FuzzExecuteMulti`, `FuzzDelays`; `fuzzParallel` maps length to 1..max)             |
 | Examples       | 4                                                                                                     |
 | Coverage       | 100.0%                                                                                                |
 | Race detector  | All tests pass with `-race`                                                                           |

@@ -15,10 +15,15 @@ func benchEnv() *Env {
 	})))
 }
 
+func resetBound(env *Env) {
+	env.vars = env.vars[:0]
+}
+
 func BenchmarkBind_Int(b *testing.B) {
 	env := benchEnv()
 	b.ResetTimer()
 	for b.Loop() {
+		resetBound(env)
 		_ = Bind(env, "PORT", 0)
 	}
 }
@@ -27,6 +32,7 @@ func BenchmarkBind_String(b *testing.B) {
 	env := benchEnv()
 	b.ResetTimer()
 	for b.Loop() {
+		resetBound(env)
 		_ = Bind(env, "HOST", "")
 	}
 }
@@ -35,6 +41,7 @@ func BenchmarkBind_Duration(b *testing.B) {
 	env := benchEnv()
 	b.ResetTimer()
 	for b.Loop() {
+		resetBound(env)
 		_ = Bind(env, "DUR", time.Duration(0))
 	}
 }
@@ -43,6 +50,7 @@ func BenchmarkBind_List(b *testing.B) {
 	env := benchEnv()
 	b.ResetTimer()
 	for b.Loop() {
+		resetBound(env)
 		_ = Bind(env, "LIST", []string(nil))
 	}
 }
@@ -51,6 +59,7 @@ func BenchmarkBind_Absent(b *testing.B) {
 	env := benchEnv()
 	b.ResetTimer()
 	for b.Loop() {
+		resetBound(env)
 		_ = Bind(env, "NOPE", 42)
 	}
 }
@@ -59,6 +68,7 @@ func BenchmarkBind_Time(b *testing.B) {
 	env := benchEnv()
 	b.ResetTimer()
 	for b.Loop() {
+		resetBound(env)
 		_ = Bind(env, "AT", time.Time{})
 	}
 }

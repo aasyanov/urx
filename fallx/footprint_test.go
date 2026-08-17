@@ -14,8 +14,8 @@ func TestFootprint(t *testing.T) {
 		{Name: "execution", Size: testx.Sizeof[execution](), Max: 48},
 		{Name: "Stats", Size: testx.Sizeof[Stats](), Max: 80},
 		{Name: "cacheEntry[int]", Size: testx.Sizeof[cacheEntry[int]](), Max: 80},
-		{Name: "config[int]", Size: testx.Sizeof[config[int]](), Max: 96},
-		{Name: "Fallback[int] static", Size: testx.Sizeof[Fallback[int]](), Max: 216},
+		{Name: "config[int]", Size: testx.Sizeof[config[int]](), Max: 128},
+		{Name: "Fallback[int] static", Size: testx.Sizeof[Fallback[int]](), Max: 248},
 		{Name: "cacheShard[int]", Size: testx.Sizeof[cacheShard[int]](), Max: 56},
 	})
 }

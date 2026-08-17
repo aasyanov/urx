@@ -1,11 +1,10 @@
 package envx
 
-// bindVar is the shared core: it resolves the key, reads the raw value,
-// parses it when present, records any parse error for [Env.Validate], and
-// registers the [Var] on env.
+// bindVar is the shared core: it resolves the key (primary then fallbacks),
+// reads the raw value, parses it when present, records any parse error for
+// [Env.Validate], and registers the [Var] on env.
 func bindVar[T any](env *Env, name string, defaultVal T, required bool) *Var[T] {
-	key := env.fullKey(name)
-	raw, found := env.cfg.lookup(key)
+	key, raw, found, tried := env.lookupName(name)
 
 	v := &Var[T]{
 		key:      key,
@@ -13,6 +12,7 @@ func bindVar[T any](env *Env, name string, defaultVal T, required bool) *Var[T] 
 		raw:      raw,
 		found:    found,
 		required: required,
+		tried:    tried,
 	}
 
 	if v.found {
@@ -33,7 +33,11 @@ func bindVar[T any](env *Env, name string, defaultVal T, required bool) *Var[T] 
 // reported by [Env.Validate] as [ErrInvalid].
 //
 // Supported types: string, bool, int, int32, int64, uint, float64,
-// [time.Duration], [time.Time] (RFC3339), and []string (comma-separated).
+// exact [time.Duration] (ParseDuration, unit required), [time.Time] and
+// named types convertible to it (RFC3339), []string (comma-separated),
+// defined types whose underlying kind is a supported builtin (named int64
+// parses as an integer, not a duration), and types whose pointer implements
+// encoding.TextUnmarshaler.
 func Bind[T any](env *Env, name string, defaultVal T) *Var[T] {
 	return bindVar(env, name, defaultVal, false)
 }
@@ -87,4 +91,43 @@ func BindRequiredTo[T any](env *Env, name string, target *T) *Var[T] {
 	v := bindVar(env, name, *target, true)
 	v.attachTarget(target)
 	return v
+}
+
+// BindField overlays one [Field] from [Walk] onto env using the same lookup
+// (prefix + fallbacks), parse, default-keep, and [Env.Validate] path as
+// [BindTo]. It does not return a typed [Var]: clix flag aliasing stays on
+// [BindTo] / [Var.Ptr].
+//
+// Panics if env or f.Ptr is nil — programming errors, matching [BindTo].
+func BindField(env *Env, f Field) {
+	if env == nil {
+		panic("envx: BindField env must not be nil")
+	}
+	if f.Ptr == nil {
+		panic("envx: BindField pointer must not be nil")
+	}
+
+	key, raw, found, _ := env.lookupName(f.Key)
+	v := &fieldVar{key: key}
+	if found {
+		if diag := parseInto(f.Ptr, raw); diag != "" {
+			v.parseErr = diag
+		}
+	}
+	env.vars = append(env.vars, v)
+}
+
+// fieldVar is the type-erased [validator] registered by [BindField].
+type fieldVar struct {
+	key      string
+	parseErr string
+}
+
+func (v *fieldVar) name() string { return v.key }
+
+func (v *fieldVar) validate() error {
+	if v.parseErr != "" {
+		return errInvalid(v.key, v.parseErr)
+	}
+	return nil
 }

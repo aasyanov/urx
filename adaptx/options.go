@@ -16,19 +16,27 @@ const (
 	// applied when [WithMaxLimit] is not supplied.
 	DefaultMaxLimit = 1000
 
-	// DefaultSmoothing is the EMA weight applied to each new latency sample when
+	// DefaultSmoothing is the EMA weight applied to each window's mean RTT when
 	// updating the smoothed average, applied when [WithSmoothing] is not
 	// supplied. Higher reacts faster but is noisier.
 	DefaultSmoothing = 0.2
 
-	// DefaultIncreaseRate is the additive step [AIMD] adds to the limit on each
-	// success, applied when [WithIncreaseRate] is not supplied.
+	// DefaultIncreaseRate is the additive credit [AIMD] accumulates on each
+	// successful, high-utilization window, applied when [WithIncreaseRate] is
+	// not supplied. Values below 1 grow the limit every few windows (0.5 → +1
+	// every two windows).
 	DefaultIncreaseRate = 1.0
 
 	// DefaultDecreaseRatio is the multiplicative factor the limit is scaled by
-	// on backoff, applied when [WithDecreaseRatio] is not supplied. 0.5 halves
-	// the limit, matching TCP multiplicative decrease.
+	// on a backoff window, applied when [WithDecreaseRatio] is not supplied.
+	// 0.5 halves the limit, matching TCP multiplicative decrease.
 	DefaultDecreaseRatio = 0.5
+
+	// DefaultUtilization is the in-flight fraction of the live limit that [AIMD]
+	// requires before it will add credit, applied when [WithUtilization] is not
+	// supplied. A window whose peak in-flight is below ceil(limit·utilization)
+	// holds the limit even if every sample succeeded.
+	DefaultUtilization = 0.9
 
 	// DefaultTargetLatency is the latency [Vegas] treats as the operating point,
 	// applied when [WithTargetLatency] is not supplied.
@@ -39,8 +47,9 @@ const (
 	// supplied.
 	DefaultTolerance = 0.1
 
-	// DefaultSampleWindow is the trailing window over which [Stats] computes
-	// latency percentiles, applied when [WithSampleWindow] is not supplied.
+	// DefaultSampleWindow is the interval over which samples are aggregated
+	// into one control-law adjustment and over which [Stats] computes latency
+	// percentiles, applied when [WithSampleWindow] is not supplied.
 	DefaultSampleWindow = 1 * time.Second
 
 	// DefaultWarmupSamples is the number of recorded samples collected before
@@ -50,9 +59,9 @@ const (
 	DefaultWarmupSamples = 10
 
 	// DefaultMinLatencyDecay is the fraction by which RTT_min drifts toward the
-	// running average on each sample, applied when [WithMinLatencyDecay] is not
-	// supplied. It prevents [Vegas] from sticking to an anomalously low minimum
-	// forever. 0 disables decay.
+	// running average on each completed window, applied when
+	// [WithMinLatencyDecay] is not supplied. It prevents [Vegas] from sticking
+	// to an anomalously low minimum forever. 0 disables decay.
 	DefaultMinLatencyDecay = 0.001
 
 	// DefaultJitter is the fraction of each limit increase that may be randomly
@@ -97,22 +106,24 @@ type config struct {
 	initialLimit  int
 	minLimit      int
 	maxLimit      int
+	warmupSamples int
 	smoothing     float64
 	increaseRate  float64
 	decreaseRatio float64
-	targetLatency time.Duration
 	tolerance     float64
-	sampleWindow  time.Duration
-	warmupSamples int
 	minLatDecay   float64
 	jitter        float64
+	utilization   float64
+	targetLatency time.Duration
+	sampleWindow  time.Duration
 	op            string
 	onLimitChange func(oldLimit, newLimit int)
+	clock         func() time.Time
 }
 
 // newConfig resolves the effective configuration: defaults first, then options
 // in order, with cross-field invariants applied last so an invalid combination
-// can never produce an unusable limiter.
+// can never produce an unusable limiter. Nil options are skipped.
 func newConfig(opts []Option) config {
 	cfg := config{
 		algorithm:     AIMD,
@@ -122,6 +133,7 @@ func newConfig(opts []Option) config {
 		smoothing:     DefaultSmoothing,
 		increaseRate:  DefaultIncreaseRate,
 		decreaseRatio: DefaultDecreaseRatio,
+		utilization:   DefaultUtilization,
 		targetLatency: DefaultTargetLatency,
 		tolerance:     DefaultTolerance,
 		sampleWindow:  DefaultSampleWindow,
@@ -130,7 +142,9 @@ func newConfig(opts []Option) config {
 		jitter:        DefaultJitter,
 	}
 	for _, opt := range opts {
-		opt(&cfg)
+		if opt != nil {
+			opt(&cfg)
+		}
 	}
 
 	if cfg.minLimit < minLimitFloor {
@@ -218,7 +232,7 @@ func WithMaxLimit(n int) Option {
 	}
 }
 
-// WithSmoothing sets the EMA weight applied to each new latency sample.
+// WithSmoothing sets the EMA weight applied to each window's mean RTT.
 // Default: [DefaultSmoothing]. Values outside (0, 1] are ignored.
 func WithSmoothing(f float64) Option {
 	return func(c *config) {
@@ -228,8 +242,10 @@ func WithSmoothing(f float64) Option {
 	}
 }
 
-// WithIncreaseRate sets the additive step [AIMD] adds on each success.
-// Default: [DefaultIncreaseRate]. Values <= 0 are ignored.
+// WithIncreaseRate sets the additive credit [AIMD] accumulates on each
+// successful window that meets the utilization gate. Default:
+// [DefaultIncreaseRate]. Values <= 0 are ignored. Fractional rates keep a
+// remainder so 0.5 grows the limit by 1 every two windows.
 func WithIncreaseRate(r float64) Option {
 	return func(c *config) {
 		if r > 0 {
@@ -239,12 +255,24 @@ func WithIncreaseRate(r float64) Option {
 }
 
 // WithDecreaseRatio sets the multiplicative backoff factor applied to the limit
-// on failure or overload. Default: [DefaultDecreaseRatio]. Values outside
-// (0, 1) are ignored.
+// on a failure or overload window. Default: [DefaultDecreaseRatio]. Values
+// outside (0, 1) are ignored.
 func WithDecreaseRatio(r float64) Option {
 	return func(c *config) {
 		if r > 0 && r < 1 {
 			c.decreaseRatio = r
+		}
+	}
+}
+
+// WithUtilization sets the in-flight fraction of the live limit that [AIMD]
+// requires before it will add increase credit. Default: [DefaultUtilization].
+// Values outside (0, 1] are ignored. A window whose peak in-flight is below
+// ceil(limit·utilization) holds the limit.
+func WithUtilization(f float64) Option {
+	return func(c *config) {
+		if f > 0 && f <= 1 {
+			c.utilization = f
 		}
 	}
 }
@@ -272,9 +300,9 @@ func WithTolerance(f float64) Option {
 	}
 }
 
-// WithSampleWindow sets the trailing window over which [Stats] computes latency
-// percentiles. Default: [DefaultSampleWindow]. Values <= 0 are ignored. A wider
-// window retains more samples (bounded internally).
+// WithSampleWindow sets the interval over which completed operations are
+// aggregated into one control-law adjustment, and over which [Stats] computes
+// latency percentiles. Default: [DefaultSampleWindow]. Values <= 0 are ignored.
 func WithSampleWindow(d time.Duration) Option {
 	return func(c *config) {
 		if d > 0 {
@@ -285,7 +313,7 @@ func WithSampleWindow(d time.Duration) Option {
 
 // WithWarmupSamples sets the number of recorded samples collected before
 // adaptation begins. Default: [DefaultWarmupSamples]. 0 disables warmup so
-// adaptation starts immediately. Negative values are ignored.
+// adaptation starts on the first completed window. Negative values are ignored.
 func WithWarmupSamples(n int) Option {
 	return func(c *config) {
 		if n >= 0 {
@@ -295,9 +323,10 @@ func WithWarmupSamples(n int) Option {
 }
 
 // WithMinLatencyDecay sets the fraction by which the observed minimum latency
-// drifts toward the running average on each sample, preventing [Vegas] from
-// sticking to an anomalously low minimum. Default: [DefaultMinLatencyDecay].
-// 0 disables decay. Values outside [0, 1] are ignored.
+// drifts toward the running average on each completed window, preventing
+// [Vegas] from sticking to an anomalously low minimum. Default:
+// [DefaultMinLatencyDecay]. 0 disables decay. Values outside [0, 1] are
+// ignored.
 func WithMinLatencyDecay(f float64) Option {
 	return func(c *config) {
 		if f >= 0 && f <= 1 {
@@ -329,10 +358,20 @@ func WithOp(op string) Option {
 	}
 }
 
-// WithOnLimitChange registers a callback invoked on its own goroutine whenever
-// the adaptive limit changes, receiving the old and new values. Default: none.
-// The callback must not block; it is fired asynchronously so it never stalls
-// the operation that triggered the change.
+// WithOnLimitChange registers a callback invoked synchronously whenever the
+// adaptive limit changes, receiving the old and new values. Default: none.
+// The callback must not block or panic; it runs on the goroutine that closed
+// the sample window, and a panic is recovered and discarded.
 func WithOnLimitChange(fn func(oldLimit, newLimit int)) Option {
 	return func(c *config) { c.onLimitChange = fn }
+}
+
+// withClock injects a clock used by windowing, stats cutoffs, and construction.
+// Nil is ignored. Production uses time.Now. Unexported: tests only.
+func withClock(now func() time.Time) Option {
+	return func(c *config) {
+		if now != nil {
+			c.clock = now
+		}
+	}
 }

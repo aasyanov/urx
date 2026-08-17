@@ -24,6 +24,7 @@ type Option func(*config)
 type config struct {
 	maxConcurrent int
 	timeout       time.Duration
+	maxWaiters    int
 	op            string
 }
 
@@ -36,7 +37,9 @@ func newConfig(opts []Option) config {
 		timeout:       DefaultTimeout,
 	}
 	for _, opt := range opts {
-		opt(&cfg)
+		if opt != nil {
+			opt(&cfg)
+		}
 	}
 	if cfg.maxConcurrent < minConcurrent {
 		cfg.maxConcurrent = minConcurrent
@@ -94,6 +97,18 @@ func WithOp(op string) Option {
 	return func(c *config) {
 		if op != "" {
 			c.op = op
+		}
+	}
+}
+
+// WithMaxWaiters caps how many callers may block on the slow path waiting for
+// a slot. Default 0 means unlimited. Values <= 0 are ignored. When the cap is
+// exceeded, [Execute] and [Bulkhead.Acquire] return [ErrWaitersExceeded]
+// without waiting. [TryExecute] never counts as a waiter.
+func WithMaxWaiters(n int) Option {
+	return func(c *config) {
+		if n > 0 {
+			c.maxWaiters = n
 		}
 	}
 }

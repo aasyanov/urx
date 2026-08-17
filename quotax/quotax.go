@@ -68,6 +68,10 @@ const (
 	// opTryExecute labels panics recovered while running a [TryExecute]
 	// callback.
 	opTryExecute = "quotax.TryExecute"
+
+	// opOnMaxKeys labels panics recovered while running the [WithOnMaxKeys]
+	// hook so a panicking callback cannot crash the process.
+	opOnMaxKeys = "quotax.OnMaxKeys"
 )
 
 // hashSeed is process-global so every shard lookup hashes keys consistently.
@@ -82,7 +86,8 @@ var hashSeed = maphash.MakeSeed()
 //
 // A Quota is safe for concurrent use from multiple goroutines. Buckets for
 // inactive keys are evicted by a background sweeper started in [New] and stopped
-// by [Quota.Close].
+// by [Quota.Close]. In-flight Wait/Execute calls pin their bucket so the
+// sweeper cannot evict it; [Quota.Remove] and [Quota.Reset] do not honour pins.
 type Quota struct {
 	cfg config
 
@@ -106,13 +111,19 @@ type shard struct {
 }
 
 // bucket pairs a key's token-bucket limiter with the last-access timestamp the
-// sweeper reads to decide eviction.
+// sweeper reads to decide eviction, and a pin count that keeps the bucket in
+// the map while a Wait/Execute call is in flight (including the user callback).
 type bucket struct {
 	limiter    *ratex.Limiter
 	lastAccess atomic.Int64
+	pins       atomic.Int32
 }
 
 func (b *bucket) touch() { b.lastAccess.Store(time.Now().UnixNano()) }
+
+func (b *bucket) pin() { b.pins.Add(1) }
+
+func (b *bucket) unpin() { b.pins.Add(-1) }
 
 // New creates a [Quota] with the given options applied on top of sensible
 // defaults ([DefaultRate] req/s, burst [DefaultBurst], [DefaultShards] shards)
@@ -202,11 +213,12 @@ func (q *Quota) Wait(ctx context.Context, key string) error {
 
 // WaitN blocks until n tokens for the given key are available or ctx is done. It
 // returns nil once the tokens have been consumed, [ErrClosed] if the limiter is
-// closed, [ErrMaxKeys] if the [WithMaxKeys] cap blocks a new key, or
+// closed, [ErrMaxKeys] if the [WithMaxKeys] cap blocks a new key,
+// [ratex.ErrExceedsBurst] if n is greater than the per-key burst, or
 // [ErrCancelled] wrapping ctx.Err() if the context is cancelled first.
 //
-// A request for more than the per-key burst can never be satisfied; WaitN
-// blocks until ctx is cancelled or [Quota.Close] is called in that case.
+// A request for more than the per-key burst cannot be satisfied; WaitN returns
+// [ratex.ErrExceedsBurst] immediately without blocking or consuming tokens.
 func (q *Quota) WaitN(ctx context.Context, key string, n int) error {
 	_, _, err := q.waitFor(ctx, key, n)
 	return err
@@ -224,6 +236,10 @@ func (q *Quota) waitFor(ctx context.Context, key string, n int) (*bucket, waitRe
 	if n < 1 {
 		n = 1
 	}
+	if n > q.cfg.burst {
+		q.limited.Add(1)
+		return nil, waitResult{}, ratex.ErrExceedsBurst
+	}
 	if q.closed.Load() {
 		return nil, waitResult{}, ErrClosed
 	}
@@ -237,6 +253,8 @@ func (q *Quota) waitFor(ctx context.Context, key string, n int) (*bucket, waitRe
 		return nil, waitResult{}, err
 	}
 
+	b.pin()
+	defer b.unpin()
 	res, err := q.waitForOnBucket(ctx, b, n)
 	if err != nil {
 		return nil, waitResult{}, err
@@ -298,11 +316,23 @@ func Execute[T any](q *Quota, ctx context.Context, key string, fn QuotaFunc[T]) 
 	if q.closed.Load() {
 		return zero, ErrClosed
 	}
+	if err := ctx.Err(); err != nil {
+		q.limited.Add(1)
+		return zero, errCancelled(err)
+	}
 
-	b, res, err := q.waitFor(ctx, key, 1)
+	b, err := q.bucketForWait(key)
 	if err != nil {
 		return zero, err
 	}
+	b.pin()
+	defer b.unpin()
+
+	res, err := q.waitForOnBucket(ctx, b, 1)
+	if err != nil {
+		return zero, err
+	}
+	b.touch()
 	return runAfterAdmit(q, b, key, res, opExecute, ctx, fn)
 }
 
@@ -331,6 +361,8 @@ func TryExecute[T any](q *Quota, ctx context.Context, key string, fn QuotaFunc[T
 	if err != nil {
 		return false, zero, err
 	}
+	b.pin()
+	defer b.unpin()
 
 	if !b.limiter.Allow() {
 		q.limited.Add(1)
@@ -344,6 +376,7 @@ func TryExecute[T any](q *Quota, ctx context.Context, key string, fn QuotaFunc[T
 	}
 
 	q.allowed.Add(1)
+	b.touch()
 	res := waitResult{remaining: b.limiter.Tokens(), waited: false}
 	val, err := runAfterAdmit(q, b, key, res, opTryExecute, ctx, fn)
 	return true, val, err
@@ -354,6 +387,14 @@ func (q *Quota) waitForOnBucket(ctx context.Context, b *bucket, n int) (waitResu
 	if n < 1 {
 		n = 1
 	}
+	if n > q.cfg.burst {
+		q.limited.Add(1)
+		return waitResult{}, ratex.ErrExceedsBurst
+	}
+
+	b.pin()
+	defer b.unpin()
+
 	if q.closed.Load() {
 		return waitResult{}, ErrClosed
 	}
@@ -429,6 +470,11 @@ func runAfterAdmit[T any](q *Quota, b *bucket, key string, res waitResult, op st
 
 // Remove deletes the bucket for a key, discarding its accrued tokens. It
 // reports whether the key existed.
+//
+// Remove does not wait for in-flight Wait/Execute callers. A waiter that has
+// already pinned this bucket keeps using the orphaned limiter until it unpins;
+// a later Allow for the same key may create a new bucket (a ghost dual-bucket
+// until the waiter returns). The sweeper never does this: it skips pinned keys.
 func (q *Quota) Remove(key string) bool {
 	s := q.shardFor(key)
 	s.mu.Lock()
@@ -457,6 +503,10 @@ func (q *Quota) KeyCount() int64 {
 
 // Reset removes all tracked keys, discarding every bucket. Counters are left
 // untouched; use [Quota.ResetStats] for those.
+//
+// Like [Quota.Remove], Reset may orphan in-flight waiters: they keep their
+// pinned *bucket until unpin, while new admissions create fresh limiters. The
+// background sweeper never orphans waiters — it skips buckets with pins > 0.
 func (q *Quota) Reset() {
 	for i := range q.shards {
 		q.shards[i].mu.Lock()
@@ -551,9 +601,7 @@ func (q *Quota) getOrCreate(s *shard, key string) *bucket {
 
 	if !q.reserveKey() {
 		s.mu.Unlock()
-		if q.cfg.onMaxKeys != nil {
-			q.cfg.onMaxKeys(key)
-		}
+		q.invokeOnMaxKeys(key)
 		return nil
 	}
 
@@ -583,6 +631,18 @@ func (q *Quota) reserveKey() bool {
 			return true
 		}
 	}
+}
+
+// invokeOnMaxKeys runs the [WithOnMaxKeys] hook synchronously on the caller's
+// goroutine. Panics are recovered so a broken callback cannot crash the process.
+func (q *Quota) invokeOnMaxKeys(key string) {
+	if q.cfg.onMaxKeys == nil {
+		return
+	}
+	_ = panix.SafeVoid(opOnMaxKeys, func() error {
+		q.cfg.onMaxKeys(key)
+		return nil
+	})
 }
 
 // waitDelay returns the estimated time until n tokens accrue in the bucket,
@@ -617,16 +677,18 @@ func (q *Quota) evictLoop() {
 	}
 }
 
-// ForceEviction runs one eviction pass immediately, removing every key inactive
-// for longer than the configured TTL. It is primarily a testing hook; the
-// background sweeper handles eviction in normal operation.
+// ForceEviction runs one eviction pass immediately, removing every unpinned key
+// inactive for longer than the configured TTL. Pinned Wait/Execute buckets are
+// skipped. It is primarily a testing hook; the background sweeper handles
+// eviction in normal operation.
 func (q *Quota) ForceEviction() {
 	q.evict()
 }
 
-// evict removes buckets whose last access predates the TTL cutoff. It scans each
-// shard under a read lock to collect stale keys, then re-checks each under the
-// write lock before deleting, so a key touched between the two phases survives.
+// evict removes buckets whose last access predates the TTL cutoff and that have
+// no in-flight Wait/Execute pins. It scans each shard under a read lock to
+// collect stale keys, then re-checks lastAccess and pins under the write lock
+// before deleting, so a key touched or pinned between the two phases survives.
 func (q *Quota) evict() {
 	cutoff := time.Now().Add(-q.cfg.evictionTTL).UnixNano()
 
@@ -636,6 +698,9 @@ func (q *Quota) evict() {
 		s.mu.RLock()
 		var stale []string
 		for k, b := range s.buckets {
+			if b.pins.Load() > 0 {
+				continue
+			}
 			if b.lastAccess.Load() < cutoff {
 				stale = append(stale, k)
 			}
@@ -648,7 +713,7 @@ func (q *Quota) evict() {
 
 		s.mu.Lock()
 		for _, k := range stale {
-			if b, exists := s.buckets[k]; exists && b.lastAccess.Load() < cutoff {
+			if b, exists := s.buckets[k]; exists && b.pins.Load() == 0 && b.lastAccess.Load() < cutoff {
 				delete(s.buckets, k)
 				q.keyCount.Add(-1)
 			}

@@ -81,10 +81,12 @@ Execute(ctx, timeout, fn, opts...)
   ├── fn == nil ? ─────────────► return ErrNilFunc
   ├── ctx already done ? ───────► return ErrCancelled(cause)
   │
-  ├── tctx, cancel = WithTimeout(ctx, cfg.timeout)
+  ├── tctx, cancel = WithTimeoutCause(ctx, timeout, ErrDeadlineExceeded)
   ├── go { done <- panix.Safe(op, fn(tctx, controller)) }
   └── select:
-        ├── <-done       ─► return fn's (val, err)          [fn won the race]
+        ├── <-done       ─► normalizeResult(tctx, …)
+        │                    inner DeadlineExceeded/Canceled while tctx live
+        │                    pass through; our timeout remaps to sentinels
         └── <-tctx.Done() ─► context.Cause(ctx) != nil ?
                               ├── yes ─► ErrCancelled(cause)  [parent cancelled]
                               └── no  ─► ErrDeadlineExceeded  [our timeout fired]
@@ -92,7 +94,11 @@ Execute(ctx, timeout, fn, opts...)
 
 The function runs in its own goroutine so the timeout can win the race even when `fn` blocks. The result travels back on a buffered channel of capacity 1, so the goroutine never blocks on send even if `Execute` has already returned via the deadline branch.
 
-The crucial step is classification. Both a parent cancellation and the locally-imposed deadline close `tctx`, so `Execute` inspects `context.Cause(ctx)` on the *parent*: if the parent carries a cancellation cause, the failure is `ErrCancelled` (wrapping that cause); otherwise it was this call's own deadline, reported as `ErrDeadlineExceeded`. This lets upstream resilience layers react correctly — retry on a local timeout, abort on an upstream cancel.
+The deadline context is created with `context.WithTimeoutCause(..., ErrDeadlineExceeded)`, so `context.Cause` on the callback context is `ErrDeadlineExceeded` when **this** call's timeout fired.
+
+Classification: both a parent cancellation and the locally-imposed deadline close `tctx`. `Execute` inspects `context.Cause` on the *parent*: if the parent carries a cancellation cause, the failure is `ErrCancelled` (wrapping that cause); otherwise it was this call's own deadline, reported as `ErrDeadlineExceeded`.
+
+If `fn` itself returns `context.DeadlineExceeded` while `tctx` is still live, that error (and value) **propagates unchanged** — it is an inner deadline, not this wrapper's timeout. The same applies to `context.Canceled` while both parent and `tctx` are still live. Remap to package sentinels only when our timeout context or the parent is already done.
 
 ## Normative Contracts
 
@@ -105,7 +111,7 @@ The crucial step is classification. Both a parent cancellation and the locally-i
 | Option precedence       | defaults → options (in order) → positional `timeout` argument (when > 0) wins last                                        |
 | `Timer` immutability    | A `Timer` is never mutated after `New`; safe for concurrent reuse                                                         |
 | Goroutine model         | On a fired deadline `Execute` returns immediately; `fn` must honour its context or its goroutine leaks                    |
-| Result passthrough      | If `fn` returns before the deadline, its `(val, err)` is returned unchanged                                               |
+| Result passthrough      | If `fn` returns before the deadline, its `(val, err)` is returned unchanged — including an inner `context.DeadlineExceeded` / `Canceled` while this call's timeout context is still live |
 
 
 ## Quick Start
@@ -258,7 +264,7 @@ A panicking function does not produce a sentinel — it returns a `*panix.PanicE
 > **Option precedence is "positional timeout wins".** The `timeout` argument to `Execute` (when > 0) overrides `WithTimeout` and `WithTimer`. Pass `0` to defer entirely to options or a `Timer`.
 
 > [!NOTE]
-> **ErrDeadlineExceeded** vs `context.DeadlineExceeded`.** When the *parent* context carries a deadline that expires first, `toutx` reports `ErrCancelled` wrapping `context.DeadlineExceeded`. `ErrDeadlineExceeded` is reserved for the timeout *this* call imposed.
+> **ErrDeadlineExceeded** vs `context.DeadlineExceeded`.** When the *parent* context carries a deadline that expires first, `toutx` reports `ErrCancelled` wrapping `context.DeadlineExceeded`. `ErrDeadlineExceeded` is reserved for the timeout *this* call imposed. If `fn` returns `context.DeadlineExceeded` while this call's timeout context is still live, that inner error (and value) propagates — it is not remapped.
 
 ## Safety and Concurrency
 
@@ -304,7 +310,7 @@ Three environments, two hardware classes, two operating systems. All values are 
 
 | Metric         | Value                          |
 | -------------- | ------------------------------ |
-| Test functions | 38                             |
+| Test functions | 45                             |
 | Benchmarks     | 3                              |
 | Fuzz targets   | 1                              |
 | Examples       | 5                              |

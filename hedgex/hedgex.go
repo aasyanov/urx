@@ -34,6 +34,7 @@ package hedgex
 
 import (
 	"context"
+	"math/rand/v2"
 	"sync/atomic"
 	"time"
 
@@ -90,8 +91,10 @@ func (h *Hedger) MaxDelay() time.Duration { return h.cfg.maxDelay }
 // every copy fails. Each copy runs under [panix.Safe], so a panic surfaces as a
 // [*panix.PanicError] handled like any other copy failure.
 //
-// The callback receives the call ctx and a [HedgeController] exposing the copy's
-// attempt number and a [HedgeController.Cancel] method to withdraw from the race.
+// The callback receives a per-copy child of the hedge context and a
+// [HedgeController] exposing the copy's attempt number and a
+// [HedgeController.Cancel] method that withdraws this copy and cancels its
+// context (flag-only on the single-copy fast path).
 func Execute[T any](h *Hedger, ctx context.Context, fn HedgeFunc[T]) (T, error) {
 	var zero T
 	if fn == nil {
@@ -146,6 +149,9 @@ func ExecuteMulti[T any](h *Hedger, ctx context.Context, fns []HedgeFunc[T]) (T,
 	if fn, single := lone(fns); single {
 		return runSync(h, ctx, fn)
 	}
+	if !h.shouldFanout() {
+		return runSync(h, ctx, firstNonNil(fns))
+	}
 	return dispatch(h, ctx, fns, backends)
 }
 
@@ -167,11 +173,40 @@ func lone[T any](fns []HedgeFunc[T]) (HedgeFunc[T], bool) {
 	return found, count == 1
 }
 
+// firstNonNil returns the first launchable entry of fns. Callers must have
+// already established that at least one exists.
+func firstNonNil[T any](fns []HedgeFunc[T]) HedgeFunc[T] {
+	for _, fn := range fns {
+		if fn != nil {
+			return fn
+		}
+	}
+	return nil
+}
+
+// shouldFanout reports whether this call may launch hedge copies. Probability
+// 1.0 (the default) always fans out; otherwise a single roll decides.
+func (h *Hedger) shouldFanout() bool {
+	p := h.cfg.hedgeProb
+	if p >= DefaultHedgeProbability {
+		return true
+	}
+	return h.rand() < p
+}
+
+func (h *Hedger) rand() float64 {
+	if h.cfg.randFn != nil {
+		return h.cfg.randFn()
+	}
+	return rand.Float64()
+}
+
 // runSync executes a single backend inline, skipping the goroutine, channel,
 // timer, and cancel context that the hedged path requires. With one backend
 // there is nothing to race, so the synchronous path is both faster and cheaper
 // while preserving panic safety and the controller contract. The copy is the
-// original request: attempt 1 of 1 backend.
+// original request: attempt 1 of 1 backend. [HedgeController.Cancel] on this
+// path is flag-only — there is no per-copy context to cancel.
 //
 // runSync is a package-level generic function because Go methods cannot carry
 // their own type parameters.
@@ -331,38 +366,42 @@ func launchNext[T any](h *Hedger, ctx context.Context, fns []HedgeFunc[T], from,
 			h.hedges.Add(1)
 			h.fireOnHedge(attempt)
 		}
-		hc := &execution{attempt: attempt, backends: backends, start: start}
-		go run(h, ctx, fns[i], hc, ch)
+		copyCtx, copyCancel := context.WithCancel(ctx)
+		hc := &execution{attempt: attempt, backends: backends, start: start, copyCancel: copyCancel}
+		go run(h, copyCtx, ctx, fns[i], hc, ch)
 		return i + 1, attempt, true
 	}
 	return len(fns), attempt, false
 }
 
-// fireOnHedge invokes the configured launch hook asynchronously under panic
-// recovery so a slow or panicking hook never blocks or crashes the dispatch
-// loop.
+// fireOnHedge invokes the configured launch hook synchronously under panic
+// recovery so a panicking hook never crashes the dispatch loop. The hook must
+// not block.
 func (h *Hedger) fireOnHedge(attempt int) {
 	if h.cfg.onHedge == nil {
 		return
 	}
-	go func() {
-		defer func() { _ = recover() }()
+	_ = panix.SafeVoid(h.cfg.opOrDefault(), func() error {
 		h.cfg.onHedge(attempt)
-	}()
+		return nil
+	})
 }
 
 // run executes one copy under panic recovery and reports its outcome on ch.
-// A copy that withdrew via [HedgeController.Cancel] is flagged so the dispatch
-// loop ignores its result. If the hedge context is already cancelled (a sibling
-// won) the buffered send still succeeds; the select guards only against the
-// channel being abandoned, which never happens while dispatch is looping.
-func run[T any](h *Hedger, ctx context.Context, fn HedgeFunc[T], hc *execution, ch chan<- result[T]) {
+// fn receives copyCtx so [HedgeController.Cancel] can stop this copy without
+// cancelling siblings. The send selects on hedgeCtx.Done() (not copyCtx) so a
+// withdrawn copy still delivers its result and pending is decremented. If a
+// sibling already won, hedgeCtx is cancelled and a late send may be dropped.
+func run[T any](h *Hedger, copyCtx, hedgeCtx context.Context, fn HedgeFunc[T], hc *execution, ch chan<- result[T]) {
+	if hc.copyCancel != nil {
+		defer hc.copyCancel()
+	}
 	val, err := panix.Safe(h.cfg.opOrDefault(), func() (T, error) {
-		return fn(ctx, hc)
+		return fn(copyCtx, hc)
 	})
 	select {
 	case ch <- result[T]{value: val, err: err, withdrawn: hc.isWithdrawn()}:
-	case <-ctx.Done():
+	case <-hedgeCtx.Done():
 	}
 }
 

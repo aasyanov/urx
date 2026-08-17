@@ -23,6 +23,11 @@ var (
 	// The joined error carries ctx.Err(); reach it with [errors.Unwrap] or test
 	// it with [errors.Is]. Safe to compare with == or [errors.Is].
 	ErrCancelled = errors.New("warmupx: context cancelled")
+
+	// ErrClosed is returned by [Warmer.AllowOrError], [Execute], [TryExecute],
+	// and [Warmer.WaitForCompletion] after [Warmer.Close]. Safe to compare with
+	// == or [errors.Is].
+	ErrClosed = errors.New("warmupx: warmer closed")
 )
 
 // errRejected wraps [ErrRejected] with the capacity and progress observed when

@@ -83,8 +83,14 @@ func New(opts ...Option) *Limiter {
 	return &Limiter{
 		cfg:        cfg,
 		tokens:     float64(cfg.burst),
-		lastUpdate: time.Now(),
+		lastUpdate: cfg.now(),
 	}
+}
+
+// now returns the limiter's current time. It is a func field on config, not an
+// interface, so the hot path stays allocation-free.
+func (l *Limiter) now() time.Time {
+	return l.cfg.now()
 }
 
 // --- Token management ---
@@ -92,7 +98,7 @@ func New(opts ...Option) *Limiter {
 // refill adds tokens accrued since the last update, capped at the bucket
 // capacity. Must be called with mu held.
 func (l *Limiter) refill() {
-	now := time.Now()
+	now := l.now()
 	elapsed := now.Sub(l.lastUpdate)
 	if elapsed <= 0 {
 		return
@@ -157,8 +163,8 @@ func (l *Limiter) Wait(ctx context.Context) error {
 // the tokens have been consumed, or [ErrCancelled] wrapping ctx.Err() if the
 // context is cancelled first. Values of n < 1 are treated as 1.
 //
-// A request for more than the bucket capacity can never be satisfied; WaitN
-// blocks until ctx is cancelled in that case.
+// A request for more than the bucket capacity cannot be satisfied; WaitN
+// returns [ErrExceedsBurst] immediately without blocking or consuming tokens.
 func (l *Limiter) WaitN(ctx context.Context, n int) error {
 	_, err := l.waitFor(ctx, n)
 	return err
@@ -172,10 +178,16 @@ type waitResult struct {
 
 // waitFor blocks until n tokens are consumed or ctx is done. On success it
 // reports the remaining balance and whether the call slept at least once. On
-// cancellation it records one Limited outcome and returns [ErrCancelled].
+// cancellation it records one Limited outcome and returns [ErrCancelled]. If
+// n exceeds burst it records one Limited outcome and returns [ErrExceedsBurst]
+// immediately.
 func (l *Limiter) waitFor(ctx context.Context, n int) (waitResult, error) {
 	if n < 1 {
 		n = 1
+	}
+	if n > l.cfg.burst {
+		l.countLimited()
+		return waitResult{}, ErrExceedsBurst
 	}
 	need := float64(n)
 	waited := false
@@ -426,6 +438,6 @@ func (l *Limiter) ResetStats() {
 func (l *Limiter) Reset() {
 	l.mu.Lock()
 	l.tokens = float64(l.cfg.burst)
-	l.lastUpdate = time.Now()
+	l.lastUpdate = l.now()
 	l.mu.Unlock()
 }

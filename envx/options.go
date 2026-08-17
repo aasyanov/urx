@@ -17,8 +17,9 @@ const listSeparator = ","
 const defaultPrefix = ""
 
 type config struct {
-	prefix string
-	lookup func(string) (string, bool)
+	prefix    string
+	fallbacks []string
+	lookup    func(string) (string, bool)
 }
 
 func defaultConfig() config {
@@ -38,8 +39,23 @@ type Option func(*config)
 // Example: WithPrefix("APP") makes Bind(env, "PORT", 0) read "APP_PORT".
 func WithPrefix(prefix string) Option {
 	return func(c *config) {
-		c.prefix = strings.TrimSuffix(strings.ToUpper(prefix), keySeparator)
+		c.prefix = normalizePrefix(prefix)
 	}
+}
+
+// WithFallbackPrefix appends a prefix tried only when the primary
+// ([WithPrefix]) key is unset. Multiple calls append in try order after
+// the primary. Normalization matches [WithPrefix]: upper-case, trailing
+// "_" trimmed. First-fill-wins: a found primary is never overwritten by a
+// fallback, and a found fallback is never overwritten by a later one.
+func WithFallbackPrefix(prefix string) Option {
+	return func(c *config) {
+		c.fallbacks = append(c.fallbacks, normalizePrefix(prefix))
+	}
+}
+
+func normalizePrefix(prefix string) string {
+	return strings.TrimSuffix(strings.ToUpper(prefix), keySeparator)
 }
 
 // WithLookup sets the function used to read environment variables.

@@ -7,6 +7,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+This Unreleased payload is intended to ship as **1.5.2** (sole consumer; breaking resilience contracts are intentional).
+
+### Breaking
+
+- **`adaptx` control laws** now match their names: AIMD/Vegas/Gradient adjust **once per `WithSampleWindow`**. AIMD increases only when window `maxInFlight >= limit * WithUtilization` (default **0.9**) and accumulates fractional `WithIncreaseRate`. Vegas queue is `limit * (1 - minRTT/RTT)` (was `/minRTT`). Gradient EMA initializes to the first window sample. **`Close` / `CloseWithTimeout`:** incomplete drain returns **`ErrDrainTimeout`**; `Close()` is nil-idempotent (second call no longer returns `ErrClosed`).
+- **`ratex` / `quotax`:** `WaitN(n > burst)` returns **`ErrExceedsBurst`** immediately instead of hanging until context cancel. `errors.Is(err, ratex.ErrExceedsBurst)` works for both packages.
+- **`circuitx`:** a callback error that is `context.Canceled` is no longer a consecutive failure. Opt in with `WithCountCanceled()`. `DeadlineExceeded` still counts.
+- **`retryx`:** a cancelled last attempt returns **`ErrCancelled`**, not `ErrExhausted`.
+- **`toutx`:** an inner `context.DeadlineExceeded` / `Canceled` while this call's timeout is still live is **propagated**, not rewritten to `toutx.ErrDeadlineExceeded` / `ErrCancelled`.
+- **`bulkx`:** `TryExecute` no longer barges ahead of parked `Execute` waiters (rejects while `waiters > 0`).
+- **`fallx`:** `StrategyCached` no longer starts a background TTL sweeper by default. Opt in with `WithCleanupInterval`.
+- **`hedgex`:** `WithOnHedge` runs synchronously (no extra goroutine per hedge). `HedgeController.Cancel()` cancels that copy's context.
+- **`warmupx`:** Exponential curve is normalized so `f(1) = 1` (mid-ramp values change slightly). `StartAt` continues along the curve instead of dropping to min on the first tick.
+
+### Added
+
+- **`clix`:** `WithHelpLabels` / `HelpLabels` — replace help chrome (headings, metavars, built-in `--help`/`--version` usage, required/enum suffixes) without translating command or flag names. Empty fields keep English defaults. Must be passed to `New`.
+
+- **`cfgx`:** nested [Validator] walk (post-order: children, then parent) with field-path prefixes on `ErrValidationFailed`. Public `Validate(dst, fix, opts...)` re-runs the same walk after env/flags; `WithFormat` keeps path prefixes on the file codec's tags. Walk descends slice/array/map elements that can hold a Validator (`servers[0].port`, `limits[api].rate`). Leaf slices (`[]string`, …) are not descended. Enhancement — may surface previously ignored nested validation errors, including on collection elements. Not a break for honest `Validate` implementations that did not recurse into children.
+- **`cfgx`:** default writer creates missing parent directories (`0o755`) before `Save` / create-if-missing. Injected `WithWriter` is unchanged.
+- **`envx`:** `parse` accepts defined types whose underlying kind is a supported builtin, and `encoding.TextUnmarshaler` on `*T`. Exact `int`/`string`/… type-switch is unchanged (reflect only on the named/default branch).
+- **`envx`:** `WithFallbackPrefix` — first-fill-wins lookup after `WithPrefix`. `Var.Key()` / `Vars()` report the actually found key; missing required lists every tried name.
+- **`envx`:** opt-in `Walk` + `BindField`. Default key source is the `env` tag allowlist (`KeysFromEnvTag`); `KeysFromYAML` / `KeysFromJSON` / `KeysFromTOML` are explicit. Walk does not read env and does not mutate (nil pointer branches are skipped). Bind remains the canonical overlay.
+- **`adaptx`:** `WithUtilization`, `ErrDrainTimeout`.
+- **`ratex`:** `ErrExceedsBurst`.
+- **`circuitx`:** `WithFailureIf`, `WithCountCanceled`. Internal HalfOpen generation so a stale probe cannot heal or `Trip` a newer epoch.
+- **`fallx`:** `WithFallbackIf`, `WithClone`, `WithCleanupInterval`.
+- **`retryx`:** `WithMaxElapsed` / `ErrMaxElapsed`, `WithDelayFunc`, `WithEqualJitter`.
+- **`hedgex`:** `WithHedgeProbability` (default 1.0).
+- **`bulkx`:** `WithMaxWaiters`, `ErrWaitersExceeded`, `Stats.Waiters`.
+- **`shedx`:** `WithHysteresis`, `ShedController.SkipSlot`.
+- **`warmupx`:** `Close` / `IsClosed` / `ErrClosed` (`Stop` remains freeze-and-admit).
+- **`quotax`:** Wait/Execute pin the per-key bucket so the sweeper cannot evict it mid-wait or mid-callback.
+
+### Changed
+
+- Resilience packages skip nil `Option` values; `On*` hooks run synchronously under recover (no `go hook()` per event).
+- **`clix`:** `Command` footprint ceiling 192→200 (`*HelpLabels` on the root; help chrome is startup-only).
+- **`clix` help legend:** `Parser.Help()` always lists built-in `--help` / `-h`, and `--version` / `-V` when `Version` is set. USAGE shows the full command path (`app db migrate`). GLOBAL FLAGS are root-first. Enum comments render as `(one of: dev, prod)`.
+- **`cfgx`:** nil `Option` values are ignored. Unknown `Format` values return `ErrUnsupportedFormat` instead of panicking. `FormatAuto` on `Validate` falls through a `"-"` tag to the next codec (yaml → json → toml) so `yaml:"-" json:"listen"` is still walked.
+- **`envx`:** nil `Option` values to `New` are ignored (matching `Walk` / clix / cfgx). `uint` parse uses platform width (`bits.UintSize`). Lookup without fallback prefixes skips the candidate-key map.
+- **`envx`:** `type MyDur time.Duration` no longer accepts `"5s"` (integer parse only; use `time.Duration` or `TextUnmarshaler`).
+- **`envx`:** named `time.Time` (`type Stamp time.Time`) binds RFC3339, matching exact `time.Time`.
+- **`cfgx` docs:** JSON/YAML `null` does not zero non-pointer scalars (codec no-op; Go defaults stay).
+
+### Fixed
+
+- **`quotax`:** sweeper can no longer split one key into two token buckets while Wait/Execute is in flight.
+- **`circuitx`:** HalfOpen `inflight.Store(0)` no longer lets a stale probe heal or trip a newer generation.
+- **`bulkx`:** slot release decrements `Active` before returning the semaphore; wait duration is `min(timeout, ctx remaining)`.
+- **`clix`:** `--help=...` and `--version=...` are recognised as the built-in control flags (previously `ErrUnknownFlag`). `-V` inside a POSIX short group triggers `ErrVersion`. `--no-<bool>=false` now writes true instead of always writing false.
+- **`clix`:** construction panics on reserved `--help`/`-h` (and `--version`/`-V` when `Version` is set), multi-character short aliases, `Version` or `WithHelpLabels` applied to a subcommand, and duplicate `Version`. Nil options are ignored.
+- **`clix`:** a non-bool flag no longer consumes a following flag-like token as its value (`--port --verbose` → `ErrMissingValue`, matching the documented contract). Signed numbers (`-5`, `-1s`) and a bare `-` still bind as values; dash-prefixed strings use the inline form (`--name=--raw`).
+- **`cfgx`:** public `Load`/`Parse`/`Save`/`Marshal`/`Validate` no longer panic on a nil option or an out-of-range `Format` value.
+- **`envx`:** `Walk`/`BindField` parse of `time.Duration` and builtin `int64` now matches `Bind` (and clix): unitless `"90"` is `ErrInvalid` for Duration; `"1s"` is `ErrInvalid` for `int64`. The reflect path no longer treats Duration as raw nanoseconds or `int64` as a duration.
+- **`cfgx`:** exported embed `Validator` is no longer double-invoked; a nil pointer-embed no longer panics.
+- **`cfgx`:** not-exist detection uses `errors.Is`, so wrapped `WithReader` errors create/not-found correctly.
+- **`cfgx`:** `Marshal` rejects typed nil pointers like `Save`.
+- **`envx`:** named `int64` no longer parses duration strings (`type UserID int64` + `5s` is `ErrInvalid`).
+- **`clix`:** positional `-` is an arg (stdin convention); `IsSet` accepts short aliases.
+- **docs:** 12-factor snippets handle `ErrHelp` / `ErrVersion` before `Join`; `AddFlag` `def` must be the live field value.
+
 ## [1.5.1] — 2026-08-11
 
 ### Added

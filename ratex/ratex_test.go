@@ -113,6 +113,16 @@ func TestNewConfig_PreservesFractionalRate(t *testing.T) {
 	assert.Equal(t, 0.5, l.Rate())
 }
 
+func TestNewConfig_SkipsNilOption(t *testing.T) {
+	cfg := newConfig([]Option{
+		WithRate(5),
+		nil,
+		WithBurst(3),
+	})
+	assert.Equal(t, 5.0, cfg.rate)
+	assert.Equal(t, 3, cfg.burst)
+}
+
 func TestLimiter_Delay_ReturnsMinWhenTokensAlreadyAvailable(t *testing.T) {
 	l := New(WithRate(100), WithBurst(10))
 	l.mu.Lock()
@@ -215,6 +225,23 @@ func TestLimiter_Release_DoesNotDriveAllowedNegative(t *testing.T) {
 	assert.Zero(t, l.Stats().Allowed)
 }
 
+func TestLimiter_AllowN_CountsOneAdmissionNotN(t *testing.T) {
+	l := New(WithRate(1), WithBurst(10))
+	require.True(t, l.AllowN(7))
+	assert.Equal(t, uint64(1), l.Stats().Allowed, "AllowN counts one admission, not n tokens")
+}
+
+func TestLimiter_Release_TwoAllowsThenReleaseNRollsBackOne(t *testing.T) {
+	l := New(WithRate(1), WithBurst(5))
+	require.True(t, l.Allow())
+	require.True(t, l.Allow())
+	assert.Equal(t, uint64(2), l.Stats().Allowed)
+
+	l.Release(2)
+	assert.Equal(t, uint64(1), l.Stats().Allowed, "Release rolls back one Allowed, not n")
+	assert.InDelta(t, 5.0, l.Tokens(), 0.01)
+}
+
 func TestWaitN_CancelAfterTakeRefundsMultipleTokens(t *testing.T) {
 	l := New(WithRate(1), WithBurst(5))
 
@@ -234,6 +261,16 @@ func TestLimiter_AllowConsumesBurst(t *testing.T) {
 		assert.True(t, l.Allow(), "token %d should be admitted", i)
 	}
 	assert.False(t, l.Allow(), "bucket should be empty after burst")
+}
+
+func TestAllow_ZeroAllocs(t *testing.T) {
+	l := New(WithRate(1e9), WithBurst(1e9))
+	n := testing.AllocsPerRun(1000, func() {
+		_ = l.Allow()
+	})
+	if n != 0 {
+		t.Fatalf("Allow allocs/op = %v, want 0", n)
+	}
 }
 
 func TestLimiter_AllowN(t *testing.T) {
@@ -305,13 +342,26 @@ func TestLimiter_Wait_DeadlineExceeded(t *testing.T) {
 	assert.ErrorIs(t, err, context.DeadlineExceeded)
 }
 
-func TestLimiter_WaitN_ImpossibleRequestCancellable(t *testing.T) {
+func TestWaitN_ExceedsBurstReturnsImmediately(t *testing.T) {
 	l := New(WithRate(1), WithBurst(2))
-	ctx, cancel := testx.TimedCtx(30 * time.Millisecond)
+	err := l.WaitN(context.Background(), 5)
+	require.ErrorIs(t, err, ErrExceedsBurst)
+	assert.Equal(t, uint64(1), l.Stats().Limited)
+	assert.Zero(t, l.Stats().Allowed)
+	assert.InDelta(t, 2.0, l.Tokens(), 0.01, "must not consume tokens")
+}
+
+func TestWaitN_ExceedsBurstDoesNotHang(t *testing.T) {
+	l := New(WithRate(1), WithBurst(2))
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	// 5 tokens can never fit in a burst-2 bucket; Wait must respect ctx.
+
+	start := time.Now()
 	err := l.WaitN(ctx, 5)
-	require.ErrorIs(t, err, ErrCancelled)
+	elapsed := time.Since(start)
+
+	require.ErrorIs(t, err, ErrExceedsBurst)
+	assert.Less(t, elapsed, 50*time.Millisecond, "must return in milliseconds, not wait out the context")
 }
 
 func TestLimiter_WaitN_CancelAfterTimerFires(t *testing.T) {
@@ -702,6 +752,34 @@ func TestLimiter_Reset(t *testing.T) {
 	l.Reset()
 	assert.InDelta(t, 3.0, l.Tokens(), 0.01)
 	assert.True(t, l.AllowN(3), "bucket should be full again")
+}
+
+func TestLimiter_FractionalRefillE2E(t *testing.T) {
+	now := time.Unix(1_000, 0)
+	l := New(WithRate(0.5), WithBurst(1), withClock(func() time.Time { return now }))
+	require.True(t, l.Allow())
+	require.False(t, l.Allow())
+
+	now = now.Add(2 * time.Second) // 0.5 tokens/s × 2s = 1 token
+	assert.True(t, l.Allow())
+}
+
+func TestLimiter_FractionalRate_AllowNAfterPartialRefill(t *testing.T) {
+	now := time.Unix(1_000, 0)
+	l := New(WithRate(0.2), WithBurst(1), withClock(func() time.Time { return now }))
+	require.True(t, l.Allow())
+
+	now = now.Add(3 * time.Second) // 0.6 tokens — not enough
+	assert.False(t, l.AllowN(1))
+
+	now = now.Add(2 * time.Second) // 1.0 tokens
+	assert.True(t, l.Allow())
+}
+
+func TestWithClock_NilIgnored(t *testing.T) {
+	l := New(WithRate(1), WithBurst(1), withClock(nil))
+	require.True(t, l.Allow())
+	assert.False(t, l.Allow(), "nil clock must not replace time.Now")
 }
 
 // --- Concurrency ---

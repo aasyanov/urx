@@ -9,6 +9,7 @@ import (
 
 	"github.com/aasyanov/urx/internal/testx"
 	"github.com/aasyanov/urx/panix"
+	"github.com/aasyanov/urx/ratex"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -179,6 +180,16 @@ func TestNewConfig_PreservesFractionalRate(t *testing.T) {
 	assert.Equal(t, 0.5, b.limiter.Rate())
 }
 
+func TestNewConfig_SkipsNilOption(t *testing.T) {
+	cfg := newConfig([]Option{
+		WithRate(5),
+		nil,
+		WithBurst(3),
+	})
+	assert.Equal(t, 5.0, cfg.rate)
+	assert.Equal(t, 3, cfg.burst)
+}
+
 func TestQuota_Allow_PerKeyIsolation(t *testing.T) {
 	q := New(WithRate(1), WithBurst(2))
 	defer q.Close()
@@ -289,6 +300,18 @@ func TestQuota_MaxKeys_Enforced(t *testing.T) {
 	assert.True(t, q.Allow("a"), "existing key still admitted after cap")
 }
 
+func TestQuota_OnMaxKeys_RecoversPanic(t *testing.T) {
+	q := New(
+		WithMaxKeys(1),
+		WithOnMaxKeys(func(string) { panic("hook boom") }),
+	)
+	defer q.Close()
+
+	require.True(t, q.Allow("a"))
+	assert.False(t, q.Allow("b"), "panic in OnMaxKeys must not crash; new key still rejected")
+	assert.Equal(t, int64(1), q.KeyCount())
+}
+
 func TestQuota_Wait_Succeeds(t *testing.T) {
 	q := New(WithRate(1000), WithBurst(1))
 	defer q.Close()
@@ -340,16 +363,21 @@ func TestQuota_Wait_AlreadyCancelled(t *testing.T) {
 	assert.Equal(t, int64(1), q.Stats().Limited)
 }
 
-func TestQuota_WaitN_ExceedsBurst(t *testing.T) {
+func TestQuota_WaitN_ExceedsBurstReturnsImmediately(t *testing.T) {
 	q := New(WithRate(1000), WithBurst(2))
 	defer q.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 
+	start := time.Now()
 	err := q.WaitN(ctx, "k", 5)
-	require.ErrorIs(t, err, ErrCancelled)
+	elapsed := time.Since(start)
+
+	require.ErrorIs(t, err, ratex.ErrExceedsBurst)
+	assert.Less(t, elapsed, 50*time.Millisecond, "must return in milliseconds, not wait out the context")
 	assert.Equal(t, int64(1), q.Stats().Limited)
+	assert.Equal(t, int64(0), q.KeyCount(), "fail-fast must not create a key")
 }
 
 func TestQuota_WaitN_AbortsOnClose(t *testing.T) {
@@ -685,6 +713,119 @@ func TestQuota_Eviction_KeepsActiveKey(t *testing.T) {
 	q.Allow("k")
 	q.ForceEviction()
 	assert.True(t, q.Exists("k"), "recently active key survives eviction")
+}
+
+func TestQuota_Wait_PinnedNotEvicted(t *testing.T) {
+	q := New(
+		WithRate(0.0001),
+		WithBurst(1),
+		WithEvictionTTL(time.Millisecond),
+		WithEvictionInterval(time.Hour),
+		WithShards(1),
+	)
+	defer q.Close()
+
+	require.True(t, q.Allow("k")) // drain burst so Wait blocks
+	s := q.shardFor("k")
+	s.mu.RLock()
+	b := s.buckets["k"]
+	s.mu.RUnlock()
+	require.NotNil(t, b)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() { errCh <- q.Wait(ctx, "k") }()
+
+	testx.Eventually(t, func() bool { return b.pins.Load() > 0 }, time.Second)
+	time.Sleep(5 * time.Millisecond)
+	q.ForceEviction()
+
+	assert.True(t, q.Exists("k"))
+	assert.Equal(t, int64(1), q.KeyCount())
+
+	cancel()
+	require.ErrorIs(t, <-errCh, ErrCancelled)
+}
+
+func TestQuota_Execute_LongFn_NoGhostBucket(t *testing.T) {
+	q := New(
+		WithRate(0.0001),
+		WithBurst(2),
+		WithEvictionTTL(time.Millisecond),
+		WithEvictionInterval(time.Hour),
+	)
+	defer q.Close()
+
+	started := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		_, err := Execute(q, context.Background(), "k",
+			func(context.Context, QuotaController) (int, error) {
+				close(started)
+				time.Sleep(20 * time.Millisecond)
+				return 1, nil
+			})
+		done <- err
+	}()
+	<-started
+	q.ForceEviction()
+
+	admitted := 0
+	for range 5 {
+		if q.Allow("k") {
+			admitted++
+		}
+	}
+	assert.Equal(t, 1, admitted, "same limiter: burst 2 minus Execute's 1 token; a ghost bucket would admit a full burst")
+	require.NoError(t, <-done)
+	assert.Equal(t, int64(1), q.KeyCount())
+}
+
+func TestQuota_Wait_ThenAllow_SameLimiter(t *testing.T) {
+	q := New(WithRate(1), WithBurst(3))
+	defer q.Close()
+
+	require.NoError(t, q.WaitN(context.Background(), "k", 2))
+	assert.True(t, q.Allow("k"), "WaitN tokens must be visible to Allow on the same limiter")
+	assert.False(t, q.Allow("k"), "burst 3: WaitN(2)+Allow(1) exhausts the bucket")
+}
+
+func TestQuota_MaxKeys_PinDoesNotLeakCount(t *testing.T) {
+	q := New(
+		WithMaxKeys(1),
+		WithRate(0.0001),
+		WithBurst(1),
+		WithEvictionTTL(time.Millisecond),
+		WithEvictionInterval(time.Hour),
+		WithShards(1),
+	)
+	defer q.Close()
+
+	require.True(t, q.Allow("k"))
+	s := q.shardFor("k")
+	s.mu.RLock()
+	b := s.buckets["k"]
+	s.mu.RUnlock()
+	require.NotNil(t, b)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() { errCh <- q.Wait(ctx, "k") }()
+	testx.Eventually(t, func() bool { return b.pins.Load() > 0 }, time.Second)
+
+	assert.Equal(t, int64(1), q.KeyCount())
+	assert.False(t, q.Allow("other"))
+	assert.Equal(t, int64(1), q.KeyCount(), "pin must not inflate keyCount")
+
+	cancel()
+	require.ErrorIs(t, <-errCh, ErrCancelled)
+	assert.Equal(t, int64(1), q.KeyCount())
+
+	time.Sleep(5 * time.Millisecond)
+	q.ForceEviction()
+	assert.Equal(t, int64(0), q.KeyCount())
+	assert.True(t, q.Allow("other"))
 }
 
 func TestQuota_BackgroundEviction(t *testing.T) {

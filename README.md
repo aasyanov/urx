@@ -63,9 +63,11 @@ Every public package follows the same patterns unless the README states an excep
 | Sentinel errors | `"<pkg>: …"` prefix; documented **when** each error is returned |
 | `Execute` / `TryExecute` / `Do` | Generic entry points for “run fn under this policy” |
 | `Allow` | Non-blocking admission hint where applicable — 0-allocation fast path |
-| Functional options | `WithXxx` on private `config` structs; defaults documented in README |
-| Execution controllers | Callback receives a small interface to read state and influence the wrapper |
-| Lifecycle | `Close`, `IsClosed`, `Stats`, `ResetStats` on long-lived instances where applicable |
+| Functional options | `WithXxx` on private `config` structs; **nil options skipped**; defaults documented in README |
+| Execution controllers | Callback receives a small interface to read state and influence the wrapper; do not retain after return |
+| Lifecycle | `Close` / `Stop` idempotent (`nil`); `ErrClosed` is for **work after** close. Types that own no resource have no `Close` |
+| User hooks (`On*`) | Synchronous on the driving goroutine; panics recovered; must not block |
+| Classification | Injectable `WithRetryIf` / `WithFailureIf` / `WithFallbackIf` — never HTTP status tables |
 | Tests | Table-driven cases, `-race`, fuzz on input paths, benchmarks on hot paths |
 | File layout | `<pkg>.go`, `errors.go`, `options.go`, `types.go`, tests, `README.md` — see [Project layout](#project-layout) |
 
@@ -162,7 +164,7 @@ Execute/Do  ──creates──▶  private struct
 | `TimeoutController` | toutx | `Op()`, `Timeout()`, `Deadline()`, `Elapsed()`, `Remaining()` | — |
 | `CircuitController` | circuitx | `State()`, `Failures()`, `MaxFailures()` | `SkipFailure()`, `Trip()` |
 | `BulkController` | bulkx | `Active()`, `MaxConcurrent()`, `Load()`, `WaitedSlot()` | — |
-| `ShedController` | shedx | `Priority()`, `Load()`, `InFlight()`, `Capacity()` | `Shed()` |
+| `ShedController` | shedx | `Priority()`, `Load()`, `InFlight()`, `Capacity()` | `Shed()`, `SkipSlot()` |
 | `AdaptController` | adaptx | `Limit()`, `InFlight()`, `Algorithm()` | `SkipSample()` |
 | `HedgeController` | hedgex | `Attempt()`, `IsHedge()`, `Backends()`, `Elapsed()` | `Cancel()` |
 | `FallController` | fallx | `Strategy()`, `Key()`, `OnFallback()`, `Error()` | — |
@@ -227,13 +229,14 @@ URX covers **loading, parsing, and saving** config. **When** to reload subsystem
 ```text
 defaults in Go
     ↓
-cfgx.Load("config.yaml")
+cfgx.Load("config.yaml")          — fatal unless ErrValidationFailed
     ↓
-envx.BindTo(env, "KEY", &cfg.Field)
+envx.BindTo / Walk+BindField
     ↓
-clix flags
+clix flags                        — handle ErrHelp / ErrVersion first
     ↓
-cfg.Validate() / env.Validate()
+env.Validate()                    — required (env parse / required keys)
+cfgx.Validate(&cfg, false)        — required (nested walk; not a substitute)
     ↓
 start servers, pools, clients …
 ```
@@ -330,30 +333,41 @@ Per-tenant limits: [quotax](quotax/) with a stable key (`user ID`, API key hash)
 ### 3. Process boot — config file, env, flags
 
 ```go
-cfg := DefaultConfig()
+cfg := DefaultConfig() // compiled-in defaults
 
 if err := cfgx.Load("config.yaml", &cfg, cfgx.WithCreateIfMissing()); err != nil {
-    return err
+    if !errors.Is(err, cfgx.ErrValidationFailed) {
+        return err // I/O / parse / format — do not continue on partial decode
+    }
+    // optional: still continue so env/flags can repair file-only validation
 }
 
 env := envx.New(envx.WithPrefix("APP"))
-envx.BindTo(env, "HTTP_PORT", &cfg.HTTP.Port)
+envx.BindTo(env, "HTTP_PORT", &cfg.HTTP.Port) // absent keeps file
 envx.BindTo(env, "LOG_LEVEL", &cfg.Log.Level)
 
 p := clix.New(os.Args[1:], "myservice", "API server",
-    clix.AddFlag(&cfg.HTTP.Port, "http-port", "p", cfg.HTTP.Port, "listen port"),
+    clix.AddFlag(&cfg.HTTP.Port, "http-port", "p", cfg.HTTP.Port, "listen port"), // def MUST be live field
     clix.SubCommand("serve", "run server", clix.Run(runServer)),
 )
+if errors.Is(p.Err(), clix.ErrHelp) {
+    fmt.Print(p.Help())
+    return nil
+}
+if errors.Is(p.Err(), clix.ErrVersion) {
+    fmt.Println(p.Version())
+    return nil
+}
 if err := errors.Join(env.Validate(), p.Err()); err != nil {
     return err
 }
-if errs := cfg.Validate(false); len(errs) > 0 {
-    return errors.Join(errs...)
+if err := cfgx.Validate(&cfg, false); err != nil {
+    return err
 }
 return p.Run()
 ```
 
-`envx` distinguishes unset from empty string (`os.LookupEnv` semantics). See [envx](envx/) for list/time types.
+`Required()` is CLI-presence only. Share only `string`, `int`, `bool`, `float64`, `time.Duration`, and `time.Time` with `AddFlag`. YAML duration `30s` works; JSON needs nanoseconds or a string you parse. Do not `cfgx.Validate(..., true)` after flags. `envx` distinguishes unset from empty string (`os.LookupEnv` semantics). See [envx](envx/) for list/time types.
 
 ### 4. Graceful shutdown and probes
 
@@ -476,6 +490,7 @@ Contributing workflow: bring one package to Gate M+5 per focused change — audi
 
 ## Versioning
 
+- **1.5.2** (Unreleased) — resilience 8+ pass: windowed adaptx laws, fail-fast `WaitN`, pin-count quotax, consecutive circuitx generation + cancel classification, fallback/retry/hedge/bulk/shed/warmup contract fixes. Breaking details in [CHANGELOG.md](CHANGELOG.md).
 - **1.4.0** — greenfield rewrite: flat imports, sentinel errors, expanded controllers, removed packages from ≤1.3.0 (`errx`, `dicx`, `logx`, …). Details in [CHANGELOG.md](CHANGELOG.md).
 - Pin a version in `go.mod`. Releases through 1.3.0 are a different library surface; upgrading to 1.4.0+ requires code changes.
 

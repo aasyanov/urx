@@ -11,9 +11,10 @@ const (
 	// capacity(t) = min + delta*t, where t is fractional progress in [0, 1].
 	Linear Strategy = iota
 
-	// Exponential ramps fast at the start then flattens towards the maximum:
-	// capacity(t) = min + delta*(1 - e^(-k*t)). Use it to admit a meaningful
-	// share of traffic early while still protecting a cold instance.
+	// Exponential ramps fast at the start and reaches the maximum at t=1:
+	// f(t) = (1 - e^(-k t)) / (1 - e^(-k)), capacity = min + delta*f(t).
+	// Use it to admit a meaningful share of traffic early while still
+	// protecting a cold instance. k defaults to [DefaultExpFactor].
 	Exponential
 
 	// Logarithmic ramps slowly at the start then accelerates towards the

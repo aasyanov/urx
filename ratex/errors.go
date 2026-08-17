@@ -15,6 +15,12 @@ var (
 	// ErrNilFunc is returned by [Execute] and [TryExecute] when the supplied
 	// function is nil. Safe to compare with == or [errors.Is].
 	ErrNilFunc = errors.New("ratex: nil function")
+
+	// ErrExceedsBurst is returned by [Limiter.WaitN] when n is greater than the
+	// bucket capacity. Such a request can never be satisfied, so WaitN fails
+	// immediately without blocking or consuming tokens. Safe to compare with
+	// == or [errors.Is].
+	ErrExceedsBurst = errors.New("ratex: n exceeds burst")
 )
 
 // errCancelled wraps [ErrCancelled] with the context cause.

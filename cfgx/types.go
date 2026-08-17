@@ -38,15 +38,21 @@ func (f Format) String() string {
 }
 
 // Validator is an optional interface that config structs can implement.
-// [Load] calls it automatically after unmarshalling: with fix=true when
-// [WithAutoFix] is enabled, or fix=false (report only) otherwise.
+// [Load]/[Parse] walk exported nested structs, then slice/array elements
+// and map values that can hold a [Validator], and call every [Validator]
+// post-order (children, then parent) after unmarshalling: fix=true when
+// [WithAutoFix] is enabled, otherwise report-only. Field-path prefixes are
+// added to remaining errors (servers[0].port, limits[api].rate). Re-run
+// the same walk after env/flags with [Validate].
+//
+// Leaf types should implement Validate; a composition root should only
+// check cross-field invariants — cfgx already walks children, so a root
+// that re-calls child.Validate will double-invoke.
 //
 // Implementations should collect all validation errors (not fail-fast on
 // the first). When fix is true, the method may mutate the receiver to correct
 // invalid values and should return only the errors that remain after the
-// fix pass. This is the seam through which cfgx composes with envx (env
-// overrides) and clix (flag overrides): validate the struct once after the
-// whole precedence chain has been applied.
+// fix pass.
 type Validator interface {
 	Validate(fix bool) []error
 }

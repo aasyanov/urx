@@ -31,6 +31,12 @@ func TestNew_Defaults(t *testing.T) {
 	assert.Equal(t, DefaultMaxParallel, h.MaxParallel())
 	assert.Equal(t, DefaultDelay, h.Delay())
 	assert.Equal(t, DefaultMaxDelay, h.MaxDelay())
+	assert.Equal(t, DefaultHedgeProbability, newConfig(nil).hedgeProb)
+}
+
+func TestNew_NilOptionIgnored(t *testing.T) {
+	h := New(nil, WithMaxParallel(2))
+	assert.Equal(t, 2, h.MaxParallel())
 }
 
 func TestWithMaxParallel(t *testing.T) {
@@ -111,6 +117,73 @@ func TestWithOnHedge(t *testing.T) {
 	require.NotNil(t, cfg.onHedge)
 	cfg.onHedge(2)
 	assert.Equal(t, 1, n)
+}
+
+func TestWithHedgeProbability(t *testing.T) {
+	tests := []struct {
+		name string
+		opt  Option
+		want float64
+	}{
+		{"default", nil, DefaultHedgeProbability},
+		{"custom", WithHedgeProbability(0.5), 0.5},
+		{"zero ignored", WithHedgeProbability(0), DefaultHedgeProbability},
+		{"negative ignored", WithHedgeProbability(-1), DefaultHedgeProbability},
+		{"clamped above one", WithHedgeProbability(1.5), DefaultHedgeProbability},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var opts []Option
+			if tt.opt != nil {
+				opts = append(opts, tt.opt)
+			}
+			cfg := newConfig(opts)
+			assert.Equal(t, tt.want, cfg.hedgeProb)
+		})
+	}
+}
+
+func TestExecute_HedgeProbability_SkipsFanout(t *testing.T) {
+	h := New(
+		WithDelay(5*time.Millisecond),
+		WithMaxParallel(3),
+		WithHedgeProbability(0.5),
+		withRand(func() float64 { return 0.99 }),
+	)
+	var hedges atomic.Int32
+	fn := func(_ context.Context, hc HedgeController) (int, error) {
+		if hc.IsHedge() {
+			hedges.Add(1)
+			return 2, nil
+		}
+		time.Sleep(30 * time.Millisecond)
+		return 1, nil
+	}
+	got, err := Execute(h, context.Background(), fn)
+	require.NoError(t, err)
+	assert.Equal(t, 1, got)
+	assert.Zero(t, hedges.Load())
+	assert.Equal(t, int64(0), h.Stats().Hedges)
+}
+
+func TestExecute_HedgeProbability_AllowsFanout(t *testing.T) {
+	h := New(
+		WithDelay(5*time.Millisecond),
+		WithMaxParallel(2),
+		WithHedgeProbability(0.5),
+		withRand(func() float64 { return 0.1 }),
+	)
+	fn := func(ctx context.Context, hc HedgeController) (int, error) {
+		if hc.IsHedge() {
+			return 2, nil
+		}
+		<-ctx.Done()
+		return 0, ctx.Err()
+	}
+	got, err := Execute(h, context.Background(), fn)
+	require.NoError(t, err)
+	assert.Equal(t, 2, got)
+	assert.Greater(t, h.Stats().Hedges, int64(0))
 }
 
 func TestExecute_ImmediateSuccess(t *testing.T) {
@@ -291,6 +364,82 @@ func TestController_Cancel_Withdraws(t *testing.T) {
 	assert.Equal(t, "hedge", got)
 }
 
+func TestController_Cancel_CancelsCopyContext(t *testing.T) {
+	sawCancel := make(chan struct{})
+	fn := func(ctx context.Context, hc HedgeController) (string, error) {
+		if hc.IsHedge() {
+			<-sawCancel
+			return "hedge", nil
+		}
+		hc.Cancel()
+		select {
+		case <-ctx.Done():
+			close(sawCancel)
+			return "", ctx.Err()
+		case <-time.After(time.Second):
+			close(sawCancel)
+			t.Error("copy context was not cancelled")
+			return "", errors.New("copy context live after Cancel")
+		}
+	}
+	h := New(WithDelay(10*time.Millisecond), WithMaxParallel(2))
+	got, err := Execute(h, context.Background(), fn)
+	require.NoError(t, err)
+	assert.Equal(t, "hedge", got)
+}
+
+func TestController_Cancel_DoesNotCancelSibling(t *testing.T) {
+	fn := func(ctx context.Context, hc HedgeController) (string, error) {
+		if !hc.IsHedge() {
+			hc.Cancel()
+			<-ctx.Done()
+			return "", ctx.Err()
+		}
+		select {
+		case <-ctx.Done():
+			return "", errors.New("sibling context was cancelled")
+		default:
+		}
+		return "hedge", nil
+	}
+	h := New(WithDelay(15*time.Millisecond), WithMaxParallel(2))
+	got, err := Execute(h, context.Background(), fn)
+	require.NoError(t, err)
+	assert.Equal(t, "hedge", got)
+}
+
+func TestController_Cancel_WithdrawnCopyStillReaped(t *testing.T) {
+	fn := func(ctx context.Context, hc HedgeController) (int, error) {
+		hc.Cancel()
+		<-ctx.Done()
+		return 0, ctx.Err()
+	}
+	h := New(WithDelay(5*time.Millisecond), WithMaxParallel(3))
+	_, err := Execute(h, context.Background(), fn)
+	require.ErrorIs(t, err, ErrAllFailed)
+}
+
+func TestExecute_FirstWinStillCancelsLosers(t *testing.T) {
+	loserDone := make(chan struct{})
+	fn := func(ctx context.Context, hc HedgeController) (string, error) {
+		if hc.IsHedge() {
+			return "hedge", nil
+		}
+		<-ctx.Done()
+		close(loserDone)
+		return "", ctx.Err()
+	}
+	h := New(WithDelay(10*time.Millisecond), WithMaxParallel(2))
+	got, err := Execute(h, context.Background(), fn)
+	require.NoError(t, err)
+	assert.Equal(t, "hedge", got)
+	select {
+	case <-loserDone:
+	case <-time.After(time.Second):
+		t.Fatal("losing copy's context was not cancelled")
+	}
+}
+
 func TestController_Cancel_Idempotent(t *testing.T) {
 	e := &execution{attempt: 1}
 	e.Cancel()
@@ -383,6 +532,22 @@ func TestLaunchableCount(t *testing.T) {
 	assert.Equal(t, 2, launchableCount([]HedgeFunc[int]{okFn(1), nil, okFn(2)}))
 }
 
+func TestFirstNonNil(t *testing.T) {
+	assert.Nil(t, firstNonNil([]HedgeFunc[int]{nil, nil}))
+	got := firstNonNil([]HedgeFunc[int]{nil, okFn(7)})
+	require.NotNil(t, got)
+	v, err := got(context.Background(), &execution{})
+	require.NoError(t, err)
+	assert.Equal(t, 7, v)
+}
+
+func TestHedgerRand_DefaultSource(t *testing.T) {
+	h := New(WithHedgeProbability(0.5))
+	r := h.rand()
+	assert.GreaterOrEqual(t, r, 0.0)
+	assert.Less(t, r, 1.0)
+}
+
 func TestDelayFor(t *testing.T) {
 	delays := []time.Duration{100 * time.Millisecond, 200 * time.Millisecond}
 	d, ok := delayFor(delays, 1)
@@ -469,7 +634,7 @@ func TestRun_DropsResultWhenContextCancelled(t *testing.T) {
 	cancel()
 	ch := make(chan result[int])
 	hc := &execution{attempt: 1, backends: 1, start: time.Now()}
-	run(New(), ctx, func(context.Context, HedgeController) (int, error) {
+	run(New(), ctx, ctx, func(context.Context, HedgeController) (int, error) {
 		return 1, nil
 	}, hc, ch)
 	select {
@@ -657,7 +822,38 @@ func TestExecute_OnHedgeCallback(t *testing.T) {
 	}
 	_, err := Execute(h, context.Background(), fn)
 	require.NoError(t, err)
-	testx.Eventually(t, func() bool { return fired.Load() == 2 }, time.Second)
+	assert.Equal(t, int32(2), fired.Load())
+}
+
+func TestExecute_OnHedgeRunsSynchronously(t *testing.T) {
+	var (
+		mu    sync.Mutex
+		order []string
+	)
+	h := New(
+		WithDelay(10*time.Millisecond),
+		WithMaxParallel(2),
+		WithOnHedge(func(int) {
+			mu.Lock()
+			order = append(order, "hook")
+			mu.Unlock()
+		}),
+	)
+	fn := func(ctx context.Context, hc HedgeController) (int, error) {
+		if hc.IsHedge() {
+			mu.Lock()
+			order = append(order, "hedge")
+			mu.Unlock()
+			return 2, nil
+		}
+		<-ctx.Done()
+		return 0, ctx.Err()
+	}
+	_, err := Execute(h, context.Background(), fn)
+	require.NoError(t, err)
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Equal(t, []string{"hook", "hedge"}, order)
 }
 
 func TestExecute_OnHedgePanicIsContained(t *testing.T) {
@@ -725,12 +921,14 @@ func TestDelays(t *testing.T) {
 func TestExecute_RaceSafe(t *testing.T) {
 	h := New(WithDelay(time.Millisecond), WithMaxParallel(3))
 	testx.HammerNoError(t, 50, 200, func() error {
-		_, err := Execute(h, context.Background(), func(_ context.Context, hc HedgeController) (int, error) {
+		_, err := Execute(h, context.Background(), func(ctx context.Context, hc HedgeController) (int, error) {
 			if hc.IsHedge() {
 				return hc.Attempt(), nil
 			}
-			return 1, nil
+			<-ctx.Done()
+			return 0, ctx.Err()
 		})
 		return err
 	})
+	assert.Greater(t, h.Stats().Hedges, int64(0))
 }

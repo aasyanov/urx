@@ -49,6 +49,8 @@ type config struct {
 	halfOpenMax      int
 	successThreshold int
 	onStateChange    func(from, to State)
+	failureIf        func(error) bool
+	countCanceled    bool
 	op               string
 }
 
@@ -154,14 +156,38 @@ func WithSuccessThreshold(n int) Option {
 // WithOnStateChange registers a callback invoked on every state transition,
 // receiving the previous and new [State]. Use it for metrics or logging; it
 // runs synchronously on the goroutine that drives the transition and must not
-// block or panic. The hook is not fired by [Breaker.Stats] — only by
-// [Breaker.State], [Execute], [TryExecute], and [Breaker.Reset]. A nil
-// callback is ignored.
+// block. A panic in the hook is recovered and discarded so it cannot crash the
+// caller. The hook is not fired by [Breaker.Stats] — only by [Breaker.State],
+// [Execute], [TryExecute], and [Breaker.Reset]. A nil callback is ignored.
 func WithOnStateChange(fn func(from, to State)) Option {
 	return func(c *config) {
 		if fn != nil {
 			c.onStateChange = fn
 		}
+	}
+}
+
+// WithFailureIf sets a predicate that decides whether a remaining error counts
+// as a circuit failure. [CircuitController.SkipFailure] always wins and is not
+// filtered here. [context.Canceled] is ignored before this predicate runs
+// unless [WithCountCanceled] is set. A recovered panic always counts and is
+// not passed to the predicate. When fn is nil the option is ignored and every
+// remaining error counts (the default).
+func WithFailureIf(fn func(error) bool) Option {
+	return func(c *config) {
+		if fn != nil {
+			c.failureIf = fn
+		}
+	}
+}
+
+// WithCountCanceled restores counting of post-admission [context.Canceled] as
+// a circuit failure. By default a cancel after the call is admitted is returned
+// to the caller but does not increment the consecutive-failure counter or trip
+// the breaker. [context.DeadlineExceeded] is counted regardless of this option.
+func WithCountCanceled() Option {
+	return func(c *config) {
+		c.countCanceled = true
 	}
 }
 

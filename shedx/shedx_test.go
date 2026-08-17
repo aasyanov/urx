@@ -84,6 +84,21 @@ func TestWithOp_OverridesDefault(t *testing.T) {
 	assert.Equal(t, opTryExecute, newConfig([]Option{WithOp("")}).opOrDefaultTry())
 }
 
+func TestNewConfig_SkipsNilOption(t *testing.T) {
+	cfg := newConfig([]Option{WithCapacity(50), nil, WithThreshold(0.5)})
+	assert.Equal(t, 50, cfg.capacity)
+	assert.InEpsilon(t, 0.5, cfg.threshold, 1e-9)
+}
+
+func TestWithHysteresis_IgnoresInvalid(t *testing.T) {
+	assert.InDelta(t, 0.0, newConfig(nil).hysteresis, 1e-9)
+	assert.InDelta(t, 0.0, newConfig([]Option{WithHysteresis(0)}).hysteresis, 1e-9)
+	assert.InDelta(t, 0.0, newConfig([]Option{WithHysteresis(-0.1)}).hysteresis, 1e-9)
+	assert.InDelta(t, 0.0, newConfig([]Option{WithThreshold(0.8), WithHysteresis(0.8)}).hysteresis, 1e-9)
+	assert.InDelta(t, 0.0, newConfig([]Option{WithThreshold(0.8), WithHysteresis(0.9)}).hysteresis, 1e-9)
+	assert.InDelta(t, 0.2, newConfig([]Option{WithHysteresis(0.2)}).hysteresis, 1e-9)
+}
+
 func TestWithCutoffs_AppliesCustomValues(t *testing.T) {
 	s := New(WithCutoffs(0.1, 0.5, 0.95))
 	st := s.Stats()
@@ -500,6 +515,57 @@ func TestExecute_NoDegradationByDefault(t *testing.T) {
 	assert.Equal(t, int64(0), s.Stats().Degraded)
 }
 
+func TestExecute_SkipSlotReleasesInFlight(t *testing.T) {
+	s := New(WithCapacity(10))
+	defer func() { require.NoError(t, s.Close()) }()
+
+	_, err := Execute(s, context.Background(), PriorityNormal,
+		func(_ context.Context, sc ShedController) (int, error) {
+			assert.Equal(t, int64(1), s.InFlight())
+			sc.SkipSlot()
+			assert.Equal(t, int64(0), s.InFlight())
+
+			tok, err := s.Acquire(PriorityNormal)
+			require.NoError(t, err)
+			assert.Equal(t, int64(1), s.InFlight(), "released slot must be reusable immediately")
+			tok.Release()
+			return 1, nil
+		})
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), s.InFlight())
+}
+
+func TestExecute_SkipSlotIdempotentWithDefer(t *testing.T) {
+	s := New(WithCapacity(10))
+	defer func() { require.NoError(t, s.Close()) }()
+
+	_, err := Execute(s, context.Background(), PriorityNormal,
+		func(_ context.Context, sc ShedController) (int, error) {
+			sc.SkipSlot()
+			sc.SkipSlot()
+			assert.Equal(t, int64(0), s.InFlight())
+			return 1, nil
+		})
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), s.InFlight(), "deferred release must not double-decrement")
+}
+
+func TestExecute_ShedDoesNotReleaseSlot(t *testing.T) {
+	s := New(WithCapacity(10))
+	defer func() { require.NoError(t, s.Close()) }()
+
+	_, err := Execute(s, context.Background(), PriorityNormal,
+		func(_ context.Context, sc ShedController) (int, error) {
+			assert.Equal(t, int64(1), s.InFlight())
+			sc.Shed()
+			assert.Equal(t, int64(1), s.InFlight(), "Shed records degradation only")
+			return 1, nil
+		})
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), s.InFlight())
+	assert.Equal(t, int64(1), s.Stats().Degraded)
+}
+
 func TestExecute_ControllerLoadSnapshot(t *testing.T) {
 	s := New(WithCapacity(10), WithThreshold(0.9))
 	defer func() { require.NoError(t, s.Close()) }()
@@ -568,6 +634,49 @@ func TestAdmits_UnknownPriorityTreatedAsHigh(t *testing.T) {
 	assert.False(t, s.admits(PriorityHigh, inflight))
 	assert.False(t, s.admits(Priority(50), inflight), "unknown priority must use high cutoff, not critical bypass")
 	assert.True(t, s.admits(PriorityCritical, inflight))
+}
+
+func TestAdmits_HysteresisKeepsSheddingInBand(t *testing.T) {
+	s := New(WithCapacity(100), WithThreshold(0.8), WithHysteresis(0.2))
+	defer func() { require.NoError(t, s.Close()) }()
+
+	assert.False(t, s.admits(PriorityLow, 90), "overload 0.5 latches shedding")
+	assert.True(t, s.shedding.Load())
+
+	_ = s.admits(PriorityLow, 70) // load 0.7 in (resume 0.6, threshold 0.8)
+	assert.True(t, s.shedding.Load(), "shedding stays latched in the hysteresis band")
+	assert.False(t, s.admits(PriorityLow, 90), "cutoffs still apply while latched")
+}
+
+func TestAdmits_HysteresisClearsBelowResume(t *testing.T) {
+	s := New(WithCapacity(100), WithThreshold(0.8), WithHysteresis(0.2))
+	defer func() { require.NoError(t, s.Close()) }()
+
+	assert.False(t, s.admits(PriorityLow, 90))
+	assert.True(t, s.shedding.Load())
+
+	assert.True(t, s.admits(PriorityLow, 50), "load 0.5 < resume 0.6 clears shedding and admits")
+	assert.False(t, s.shedding.Load())
+	assert.True(t, s.admits(PriorityLow, 70), "after resume, below-threshold admits all")
+}
+
+func TestAdmits_HysteresisZeroMatchesToday(t *testing.T) {
+	s := New(WithCapacity(100), WithThreshold(0.8), WithHysteresis(0))
+	defer func() { require.NoError(t, s.Close()) }()
+
+	assert.False(t, s.admits(PriorityLow, 90))
+	assert.False(t, s.shedding.Load(), "zero hysteresis never latches")
+	assert.True(t, s.admits(PriorityLow, 70), "below threshold admits without a latch")
+}
+
+func TestCritical_UnaffectedByHysteresis(t *testing.T) {
+	s := New(WithCapacity(100), WithThreshold(0.8), WithHysteresis(0.2))
+	defer func() { require.NoError(t, s.Close()) }()
+
+	assert.False(t, s.admits(PriorityLow, 90))
+	assert.True(t, s.shedding.Load())
+	assert.True(t, s.admits(PriorityCritical, 200))
+	assert.True(t, s.shedding.Load(), "critical bypass must not clear the latch")
 }
 
 func TestAllow_MatchesAdmission(t *testing.T) {

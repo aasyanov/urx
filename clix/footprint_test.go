@@ -13,7 +13,7 @@ func TestFootprint(t *testing.T) {
 	testx.AssertFootprint(t, []testx.SizeEntry{
 		{Name: "Parser", Size: testx.Sizeof[Parser](), Max: 48},
 		{Name: "Context", Size: testx.Sizeof[Context](), Max: 16},
-		{Name: "Command", Size: testx.Sizeof[Command](), Max: 192},
+		{Name: "Command", Size: testx.Sizeof[Command](), Max: 200},
 		{Name: "flagMeta", Size: testx.Sizeof[flagMeta](), Max: 112},
 	})
 }

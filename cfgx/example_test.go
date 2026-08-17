@@ -3,6 +3,7 @@ package cfgx_test
 import (
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/aasyanov/urx/cfgx"
 )
@@ -68,6 +69,49 @@ func ExampleParse_autoFix() {
 	// validation reported: true
 }
 
+type nestedServer struct {
+	Port int `json:"port" yaml:"port"`
+}
+
+func (s *nestedServer) Validate(fix bool) []error {
+	if s.Port <= 0 {
+		if fix {
+			s.Port = 8080
+		}
+		return []error{errors.New("must be > 0")}
+	}
+	return nil
+}
+
+type nestedConfig struct {
+	Server nestedServer `json:"server" yaml:"server"`
+}
+
+// ExampleValidate_slice walks Validators on slice elements with index paths.
+func ExampleValidate_slice() {
+	type list struct {
+		Servers []nestedServer `json:"servers"`
+	}
+	cfg := list{Servers: []nestedServer{{Port: 0}}}
+	err := cfgx.Parse([]byte(`{"servers":[{"port":0}]}`), &cfg, cfgx.WithFormat(cfgx.FormatJSON))
+	fmt.Println("slice validation:", errors.Is(err, cfgx.ErrValidationFailed))
+	fmt.Println("index path:", strings.Contains(err.Error(), "servers[0]"))
+	// Output:
+	// slice validation: true
+	// index path: true
+}
+
+// ExampleValidate_nested walks nested Validators and prefixes field paths.
+func ExampleValidate_nested() {
+	cfg := nestedConfig{Server: nestedServer{Port: 0}}
+	err := cfgx.Parse([]byte(`{"server":{"port":0}}`), &cfg, cfgx.WithFormat(cfgx.FormatJSON))
+	fmt.Println("nested validation:", errors.Is(err, cfgx.ErrValidationFailed))
+	fmt.Println("path prefix:", strings.Contains(err.Error(), "server"))
+	// Output:
+	// nested validation: true
+	// path prefix: true
+}
+
 // ExampleMarshal encodes a config to bytes in an explicit format.
 func ExampleMarshal() {
 	cfg := appConfig{Port: 3000, Host: "localhost"}
@@ -94,11 +138,14 @@ func ExampleLoad_pipeline() {
 	cfg := appConfig{Port: 8080, Host: "localhost"}
 
 	// 2. File layer (injected reader stands in for disk).
-	_ = cfgx.Load("config.yaml", &cfg,
+	if err := cfgx.Load("config.yaml", &cfg,
 		cfgx.WithReader(func(string) ([]byte, error) {
 			return []byte("port: 9090\n"), nil // host omitted → keeps default
 		}),
-	)
+	); err != nil {
+		fmt.Println("load:", err)
+		return
+	}
 
 	// 3. Environment layer would call envx.BindTo(env, "HOST", &cfg.Host).
 	//    Simulated here by writing the same pointer directly.

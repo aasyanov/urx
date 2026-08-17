@@ -39,6 +39,7 @@ type Option func(*config)
 type config struct {
 	capacity     int
 	threshold    float64
+	hysteresis   float64
 	cutoffLow    float64
 	cutoffNormal float64
 	cutoffHigh   float64
@@ -57,13 +58,18 @@ func newConfig(opts []Option) config {
 		cutoffHigh:   DefaultCutoffHigh,
 	}
 	for _, opt := range opts {
-		opt(&cfg)
+		if opt != nil {
+			opt(&cfg)
+		}
 	}
 	if cfg.capacity < minCapacity {
 		cfg.capacity = minCapacity
 	}
 	if cfg.threshold <= thresholdFloor || cfg.threshold > thresholdCeil {
 		cfg.threshold = DefaultThreshold
+	}
+	if cfg.hysteresis <= 0 || cfg.hysteresis >= cfg.threshold {
+		cfg.hysteresis = 0
 	}
 	cfg.normalizeCutoffs()
 	return cfg
@@ -151,6 +157,17 @@ func WithOp(op string) Option {
 	return func(c *config) {
 		if op != "" {
 			c.op = op
+		}
+	}
+}
+
+// WithHysteresis sets how far load must fall below the threshold before
+// shedding clears. Default 0 preserves today's trip-at-threshold behaviour.
+// Values <= 0 or >= the resolved threshold are ignored.
+func WithHysteresis(delta float64) Option {
+	return func(c *config) {
+		if delta > 0 {
+			c.hysteresis = delta
 		}
 	}
 }

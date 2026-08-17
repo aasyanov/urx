@@ -8,7 +8,8 @@ import (
 var (
 	// ErrClosed is returned by [Limiter.Acquire], [Execute], and related methods
 	// after [Limiter.Close] has been called. Safe to compare with == or
-	// [errors.Is].
+	// [errors.Is]. Also returned by a second [Limiter.CloseWithTimeout] after
+	// the first call has already begun shutdown.
 	ErrClosed = errors.New("adaptx: limiter is closed")
 
 	// ErrTimeout is returned when a blocking acquire exceeds its deadline before
@@ -26,6 +27,11 @@ var (
 	// ErrNilFunc is returned by [Execute] and [TryExecute] when the supplied
 	// function is nil. Safe to compare with == or [errors.Is].
 	ErrNilFunc = errors.New("adaptx: nil function")
+
+	// ErrDrainTimeout is returned by [Limiter.CloseWithTimeout] when in-flight
+	// work is still running after the drain deadline. The limiter stays closed;
+	// remaining work is not cancelled. Safe to compare with == or [errors.Is].
+	ErrDrainTimeout = errors.New("adaptx: drain timed out")
 )
 
 // errTimeout wraps [ErrTimeout] joining the underlying context cause.

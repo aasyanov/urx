@@ -2,6 +2,7 @@
 
 [CI](https://github.com/aasyanov/urx/actions/workflows/ci.yml)
 [Go Reference](https://pkg.go.dev/github.com/aasyanov/urx/cfgx)
+[Changelog](../CHANGELOG.md)
 [License: MIT](../LICENSE)
 
 Decode a config file (or byte slice) into a struct and encode it back, with format auto-detection, an optional self-fix validation seam, and injectable I/O for tests. Go 1.24+.
@@ -71,9 +72,11 @@ It is the deliberately small piece the other layers build on.
             │   yaml.v3   │   encoding/json   │   BurntSushi/toml   │
             └───────────────────────┬───────────────────────────────┘
                                     │
-                       dst implements Validator?
-                                    │  yes
+                       walk nested Validators (children, then parent)
+                                    │  structs · slice/array index · map keys
+                                    │
                        Validate(fix) ─► errors.Join under ErrValidationFailed
+                                    │  path-prefixed: file: field.path: cause
                                     │
                                     ▼
                               caller's struct
@@ -85,15 +88,15 @@ It is the deliberately small piece the other layers build on.
 
 ## How It Works
 
-`Load` runs a fixed sequence:
+`Load` runs a fixed sequence (**cold** — startup / reload, not a request path):
 
 1. **Validate the destination** — it must be a non-nil pointer, else [`ErrInvalidInput`].
-2. **Resolve the format** — explicit [`WithFormat`] wins; otherwise the file extension is mapped (`.yaml`/`.yml` → YAML, `.json` → JSON, `.toml` → TOML). An unknown extension yields [`ErrUnsupportedFormat`].
-3. **Read** — the injectable reader (default [os.ReadFile]) returns the bytes. A missing file becomes [`ErrNotFound`], or — with [`WithCreateIfMissing`] — triggers a write of the current defaults. Other I/O errors become [`ErrReadFailed`].
-4. **Decode** — the resolved codec unmarshals into the struct. Fields absent from the file keep their pre-load values, so defaults survive partial files. A decode failure becomes [`ErrParseFailed`].
-5. **Validate** — if the struct implements [`Validator`], it is called with `fix` equal to [`WithAutoFix`]. Remaining errors are joined under [`ErrValidationFailed`].
+2. **Resolve the format** — explicit [`WithFormat`] wins; otherwise the file extension is mapped (`.yaml`/`.yml` → YAML, `.json` → JSON, `.toml` → TOML). An unknown extension or unknown [`Format`] value yields [`ErrUnsupportedFormat`].
+3. **Read** — the injectable reader (default [os.ReadFile]) returns the bytes. A missing file becomes [`ErrNotFound`], or — with [`WithCreateIfMissing`] — triggers a write of the current defaults after a successful Validator walk. Other I/O errors become [`ErrReadFailed`].
+4. **Decode** — the resolved codec unmarshals into the struct. Fields absent from the file keep their pre-load values, so defaults survive partial files. A decode failure becomes [`ErrParseFailed`] (the codec may have written some fields already).
+5. **Validate** — exported nested structs, then slice/array elements and map values that can hold a [Validator], are walked post-order. Each [Validator] is called with `fix` equal to [`WithAutoFix`]. Remaining errors are joined under [`ErrValidationFailed`] with a field-path prefix (`server.port`, `servers[0].port`, `limits[api].rate`). Re-run after env/flags with [`Validate`] (pass [`WithFormat`] to keep tag names aligned with the file).
 
-`Parse` is the same pipeline minus steps 3–3a: it decodes a byte slice directly and requires an explicit format. `Save`/`Marshal` are the reverse direction.
+`Parse` is the same pipeline minus steps 3–3a: it decodes a byte slice directly and requires an explicit format. `Save`/`Marshal` are the reverse direction. The default writer creates missing parent directories before creating the file.
 
 ## Normative Contracts
 
@@ -101,12 +104,15 @@ It is the deliberately small piece the other layers build on.
 | Invariant           | Guarantee                                                                                                                                                |
 | ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Partial-file safety | Fields not present in the file retain their prior values.                                                                                                |
-| Validator timing    | `Validate` runs after a successful decode, or before writing when creating a missing file.                                                               |
+| Validator timing    | Nested walk after a successful decode, or before writing when creating a missing file. [`Validate`] re-walks after overlay. |
+| Nested Validators   | Every exported nested `Validator` on a struct field is called. Slice, array, and map elements whose type can hold a `Validator` are walked (`servers[0].port`, `limits[api].rate`). Leaf slices (`[]string`, `[]int`, …) are not descended. Nil pointers and unexported fields are skipped. |
+| Path-prefixed errors| Remaining causes wrap as `ErrValidationFailed: <file>: <field.path>: <cause>` (root has no field path). [`Validate`] without [`WithFormat`] prefers yaml → json → toml tags and falls through a `"-"` tag to the next codec. |
 | AutoFix reporting   | When `fix=true` repairs values but violations remain, they are joined under `ErrValidationFailed`. A validator that returns `nil` after repair succeeds. |
+| Create-if-missing   | Remaining validation errors abort the write even if [`WithAutoFix`] repaired fields in memory. |
 | Marshal safety      | Unencodable values (including YAML encoder panics) return `ErrWriteFailed`; callers never crash.                                                         |
 | Text-file newline   | Every [`Marshal`]/`Save` payload ends with a trailing `\n`.                                                                                              |
-| Sentinel errors     | Every failure wraps a package sentinel; use [`errors.Is`].                                                                                               |
-| Injectable I/O      | `Load`/`Save` never touch disk when [`WithReader`]/[`WithWriter`] are supplied.                                                                          |
+| Sentinel errors     | Every failure wraps a package sentinel; use [`errors.Is`]. Unknown [`Format`] values are `ErrUnsupportedFormat`, not a panic.                             |
+| Injectable I/O      | `Load`/`Save` never touch disk when [`WithReader`]/[`WithWriter`] are supplied. The default writer creates missing parent directories.                    |
 | No urx imports      | cfgx imports no other urx subpackage; layering is via pointer sharing.                                                                                   |
 
 
@@ -153,29 +159,49 @@ func main() {
 The canonical 12-factor order — **defaults < file < env < flags** — is four blocks in `main()`, because every layer writes through pointers into the same struct:
 
 ```go
-cfg := Config{Port: 8080, Host: "localhost"}     // 1. defaults
+cfg := DefaultConfig() // compiled-in defaults
 
-_ = cfgx.Load("config.yaml", &cfg,               // 2. file
-	cfgx.WithCreateIfMissing())
+if err := cfgx.Load("config.yaml", &cfg, cfgx.WithCreateIfMissing()); err != nil {
+	if !errors.Is(err, cfgx.ErrValidationFailed) {
+		log.Fatal(err) // I/O / parse / format — do not continue on partial decode
+	}
+	// optional: still continue so env/flags can repair file-only validation
+}
 
-env := envx.New(envx.WithPrefix("APP"))          // 3. environment
-envx.BindTo(env, "PORT", &cfg.Port)              //    APP_PORT > file
+env := envx.New(envx.WithPrefix("APP"))
+envx.BindTo(env, "PORT", &cfg.Port) // absent keeps file
 envx.BindTo(env, "HOST", &cfg.Host)
 
-p := clix.New(os.Args[1:], "app", "my service",  // 4. flags (highest)
-	clix.AddFlag(&cfg.Port, "port", "p", cfg.Port, "listen port"),
+p := clix.New(os.Args[1:], "app", "my service",
+	clix.AddFlag(&cfg.Port, "port", "p", cfg.Port, "listen port"), // def MUST be live field
 	clix.AddFlag(&cfg.Host, "host", "", cfg.Host, "bind host"),
 )
 
+if errors.Is(p.Err(), clix.ErrHelp) {
+	fmt.Print(p.Help())
+	return
+}
+if errors.Is(p.Err(), clix.ErrVersion) {
+	fmt.Println(p.Version())
+	return
+}
 if err := errors.Join(env.Validate(), p.Err()); err != nil {
 	log.Fatal(err)
 }
-if errs := cfg.Validate(false); len(errs) > 0 { // validate once, at the end
-	log.Fatal(errors.Join(errs...))
+if err := cfgx.Validate(&cfg, false); err != nil {
+	log.Fatal(err)
 }
 ```
 
-Each layer is independent and unit-testable in isolation. cfgx provides only the file step and the [`Validator`] seam they share.
+`Required()` is CLI-presence only. Share only `string`, `int`, `bool`, `float64`, `time.Duration`, and `time.Time` with `AddFlag`. YAML duration `30s` works; JSON needs nanoseconds or a string you parse. Do not `Validate(..., true)` after flags.
+
+Each layer is independent and unit-testable in isolation. cfgx provides the file step and the nested [`Validator`] walk they share. A composition root's `Validate` should only check cross-field invariants — cfgx already walks children. After a JSON file, pass `cfgx.WithFormat(cfgx.FormatJSON)` to [`Validate`] so path prefixes keep JSON tag names.
+
+To keep JSON (or TOML) tag names on the final walk:
+
+```go
+_ = cfgx.Validate(&cfg, false, cfgx.WithFormat(cfgx.FormatJSON))
+```
 
 ### In-memory config (no filesystem)
 
@@ -208,6 +234,38 @@ cfgx.Load("config.yaml", &cfg, cfgx.WithAutoFix())
 cfgx.Save("config.yaml", &cfg) // write the corrected values back
 ```
 
+### Nested Validator (path-prefixed errors)
+
+```go
+type Server struct {
+	Port int `yaml:"port"`
+}
+
+func (s *Server) Validate(fix bool) []error {
+	if s.Port <= 0 {
+		return []error{fmt.Errorf("must be > 0")}
+	}
+	return nil
+}
+
+type Config struct {
+	Server Server `yaml:"server"`
+}
+
+if err := cfgx.Load("config.yaml", &cfg); err != nil {
+	if !errors.Is(err, cfgx.ErrValidationFailed) {
+		log.Fatal(err)
+	}
+}
+// ... env overlay ...
+if err := cfgx.Validate(&cfg, false); err != nil {
+	// errors.Is(err, cfgx.ErrValidationFailed)
+	// err.Error() contains "server" (and "server.port" when the Validator sits on Port)
+}
+```
+
+cfgx walks nested structs; remaining errors are path-prefixed. The library never writes secrets: the caller `Save`s before applying env, as in the pipeline above.
+
 
 
 ## API
@@ -215,19 +273,23 @@ cfgx.Save("config.yaml", &cfg) // write the corrected values back
 
 | Symbol                | Signature                                                       | Description                                             |
 | --------------------- | --------------------------------------------------------------- | ------------------------------------------------------- |
-| `Load`                | `Load(path string, dst any, opts ...Option) error`              | Read a file into dst, then validate.                    |
-| `Parse`               | `Parse(data []byte, dst any, opts ...Option) error`             | Decode bytes into dst (format required), then validate. |
-| `Save`                | `Save(path string, src any, opts ...Option) error`              | Encode src and write it to path.                        |
+| `Load`                | `Load(path string, dst any, opts ...Option) error`              | Read a file into dst, then walk Validators.     |
+| `Parse`               | `Parse(data []byte, dst any, opts ...Option) error`             | Decode bytes into dst, then walk Validators.    |
+| `Validate`            | `Validate(dst any, fix bool, opts ...Option) error`             | Nested Validator walk (end of pipeline).        |
+| `Save`                | `Save(path string, src any, opts ...Option) error`              | Encode src and write it to path.                |
 | `Marshal`             | `Marshal(src any, format Format) ([]byte, error)`               | Encode src to bytes in an explicit format.              |
 | `Format`              | `type Format uint8`                                             | Encoding selector.                                      |
-| `Format.String`       | `String() string`                                               | "auto" / "yaml" / "json" / "toml".                      |
+| `FormatAuto`          | `const Format`                                                  | Detect from extension on Load/Save; yaml→json→toml tags on Validate. |
+| `FormatYAML` / `FormatJSON` / `FormatTOML` | constants                              | Explicit codecs.                                        |
+| `Format.String`       | `String() string`                                               | "auto" / "yaml" / "json" / "toml" / "unknown".          |
+| `Option`              | `func(*config)`                                                 | Functional option; nil values are ignored.              |
 | `Validator`           | `interface { Validate(fix bool) []error }`                      | Optional self-check/self-repair hook.                   |
-| `WithFormat`          | `WithFormat(f Format) Option`                                   | Force a format instead of extension detection.          |
+| `WithFormat`          | `WithFormat(f Format) Option`                                   | Force a format (Load/Parse/Save/Validate).              |
 | `WithAutoFix`         | `WithAutoFix() Option`                                          | Call `Validate(true)` so the struct can repair itself.  |
 | `WithCreateIfMissing` | `WithCreateIfMissing() Option`                                  | Write defaults when the file is absent.                 |
 | `WithFileMode`        | `WithFileMode(mode os.FileMode) Option`                         | Permission bits for created files (default 0o644).      |
 | `WithReader`          | `WithReader(fn func(string) ([]byte, error)) Option`            | Inject the file reader.                                 |
-| `WithWriter`          | `WithWriter(fn func(string, []byte, os.FileMode) error) Option` | Inject the file writer.                                 |
+| `WithWriter`          | `WithWriter(fn func(string, []byte, os.FileMode) error) Option` | Inject the file writer (skips default MkdirAll).        |
 
 
 
@@ -237,12 +299,12 @@ cfgx.Save("config.yaml", &cfg) // write the corrected values back
 
 | Option                | Default        | Effect                                      |
 | --------------------- | -------------- | ------------------------------------------- |
-| `WithFormat`          | `FormatAuto`   | Detects from extension when auto.           |
-| `WithAutoFix`         | disabled       | `fix=false` (report only) when disabled.    |
-| `WithCreateIfMissing` | disabled       | Missing file → `ErrNotFound` when disabled. |
+| `WithFormat`          | `FormatAuto`   | Detects from extension when auto. On `Validate`, yaml → json → toml tags. |
+| `WithAutoFix`         | disabled       | `fix=false` (report only) when disabled. Applies to Load/Parse. |
+| `WithCreateIfMissing` | disabled       | Missing file → `ErrNotFound` when disabled. Remaining errors skip the write. |
 | `WithFileMode`        | `0o644`        | Applied by `Save` and create-if-missing.    |
 | `WithReader`          | `os.ReadFile`  | nil is ignored.                             |
-| `WithWriter`          | `os.WriteFile` | nil is ignored.                             |
+| `WithWriter`          | `writeFile`    | MkdirAll + `os.WriteFile`; nil is ignored. Injected writers do not MkdirAll. |
 
 
 
@@ -253,7 +315,7 @@ cfgx.Save("config.yaml", &cfg) // write the corrected values back
 | Error                  | Condition                                                            |
 | ---------------------- | -------------------------------------------------------------------- |
 | `ErrInvalidInput`      | dst is not a non-nil pointer, or src is nil.                         |
-| `ErrUnsupportedFormat` | Unknown file extension, or `FormatAuto` passed to `Parse`/`Marshal`. |
+| `ErrUnsupportedFormat` | Unknown file extension, unknown `Format` value, or `FormatAuto` passed to `Parse`/`Marshal`. |
 | `ErrNotFound`          | File absent and `WithCreateIfMissing` not set.                       |
 | `ErrReadFailed`        | File exists but cannot be read.                                      |
 | `ErrParseFailed`       | Data cannot be decoded into the struct.                              |
@@ -269,22 +331,34 @@ cfgx.Save("config.yaml", &cfg) // write the corrected values back
 > `Parse` and `Marshal` require an explicit format. There is no extension to infer from a byte slice, so `FormatAuto` (the zero value) returns `ErrUnsupportedFormat`. Always pass `WithFormat(...)` to `Parse` and a concrete `Format` to `Marshal`.
 
 > [!WARNING]
-> Validate at the *end* of the pipeline, not inside `Load`, when you layer env and flags on top. `Load` validates the file-only state; if env or flags will still override fields, call `cfg.Validate(false)` once after the whole chain so you validate the final values.
+> Validate at the *end* of the pipeline, not only inside `Load`, when you layer env and flags on top. `Load` validates the file-only state; after env or flags, call [`Validate`] so nested validators see the final values. A root `Validate` that re-calls children will double-invoke them. Pass [`WithFormat`] when the file was JSON or TOML so path prefixes keep that codec's tag names — the default prefers yaml tags.
 
 > [!WARNING]
-> `WithAutoFix` still reports when the [`Validator`] returns errors after the fix pass. A validator that repairs every violation and returns `nil` produces no error — `Load`/`Parse` succeed. When errors remain, check `errors.Is(err, ErrValidationFailed)` and decide whether a partially repaired config is acceptable.
+> Exported anonymous embeds that implement [`Validator`] are called once on the field, not again through a promoted method on the parent. Do not re-call those children from a parent `Validate`. Nil pointer embeds are skipped and do not panic.
+
+> [!NOTE]
+> Nested walk is an enhancement: configs whose children already implemented `Validate(fix bool) []error` but were never called will start reporting those errors. The same applies to Validators on slice, array, and map elements.
+
+> [!WARNING]
+> `WithAutoFix` still reports when the [`Validator`] returns errors after the fix pass. A validator that repairs every violation and returns `nil` produces no error — `Load`/`Parse` succeed. When errors remain, check `errors.Is(err, ErrValidationFailed)` and decide whether a partially repaired config is acceptable. [`WithCreateIfMissing`] does **not** write the file while validation errors remain, even if some fields were repaired in memory.
 
 > [!WARNING]
 > Empty input is codec-dependent. YAML and TOML accept an empty byte slice (dst keeps its prior values); JSON returns [`ErrParseFailed`]. Do not assume all three codecs treat `""` the same way.
 
+> [!WARNING]
+> A decode error does not roll dst back. Codecs may fill some fields and then return [`ErrParseFailed`]. Treat a failed `Load`/`Parse` as an untrusted struct. Absent keys keep Go defaults (all codecs). JSON `null` into a non-pointer scalar is a no-op (`encoding/json`); the default stays. YAML `null` / `~` / an empty key into a non-pointer scalar is also a no-op with yaml.v3. JSON or YAML null into a pointer field sets it to nil. YAML `host: ""` does write an empty string. Unknown keys are ignored (codec default).
+
 > [!NOTE]
-> Every [`Save`] and create-if-missing write ends with a trailing newline (POSIX text-file convention). Codecs may still normalise strings: JSON rewrites invalid UTF-8 to U+FFFD and YAML trims surrounding whitespace. Treat config values as well-formed UTF-8; do not rely on byte-exact preservation of pathological strings.
+> Every [`Save`] and create-if-missing write ends with a trailing newline (POSIX text-file convention). Codecs may still normalise strings: JSON rewrites invalid UTF-8 to U+FFFD and YAML trims surrounding whitespace. Treat config values as well-formed UTF-8; do not rely on byte-exact preservation of pathological strings. Unknown keys in the file are ignored (codec default). `Load`/`Save` are blocking I/O without `context.Context` — they run at startup or on an explicit reload.
+
+> [!NOTE]
+> Nil [`Option`] values are ignored. `WithFormat(Format(99))` returns [`ErrUnsupportedFormat`]; it does not panic.
 
 
 
 ## Safety and Concurrency
 
-`Load`, `Parse`, `Save`, and `Marshal` are pure functions over their arguments and hold no package state — they are safe to call concurrently *as long as each call targets a distinct struct*. Concurrent calls that share the same `dst`/`src` pointer race, exactly as any concurrent struct access would. There is no global state, no caching, and no background goroutine.
+`Load`, `Parse`, `Save`, `Marshal`, and `Validate` are pure functions over their arguments and hold no package state — they are safe to call concurrently *as long as each call targets a distinct struct*. Concurrent calls that share the same `dst`/`src` pointer race, exactly as any concurrent struct access would. There is no global state, no caching, and no background goroutine. `Load`/`Save` perform blocking I/O and do not take `context.Context`.
 
 ## Benchmarks
 
@@ -308,17 +382,17 @@ Three environments, two hardware classes, two operating systems. All values are 
 ### Parse / Marshal
 
 
-| Benchmark                    | What it measures      | Laptop      | Linux       | Windows | B/op | allocs/op |
-| ---------------------------- | --------------------- | ----------- | ----------- | ------- | ---- | --------- |
-| Parse_YAML                   | yaml.v3 decode        | **6.59 µs** | 4.23 µs | 9.94 µs | 7472 | 54 |
-| Parse_JSON                   | stdlib JSON decode    | **823 ns**  | 509.2 ns | 1010 ns | 272 | 7 |
-| Parse_TOML                   | BurntSushi decode     | **4.22 µs** | 2.54 µs | 5.72 µs | 3544 | 37 |
-| Parse_JSON_Parallel          | JSON decode, parallel | **389 ns**  | 223 ns | 506.5 ns | 272 | 7 |
-| Marshal_YAML                 | yaml.v3 encode        | 4.30 µs     | **2.66 µs** | 5.84 µs | 6832 | 27 |
-| Marshal_JSON                 | stdlib JSON encode    | **497 ns**  | 298.7 ns | 547.2 ns | 96 | 2 |
-| Load_InjectedReader          | Parse via `io.Reader` | **6.81 µs** | 4.35 µs | 10.02 µs | 7472 | 54 |
-| Load_InjectedReader_Parallel | Load, parallel        | 6.01 µs     | **2.71 µs** | 8.52 µs | 7472 | 54 |
-| ResolveFormat                | Extension → `Format`  | **13.8 ns** | 11.5 ns | 14.2 ns | 0 | 0 |
+| Benchmark                    | Class | What it measures              | Laptop      | Linux       | Windows | B/op | allocs/op |
+| ---------------------------- | ----- | ----------------------------- | ----------- | ----------- | ------- | ---- | --------- |
+| Parse_YAML                   | cold  | yaml.v3 decode                | **6.59 µs** | 4.23 µs | 9.94 µs | 7472 | 54 |
+| Parse_JSON                   | cold  | stdlib JSON decode            | **823 ns**  | 509.2 ns | 1010 ns | 272 | 7 |
+| Parse_TOML                   | cold  | BurntSushi decode             | **4.22 µs** | 2.54 µs | 5.72 µs | 3544 | 37 |
+| Parse_JSON_Parallel          | cold  | JSON decode, parallel         | **389 ns**  | 223 ns | 506.5 ns | 272 | 7 |
+| Marshal_YAML                 | cold  | yaml.v3 encode                | 4.30 µs     | **2.66 µs** | 5.84 µs | 6832 | 27 |
+| Marshal_JSON                 | cold  | stdlib JSON encode            | **497 ns**  | 298.7 ns | 547.2 ns | 96 | 2 |
+| Load_InjectedReader          | cold  | Parse via injected `WithReader` | **6.81 µs** | 4.35 µs | 10.02 µs | 7472 | 54 |
+| Load_InjectedReader_Parallel | cold  | Load, parallel                | 6.01 µs     | **2.71 µs** | 8.52 µs | 7472 | 54 |
+| ResolveFormat                | cold  | Extension → `Format`          | **13.8 ns** | 11.5 ns | 14.2 ns | 0 | 0 |
 
 
 
@@ -337,20 +411,31 @@ Three environments, two hardware classes, two operating systems. All values are 
 
 **Parallel benchmarks confirm statelessness.** `Parse_JSON_Parallel` scales to ~223 ns/op on CI because each goroutine owns its own `dst` — no mutex, no shared cache. `Load_InjectedReader_Parallel` is faster than serial on Linux (2.7 µs vs 4.3 µs) because four decoders saturate cores; laptop parallel load (6.0 µs) does not beat serial due to memory bandwidth limits on 15W silicon.
 
-**Allocation floor is the codec's, not cfgx's.** cfgx adds a handful of allocations (option closures, validator interface check); everything else is the third-party decoder. Config loading runs once at startup — pick JSON when format choice is yours.
+**Allocation floor is the codec's, not cfgx's.** cfgx adds a handful of allocations (option closures, validator interface check); everything else is the third-party decoder. Every bench above is **cold** — config loading runs once at startup or on an explicit reload, not per request. Pick JSON when format choice is yours.
 
 ## Quality
 
 
 | Metric         | Value                                             |
 | -------------- | ------------------------------------------------- |
-| Test functions | 32                                                |
+| Test functions | 70                                                |
 | Benchmarks     | 9                                                 |
 | Fuzz targets   | 2                                                 |
-| Examples       | 5                                                 |
-| Coverage       | 99.2%                                             |
+| Examples       | 7                                                 |
+| Coverage       | 97.8% of statements                               |
 | Race detector  | All pass                                          |
-| External deps  | 2 (yaml.v3, BurntSushi/toml; testify in dev only) |
+| External deps  | 2 (yaml.v3, BurntSushi/toml; testify in tests only) |
+
+
+```
+go test -race -count=1 ./cfgx/
+golangci-lint run ./cfgx/
+go test -run='^$' -bench='.' -benchmem -count=3 ./cfgx/
+go test -fuzz=FuzzParse -fuzztime=30s ./cfgx/
+go test -fuzz=FuzzMarshalRoundTrip -fuzztime=30s ./cfgx/
+go test -coverprofile=cover.out ./cfgx/
+go tool cover -func=cover.out
+```
 
 
 
@@ -359,16 +444,18 @@ Three environments, two hardware classes, two operating systems. All values are 
 
 ```
 cfgx/
-├── cfgx.go            # package doc, Load, Parse, Save, Marshal, internal helpers
+├── cfgx.go            # package doc, Load, Parse, Save, Marshal
+├── validate.go        # nested Validator walk (structs, slices, maps), Validate
 ├── types.go           # Format enum + String, Validator interface
 ├── options.go         # config struct, defaults, WithXxx options
 ├── codec.go           # resolveFormat, marshal, unmarshal
 ├── errors.go          # sentinel errors + internal wrapper helpers
 ├── cfgx_test.go       # unit + table-driven tests
+├── validate_test.go   # nested Validator / path / cycle tests
 ├── footprint_test.go  # testx.AssertFootprint bounds for core types
 ├── bench_test.go      # benchmarks per codec (sequential + parallel)
 ├── fuzz_test.go       # never-panic + round-trip fuzz targets
-├── example_test.go    # runnable GoDoc examples (incl. the pipeline)
+├── example_test.go    # runnable GoDoc examples (incl. nested + slice Validate)
 └── README.md          # this file
 ```
 

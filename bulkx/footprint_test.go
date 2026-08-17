@@ -8,10 +8,10 @@ import (
 
 func TestFootprint(t *testing.T) {
 	testx.AssertFootprint(t, []testx.SizeEntry{
-		{Name: "config", Size: testx.Sizeof[config](), Max: 32},
-		{Name: "Bulkhead", Size: testx.Sizeof[Bulkhead](), Max: 96},
+		{Name: "config", Size: testx.Sizeof[config](), Max: 40},
+		{Name: "Bulkhead", Size: testx.Sizeof[Bulkhead](), Max: 112},
 		{Name: "Token", Size: testx.Sizeof[Token](), Max: 16},
 		{Name: "execution", Size: testx.Sizeof[execution](), Max: 24},
-		{Name: "Stats", Size: testx.Sizeof[Stats](), Max: 40},
+		{Name: "Stats", Size: testx.Sizeof[Stats](), Max: 48},
 	})
 }

@@ -56,12 +56,16 @@ const (
 // zero value and one of the package sentinel errors, each wrapping the
 // underlying cause:
 //   - [ErrExhausted]: every attempt failed, or a non-retryable error stopped
-//     the loop early
-//   - [ErrCancelled]: the context was cancelled or expired
+//     the loop early, and the context is still live
+//   - [ErrCancelled]: the context was cancelled or expired — including after
+//     a failed last attempt when ctx.Err() is already set
 //   - [ErrAborted]: the caller called [RetryController.Abort]
+//   - [ErrMaxElapsed]: [WithMaxElapsed] expired before a later attempt
 //
 // Each attempt runs under [panix.Safe]; a recovered panic is reported as a
 // [*panix.PanicError] and handled like any other (retryable) failure.
+// [WithOnRetry] runs under [panix.SafeVoid]; a panicking hook becomes a
+// [*panix.PanicError] and stops retrying.
 //
 // Do is safe for concurrent use from multiple goroutines: each call owns its
 // resolved configuration, per-attempt [RetryController], and backoff timer;
@@ -74,12 +78,15 @@ func Do[T any](ctx context.Context, fn RetryFunc[T], opts ...Option) (T, error) 
 		return zero, ErrNilFunc
 	}
 
-	start := time.Now()
+	start := cfg.now()
 	var lastErr error
 
 	for i := range cfg.maxAttempts {
 		if err := ctx.Err(); err != nil {
 			return zero, errCancelled(err)
+		}
+		if i > 0 && cfg.maxElapsed > 0 && cfg.now().Sub(start) >= cfg.maxElapsed {
+			return zero, errMaxElapsed(lastErr)
 		}
 
 		rc := &attempt{number: i + 1, lastErr: lastErr, start: start}
@@ -94,6 +101,9 @@ func Do[T any](ctx context.Context, fn RetryFunc[T], opts ...Option) (T, error) 
 		if rc.aborted {
 			return zero, errAborted(rc.number, lastErr)
 		}
+		if err := ctx.Err(); err != nil {
+			return zero, errCancelled(err)
+		}
 		if !isRetryable(&cfg, lastErr) {
 			return zero, errExhausted(rc.number, lastErr)
 		}
@@ -101,15 +111,46 @@ func Do[T any](ctx context.Context, fn RetryFunc[T], opts ...Option) (T, error) 
 			break
 		}
 
-		if cfg.onRetry != nil {
-			cfg.onRetry(rc.number, lastErr)
+		if err := fireOnRetry(&cfg, rc.number, lastErr); err != nil {
+			return zero, err
 		}
-		if err := sleep(ctx, backoff(&cfg, i)); err != nil {
+		if err := sleep(ctx, delayAfter(&cfg, rc.number, lastErr, i, start)); err != nil {
 			return zero, errCancelled(err)
 		}
 	}
 
 	return zero, errExhausted(cfg.maxAttempts, lastErr)
+}
+
+// fireOnRetry invokes the configured OnRetry hook under panic recovery. A
+// panicking hook becomes a [*panix.PanicError] and stops the retry loop.
+func fireOnRetry(cfg *config, attempt int, err error) error {
+	if cfg.onRetry == nil {
+		return nil
+	}
+	return panix.SafeVoid(cfg.opOrDefault(), func() error {
+		cfg.onRetry(attempt, err)
+		return nil
+	})
+}
+
+// delayAfter returns the sleep before the next attempt: [WithDelayFunc] when
+// set, otherwise exponential backoff with jitter. When [WithMaxElapsed] is
+// set the delay is clamped to the remaining budget.
+func delayAfter(cfg *config, attempt int, err error, i int, start time.Time) time.Duration {
+	var d time.Duration
+	if cfg.delayFunc != nil {
+		d = cfg.delayFunc(attempt, err)
+	} else {
+		d = backoff(cfg, i)
+	}
+	if cfg.maxElapsed > 0 {
+		remaining := cfg.maxElapsed - cfg.now().Sub(start)
+		if remaining < d {
+			d = remaining
+		}
+	}
+	return d
 }
 
 // sleep blocks for d or until ctx is cancelled, returning ctx.Err() in the
@@ -149,7 +190,11 @@ func backoff(cfg *config, i int) time.Duration {
 	if d > float64(cfg.maxBackoff) {
 		d = float64(cfg.maxBackoff)
 	}
-	if cfg.jitter {
+	switch cfg.jitterMode {
+	case jitterModeEqual:
+		half := d * jitterFloor
+		d = half + rand.Float64()*half
+	case jitterModeMultiplicative:
 		d *= jitterFloor + rand.Float64()*jitterSpan
 	}
 	return time.Duration(d)

@@ -44,6 +44,7 @@ package circuitx
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -62,11 +63,12 @@ import (
 type Breaker struct {
 	cfg config
 
-	state            atomic.Uint32 // current State
-	failures         atomic.Int32  // consecutive failures in Closed
-	lastOpen         atomic.Int64  // UnixNano of the last Open transition
-	halfOpenInflight   atomic.Int32 // probes currently admitted in HalfOpen
-	halfOpenSuccesses  atomic.Int32 // consecutive probe successes in HalfOpen
+	state             atomic.Uint32 // current State
+	failures          atomic.Int32  // consecutive failures in Closed
+	lastOpen          atomic.Int64  // UnixNano of the last Open transition
+	halfOpenInflight  atomic.Int32  // probes currently admitted in HalfOpen
+	halfOpenSuccesses atomic.Int32  // consecutive probe successes in HalfOpen
+	generation        atomic.Uint64 // HalfOpen epoch; stale probes must not settle
 
 	successes atomic.Uint64
 	totalFail atomic.Uint64
@@ -101,6 +103,7 @@ func (b *Breaker) State() State {
 		return Open
 	}
 	if b.state.CompareAndSwap(uint32(Open), uint32(HalfOpen)) {
+		b.generation.Add(1)
 		b.halfOpenInflight.Store(0)
 		b.halfOpenSuccesses.Store(0)
 		b.fireStateChange(Open, HalfOpen)
@@ -119,17 +122,21 @@ func (b *Breaker) Failures() int {
 // Reset forces the circuit back to [Closed] and clears the consecutive failure
 // counter and the half-open probe budget. It does not affect the cumulative
 // [Stats] counters. In-flight probes are allowed to finish; their deferred slot
-// release is a no-op once [Reset] has cleared the budget, so the counter never
-// goes negative. Use it to clear a tripped breaker after an out-of-band recovery
-// signal. Reset fires the [WithOnStateChange] hook when it changes the state.
-// It runs under the transition mutex so it never races a concurrent trip or
-// probe settlement.
+// release is a no-op once [Reset] has bumped the HalfOpen generation and cleared
+// the budget, so the counter never goes negative and a stale probe cannot heal
+// or re-open the breaker. Use it to clear a tripped breaker after an out-of-band
+// recovery signal. Reset fires the [WithOnStateChange] hook when it changes the
+// state. It runs under the transition mutex so it never races a concurrent trip
+// or probe settlement.
 func (b *Breaker) Reset() {
 	b.mu.Lock()
 	b.failures.Store(0)
+	prev := State(b.state.Swap(uint32(Closed)))
+	if prev != Closed {
+		b.generation.Add(1)
+	}
 	b.halfOpenInflight.Store(0)
 	b.halfOpenSuccesses.Store(0)
-	prev := State(b.state.Swap(uint32(Closed)))
 	b.mu.Unlock()
 	if prev != Closed {
 		b.fireStateChange(prev, Closed)
@@ -188,13 +195,22 @@ func (b *Breaker) IsClosed() bool {
 // Otherwise fn runs under [panix.Safe]: a panic becomes a [*panix.PanicError]
 // and is treated as a failure.
 //
-// On success the breaker records the call and, if it was probing in [HalfOpen]
-// or carrying failures in [Closed], resets to a clean [Closed]. On failure it
+// On success the breaker records the call. A success in [Closed] clears the
+// consecutive-failure counter. A success in [HalfOpen] heals to [Closed] only
+// after [WithSuccessThreshold] consecutive probe successes (default 1) — one
+// probe success does not always close the breaker. On a counted failure it
 // records the failure and may trip to [Open] once the consecutive-failure
 // threshold is reached, or immediately if the failure occurred in [HalfOpen] or
 // the callback called [CircuitController.Trip]. The callback's return value is
-// always passed through to the caller together with any error. A failure marked
-// with [CircuitController.SkipFailure] is returned to the caller but not counted.
+// always passed through to the caller together with any error.
+//
+// A failure marked with [CircuitController.SkipFailure] is returned to the
+// caller but not counted (SkipFailure always wins). After admission,
+// [context.Canceled] is not counted as a downstream failure unless
+// [WithCountCanceled] is set; [context.DeadlineExceeded] is still counted. When
+// [WithFailureIf] is set it classifies remaining errors (it is not asked for a
+// [context.Canceled] that is being ignored). A panic recovered by [panix.Safe]
+// is always counted.
 //
 // The callback receives a [CircuitController] exposing the state and failure
 // count at admission time.
@@ -210,11 +226,11 @@ func Execute[T any](b *Breaker, ctx context.Context, fn CircuitFunc[T]) (T, erro
 		return zero, errCancelled(err)
 	}
 
-	state, ok := b.tryAdmit()
+	state, gen, ok := b.tryAdmit()
 	if !ok {
 		return zero, ErrOpen
 	}
-	return executeRun(b, ctx, b.cfg.opOrDefault(), state, fn)
+	return executeRun(b, ctx, b.cfg.opOrDefault(), state, gen, fn)
 }
 
 // TryExecute attempts to run fn without blocking. If the circuit admits the call
@@ -238,31 +254,35 @@ func TryExecute[T any](b *Breaker, ctx context.Context, fn CircuitFunc[T]) (bool
 		return false, zero, errCancelled(err)
 	}
 
-	state, ok := b.tryAdmit()
+	state, gen, ok := b.tryAdmit()
 	if !ok {
 		return false, zero, nil
 	}
-	val, err := executeRun(b, ctx, b.cfg.opOrDefaultTry(), state, fn)
+	val, err := executeRun(b, ctx, b.cfg.opOrDefaultTry(), state, gen, fn)
 	return true, val, err
 }
 
 // tryAdmit evaluates circuit admission after guard checks. It returns the state
-// at admission and whether the call was let through. A rejection increments
-// the rejected counter.
-func (b *Breaker) tryAdmit() (state State, ok bool) {
+// and HalfOpen generation at admission and whether the call was let through.
+// A rejection increments the rejected counter. Generation is captured here —
+// immediately after [Breaker.State] may have promoted Open→HalfOpen — so a
+// later Reset cannot be adopted by a probe that reserved a slot in an older
+// epoch.
+func (b *Breaker) tryAdmit() (state State, gen uint64, ok bool) {
 	state = b.State()
+	gen = b.generation.Load()
 	if state == Open {
 		b.rejected.Add(1)
-		return state, false
+		return state, gen, false
 	}
 
 	if state == HalfOpen {
 		if !b.tryAdmitProbe() {
 			b.rejected.Add(1)
-			return state, false
+			return state, gen, false
 		}
 	}
-	return state, true
+	return state, gen, true
 }
 
 // snapshotState returns the live circuit state without lazy Open→HalfOpen
@@ -272,10 +292,15 @@ func (b *Breaker) snapshotState() State {
 	return State(b.state.Load())
 }
 
-// releaseProbe frees one half-open probe slot. It never drives the in-flight
-// count below zero, so a concurrent [Breaker.Reset] that cleared the budget
-// cannot be clobbered by a finishing probe's deferred release.
-func (b *Breaker) releaseProbe() {
+// releaseProbe frees one half-open probe slot belonging to admitGen. It is a
+// no-op when admitGen does not match the live generation (the probe is stale
+// after Open→HalfOpen or Reset-to-Closed). Otherwise it never drives the
+// in-flight count below zero, so a concurrent [Breaker.Reset] that cleared the
+// budget cannot be clobbered by a finishing probe's deferred release.
+func (b *Breaker) releaseProbe(admitGen uint64) {
+	if admitGen != b.generation.Load() {
+		return
+	}
 	for {
 		cur := b.halfOpenInflight.Load()
 		if cur <= 0 {
@@ -289,9 +314,9 @@ func (b *Breaker) releaseProbe() {
 
 // executeRun runs fn after admission and settles the outcome on the breaker.
 // The caller must have already passed guard checks and won admission via tryAdmit.
-func executeRun[T any](b *Breaker, ctx context.Context, op string, state State, fn CircuitFunc[T]) (T, error) {
+func executeRun[T any](b *Breaker, ctx context.Context, op string, state State, admitGen uint64, fn CircuitFunc[T]) (T, error) {
 	if state == HalfOpen {
-		defer b.releaseProbe()
+		defer b.releaseProbe(admitGen)
 	}
 
 	cc := &execution{
@@ -304,14 +329,14 @@ func executeRun[T any](b *Breaker, ctx context.Context, op string, state State, 
 		return fn(ctx, cc)
 	})
 
-	if err != nil && !cc.skipFailure {
+	if err != nil && !cc.skipFailure && b.countsAsFailure(err) {
 		b.totalFail.Add(1)
-		b.recordFailure(cc.tripped)
+		b.recordFailure(cc.tripped, admitGen)
 		return val, err
 	}
 
 	if cc.tripped {
-		b.openFrom(state)
+		b.openFrom(state, admitGen)
 		return val, err
 	}
 
@@ -320,19 +345,41 @@ func executeRun[T any](b *Breaker, ctx context.Context, op string, state State, 
 	}
 
 	b.successes.Add(1)
-	b.recordSuccess()
+	b.recordSuccess(admitGen)
 	return val, nil
+}
+
+// countsAsFailure reports whether err should drive the consecutive-failure
+// state machine. [CircuitController.SkipFailure] is checked by the caller and
+// always wins. A recovered [*panix.PanicError] always counts.
+// [context.Canceled] does not count unless [WithCountCanceled] is set, and
+// [WithFailureIf] is not consulted for an ignored cancel. Remaining errors —
+// including [context.DeadlineExceeded] — count unless a [WithFailureIf]
+// predicate returns false.
+func (b *Breaker) countsAsFailure(err error) bool {
+	var pe *panix.PanicError
+	if errors.As(err, &pe) {
+		return true
+	}
+	if errors.Is(err, context.Canceled) && !b.cfg.countCanceled {
+		return false
+	}
+	if b.cfg.failureIf != nil {
+		return b.cfg.failureIf(err)
+	}
+	return true
 }
 
 // recordSuccess settles a successful call. Consecutive probe successes in
 // [HalfOpen] heal the breaker to [Closed] once [WithSuccessThreshold] is
 // reached; a success in [Closed] clears any accumulated consecutive failures.
-// The state-changing work happens under the transition
-// mutex and is re-checked against the live state, so a success can never clobber
-// a trip that a concurrent failure committed between admission and settlement:
-// when the live state is [Open] the success is ignored and the breaker stays
-// open.
-func (b *Breaker) recordSuccess() {
+// A probe whose admit generation does not match the live generation is ignored
+// so it cannot heal a newer HalfOpen epoch. The state-changing work happens
+// under the transition mutex and is re-checked against the live state, so a
+// success can never clobber a trip that a concurrent failure committed between
+// admission and settlement: when the live state is [Open] the success is
+// ignored and the breaker stays open.
+func (b *Breaker) recordSuccess(admitGen uint64) {
 	// Fast path: a healthy Closed breaker with no pending failures has nothing
 	// to settle, so the common success avoids the mutex entirely. Both loads are
 	// atomic; if either is stale the slow path below re-checks under the lock.
@@ -341,6 +388,10 @@ func (b *Breaker) recordSuccess() {
 	}
 
 	b.mu.Lock()
+	if admitGen != b.generation.Load() {
+		b.mu.Unlock()
+		return
+	}
 	switch State(b.state.Load()) {
 	case HalfOpen:
 		count := b.halfOpenSuccesses.Add(1)
@@ -381,11 +432,17 @@ func (b *Breaker) tryAdmitProbe() bool {
 // recordFailure registers a counted failure and trips the circuit when
 // warranted: any failure observed in [HalfOpen] re-opens immediately, a forced
 // Trip opens immediately, and a failure in [Closed] opens once the consecutive
-// count reaches the threshold. The failure count is incremented and evaluated
-// under the transition mutex so it stays consistent with a concurrent success
-// reset and the trip decision sees a stable count.
-func (b *Breaker) recordFailure(forced bool) {
+// count reaches the threshold. A probe whose admit generation does not match
+// the live generation is ignored so it cannot re-open a newer epoch. The
+// failure count is incremented and evaluated under the transition mutex so it
+// stays consistent with a concurrent success reset and the trip decision sees a
+// stable count.
+func (b *Breaker) recordFailure(forced bool, admitGen uint64) {
 	b.mu.Lock()
+	if admitGen != b.generation.Load() {
+		b.mu.Unlock()
+		return
+	}
 	live := State(b.state.Load())
 	if live == Open {
 		// Already tripped by a concurrent failure; nothing to do.
@@ -413,11 +470,17 @@ func (b *Breaker) recordFailure(forced bool) {
 }
 
 // openFrom trips the circuit to [Open] unconditionally (used by the forced
-// [CircuitController.Trip] path on a successful or skipped call). The mutex makes
-// the edge atomic so the trip count and the [WithOnStateChange] hook fire
-// exactly once even under concurrent transitions.
-func (b *Breaker) openFrom(state State) {
+// [CircuitController.Trip] path on a successful or skipped call). A probe whose
+// admit generation does not match the live generation is ignored so a stale
+// Trip cannot force a newer HalfOpen epoch Open. The mutex makes the edge
+// atomic so the trip count and the [WithOnStateChange] hook fire exactly once
+// even under concurrent transitions.
+func (b *Breaker) openFrom(state State, admitGen uint64) {
 	b.mu.Lock()
+	if admitGen != b.generation.Load() {
+		b.mu.Unlock()
+		return
+	}
 	prev := State(b.state.Load())
 	if prev == Open {
 		b.mu.Unlock()
@@ -436,9 +499,13 @@ func (b *Breaker) openFrom(state State) {
 }
 
 // fireStateChange invokes the configured [WithOnStateChange] hook, if any, for
-// the from→to edge. A nil hook is a no-op.
+// the from→to edge. The hook runs synchronously on the driving goroutine; a
+// panic is recovered so it cannot crash the caller. A nil hook is a no-op.
 func (b *Breaker) fireStateChange(from, to State) {
-	if b.cfg.onStateChange != nil {
-		b.cfg.onStateChange(from, to)
+	fn := b.cfg.onStateChange
+	if fn == nil {
+		return
 	}
+	defer func() { _ = recover() }()
+	fn(from, to)
 }

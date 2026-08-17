@@ -45,6 +45,11 @@ func TestNew_Defaults(t *testing.T) {
 	assert.False(t, w.IsComplete())
 }
 
+func TestNew_NilOptionIgnored(t *testing.T) {
+	w := New(nil, WithMinCapacity(0.3))
+	assert.InDelta(t, 0.3, w.cfg.minCap, 1e-9)
+}
+
 func TestWithMinCapacity(t *testing.T) {
 	tests := []struct {
 		name string
@@ -202,6 +207,48 @@ func TestWarmer_StartAt_ClampsCapacity(t *testing.T) {
 	w.StartAt(0.5)
 	assert.InDelta(t, 0.5, w.Capacity(), 1e-9)
 	w.Stop()
+}
+
+func TestWarmer_StartAt_DoesNotDropToMinOnFirstTick(t *testing.T) {
+	w := New(
+		WithStrategy(Linear),
+		WithMinCapacity(0.1),
+		WithMaxCapacity(1),
+		WithDuration(time.Hour),
+		WithInterval(10*time.Millisecond),
+	)
+	w.StartAt(0.5)
+	defer w.Stop()
+
+	time.Sleep(40 * time.Millisecond)
+	assert.Greater(t, w.Capacity(), 0.3, "first tick must not slam to minCap")
+	assert.InDelta(t, 0.5, w.Capacity(), 0.05)
+}
+
+func TestWarmer_StartAt_ContinuesAlongCurve(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	w := New(
+		WithStrategy(Linear),
+		WithMinCapacity(0),
+		WithMaxCapacity(1),
+		WithDuration(10*time.Second),
+		withClock(func() time.Time { return now }),
+	)
+	w.StartAt(0.4)
+	assert.InDelta(t, 0.4, w.Capacity(), 1e-9)
+	assert.InDelta(t, 0.4, w.Progress(), 1e-9)
+	w.Stop()
+	assert.InDelta(t, 0.4, w.Progress(), 1e-9)
+}
+
+func TestWarmer_StartAt_AtMaxCompletesImmediately(t *testing.T) {
+	w := New(WithMinCapacity(0.2), WithMaxCapacity(0.8))
+	w.StartAt(0.8)
+	assert.True(t, w.IsComplete())
+	assert.False(t, w.IsWarming())
+	assert.Nil(t, w.stopCh)
+	assert.InDelta(t, 0.8, w.Capacity(), 1e-9)
+	assert.InDelta(t, 1.0, w.Progress(), 1e-9)
 }
 
 func TestWarmer_StopRetainsCapacity(t *testing.T) {
@@ -482,6 +529,30 @@ func TestWarmer_WaitForCompletion_StoppedMidRamp(t *testing.T) {
 	err := w.WaitForCompletion(testx.CancelledCtx())
 	require.ErrorIs(t, err, context.Canceled)
 	assert.False(t, w.IsComplete())
+}
+
+func TestWarmer_WaitForCompletion_RestartContinuesWaiting(t *testing.T) {
+	w := New(WithDuration(80*time.Millisecond), WithInterval(10*time.Millisecond))
+	w.Start()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- w.WaitForCompletion(context.Background())
+	}()
+	time.Sleep(20 * time.Millisecond)
+	w.Start() // restart; waiter must keep waiting for the new run
+
+	err := <-errCh
+	require.NoError(t, err)
+	assert.True(t, w.IsComplete(), "returning before the restarted ramp completes is a bug")
+}
+
+func TestWarmer_WaitForCompletion_AfterCloseReturnsErrClosed(t *testing.T) {
+	w := New(WithDuration(time.Hour))
+	w.Start()
+	require.NoError(t, w.Close())
+	err := w.WaitForCompletion(context.Background())
+	require.ErrorIs(t, err, ErrClosed)
 }
 
 func TestWarmer_WaitForCompletion_Timeout(t *testing.T) {
@@ -833,10 +904,16 @@ func TestWarmer_Calculate_Strategies(t *testing.T) {
 			at0 := w.calculate(0)
 			at1 := w.calculate(1)
 			assert.GreaterOrEqual(t, at0, 0.1, "capacity at t=0 starts at min")
-			assert.LessOrEqual(t, at1, 1.0, "capacity at t=1 caps at max")
+			assert.InDelta(t, 1.0, at1, 1e-9, "capacity at t=1 equals maxCap for every strategy")
 			assert.GreaterOrEqual(t, at1, at0, "capacity is non-decreasing")
 		})
 	}
+}
+
+func TestWarmer_Calculate_ExponentialHitsMaxAtOne(t *testing.T) {
+	w := New(WithStrategy(Exponential), WithMinCapacity(0.1), WithMaxCapacity(1), WithExpFactor(DefaultExpFactor))
+	assert.InDelta(t, 1.0, w.calculate(1), 1e-9)
+	assert.InDelta(t, 0.1, w.calculate(0), 1e-9)
 }
 
 func TestWarmer_Calculate_Monotonic(t *testing.T) {
@@ -895,4 +972,154 @@ func TestWarmer_ConcurrentStartStop(t *testing.T) {
 		w.Stop()
 	})
 	w.Stop()
+}
+
+func TestWarmer_OnCompletePanicIsContained(t *testing.T) {
+	w := New(
+		WithMinCapacity(1),
+		WithMaxCapacity(1),
+		WithOnComplete(func() { panic("complete boom") }),
+	)
+	assert.NotPanics(t, func() { w.Start() })
+	assert.True(t, w.IsComplete())
+}
+
+func TestWarmer_OnCapacityChangePanicIsContained(t *testing.T) {
+	w := New(
+		WithMinCapacity(0.1),
+		WithMaxCapacity(1),
+		WithOnCapacityChange(func(_, _ float64) { panic("cap boom") }),
+		WithOnComplete(func() { panic("complete boom") }),
+	)
+	assert.NotPanics(t, func() { w.StartAt(1) })
+	assert.True(t, w.IsComplete())
+}
+
+func TestWarmer_Close_RejectsAllowAndExecute(t *testing.T) {
+	w := New(WithMinCapacity(1), WithMaxCapacity(1))
+	require.NoError(t, w.Close())
+
+	assert.False(t, w.Allow())
+	require.ErrorIs(t, w.AllowOrError(), ErrClosed)
+
+	_, err := Execute(w, context.Background(), func(context.Context, WarmupController) (int, error) {
+		return 1, nil
+	})
+	require.ErrorIs(t, err, ErrClosed)
+
+	ok, _, err := TryExecute(w, context.Background(), func(context.Context, WarmupController) (int, error) {
+		return 1, nil
+	})
+	assert.False(t, ok)
+	require.ErrorIs(t, err, ErrClosed)
+	assert.Equal(t, int64(0), w.Stats().Rejected)
+}
+
+func TestWarmer_Close_IdempotentReturnsNil(t *testing.T) {
+	w := New()
+	require.NoError(t, w.Close())
+	require.NoError(t, w.Close())
+	assert.True(t, w.IsClosed())
+}
+
+func TestWarmer_Close_StartDoesNotResurrect(t *testing.T) {
+	w := New(WithMinCapacity(1), WithMaxCapacity(1))
+	require.NoError(t, w.Close())
+	w.Start()
+	w.StartAt(1)
+	w.Reset()
+	assert.True(t, w.IsClosed())
+	assert.False(t, w.IsWarming())
+	assert.False(t, w.Allow())
+}
+
+func TestWarmer_Stop_StillAdmits(t *testing.T) {
+	w := New(WithMinCapacity(1), WithMaxCapacity(1))
+	w.Start()
+	w.Stop()
+	assert.False(t, w.IsClosed())
+	assert.True(t, w.Allow())
+	_, err := Execute(w, context.Background(), func(context.Context, WarmupController) (int, error) {
+		return 1, nil
+	})
+	require.NoError(t, err)
+}
+
+func TestWarmer_Invert_AllStrategies(t *testing.T) {
+	tests := []struct {
+		name     string
+		strategy Strategy
+	}{
+		{"linear", Linear},
+		{"exponential", Exponential},
+		{"logarithmic", Logarithmic},
+		{"step", Step},
+		{"unknown", Strategy(99)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			w := New(WithStrategy(tt.strategy), WithMinCapacity(0.1), WithMaxCapacity(1), WithStepCount(10))
+			assert.InDelta(t, 0, w.invert(0.1), 1e-9)
+			assert.InDelta(t, 1, w.invert(1), 1e-9)
+			t0 := w.invert(0.55)
+			assert.Greater(t, t0, 0.0)
+			assert.Less(t, t0, 1.0)
+			assert.InDelta(t, 0.55, w.calculate(t0), 0.05)
+		})
+	}
+
+	flat := New(WithMinCapacity(0.5), WithMaxCapacity(0.5))
+	assert.InDelta(t, 1.0, flat.invert(0.5), 1e-9)
+
+	below := New(WithMinCapacity(0.2), WithMaxCapacity(1))
+	assert.InDelta(t, 0, below.invert(0.2), 1e-9)
+
+	stepZero := New(WithStrategy(Step), WithMinCapacity(0), WithMaxCapacity(1))
+	stepZero.cfg.stepCount = 0
+	assert.InDelta(t, 0.4, stepZero.invert(0.4), 1e-9)
+}
+
+func TestWarmer_Calculate_ExponentialZeroFactorFallsBack(t *testing.T) {
+	w := New(WithStrategy(Exponential), WithMinCapacity(0), WithMaxCapacity(1))
+	w.cfg.expFactor = 0
+	assert.InDelta(t, 0.5, w.calculate(0.5), 1e-9)
+}
+
+func TestWarmer_TryAdmit_AfterClose(t *testing.T) {
+	w := New(WithMinCapacity(1), WithMaxCapacity(1))
+	require.NoError(t, w.Close())
+	_, _, _, ok, closed := w.tryAdmit()
+	assert.True(t, closed)
+	assert.False(t, ok)
+}
+
+func TestWarmer_WaitForCompletion_NilChannel(t *testing.T) {
+	w := New()
+	w.warming = true
+	w.start = time.Now()
+	w.completeCh = nil
+	require.NoError(t, w.WaitForCompletion(context.Background()))
+}
+
+func TestWarmer_SinceStartLocked_Guards(t *testing.T) {
+	w := New()
+	w.mu.Lock()
+	assert.Equal(t, time.Duration(0), w.sinceStartLocked())
+	w.start = time.Now().Add(time.Hour)
+	assert.Equal(t, time.Duration(0), w.sinceStartLocked())
+	w.mu.Unlock()
+}
+
+func TestWarmer_Stop_ClampsOverElapsedProgress(t *testing.T) {
+	w := New(WithDuration(time.Nanosecond))
+	w.mu.Lock()
+	w.warming = true
+	w.start = time.Now().Add(-time.Hour)
+	w.mu.Unlock()
+	w.Stop()
+	assert.InDelta(t, 1.0, w.Progress(), 1e-9)
+}
+
+func TestWarmer_InvokeOnCapacityChange_NilIsNoop(t *testing.T) {
+	assert.NotPanics(t, func() { invokeOnCapacityChange(nil, 0.1, 0.2) })
 }

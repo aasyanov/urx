@@ -227,6 +227,67 @@ func TestWithTimer_NilIgnored(t *testing.T) {
 	assert.Equal(t, DefaultTimeout, cfg.timeout)
 }
 
+func TestNewConfig_SkipsNilOption(t *testing.T) {
+	cfg := newConfig(0, []Option{WithTimeout(time.Second), nil, WithOp("x")})
+	assert.Equal(t, time.Second, cfg.timeout)
+	assert.Equal(t, "x", cfg.op)
+}
+
+func TestExecute_NilOptionIgnored(t *testing.T) {
+	got, err := Execute(context.Background(), time.Second,
+		func(context.Context, TimeoutController) (int, error) {
+			return 7, nil
+		}, nil, WithOp("nil.opt"))
+	require.NoError(t, err)
+	assert.Equal(t, 7, got)
+}
+
+func TestExecute_TimeoutCauseIsErrDeadlineExceeded(t *testing.T) {
+	finished := make(chan error, 1)
+	_, err := Execute(context.Background(), 5*time.Millisecond,
+		func(ctx context.Context, _ TimeoutController) (int, error) {
+			<-ctx.Done()
+			finished <- context.Cause(ctx)
+			return 0, ctx.Err()
+		})
+	require.ErrorIs(t, err, ErrDeadlineExceeded)
+	select {
+	case cause := <-finished:
+		require.ErrorIs(t, cause, ErrDeadlineExceeded)
+	case <-time.After(time.Second):
+		t.Fatal("callback goroutine did not exit")
+	}
+}
+
+func TestExecute_HonorsCtx_GoroutineExits(t *testing.T) {
+	finished := make(chan struct{})
+	_, err := Execute(context.Background(), 5*time.Millisecond,
+		func(ctx context.Context, _ TimeoutController) (int, error) {
+			defer close(finished)
+			select {
+			case <-ctx.Done():
+				return 0, ctx.Err()
+			case <-time.After(time.Hour):
+				return 1, nil
+			}
+		})
+	require.ErrorIs(t, err, ErrDeadlineExceeded)
+	select {
+	case <-finished:
+	case <-time.After(time.Second):
+		t.Fatal("callback goroutine that honors ctx must exit after the deadline")
+	}
+}
+
+func TestNormalizeResult_OurTimeoutStillErrDeadlineExceeded(t *testing.T) {
+	_, err := Execute(context.Background(), 5*time.Millisecond,
+		func(ctx context.Context, _ TimeoutController) (int, error) {
+			<-ctx.Done()
+			return 99, ctx.Err()
+		})
+	require.ErrorIs(t, err, ErrDeadlineExceeded)
+}
+
 func TestExecute_WithTimerEndToEnd(t *testing.T) {
 	timer := New(WithTimeout(5*time.Millisecond), WithOp("timed"))
 	sim := testx.SlowCall(50 * time.Millisecond)

@@ -58,7 +58,8 @@ const opTryExecute = "warmupx.TryExecute"
 //
 // Create one with [New], begin ramping with [Warmer.Start], and gate work with
 // [Warmer.Allow], [Warmer.AllowOrError], [Execute], or [TryExecute]. Call
-// [Warmer.Stop] to halt the ramp.
+// [Warmer.Stop] to halt the ramp while still admitting at the frozen capacity,
+// or [Warmer.Close] to freeze and refuse further admission.
 type Warmer struct {
 	cfg config
 
@@ -78,6 +79,7 @@ type Warmer struct {
 
 	allowed  atomic.Int64
 	rejected atomic.Int64
+	closed   atomic.Bool
 }
 
 // New creates a [Warmer] with the given options applied on top of the package
@@ -100,7 +102,11 @@ func (w *Warmer) Start() {
 
 // StartAt begins (or restarts) the warmup from the given capacity. Any
 // in-progress ramp is stopped first. The capacity is clamped to the configured
-// [minimum, maximum] range.
+// [minimum, maximum] range. The start time is backdated so the first tick
+// continues along the curve from that capacity instead of slamming to minCap.
+// Starting at maxCap completes immediately without spawning a loop.
+//
+// After [Warmer.Close], StartAt is a no-op.
 func (w *Warmer) StartAt(capacity float64) {
 	if capacity < w.cfg.minCap {
 		capacity = w.cfg.minCap
@@ -110,17 +116,47 @@ func (w *Warmer) StartAt(capacity float64) {
 	}
 
 	w.mu.Lock()
+	if w.closed.Load() {
+		w.mu.Unlock()
+		return
+	}
+
 	w.stopLocked()
+	if w.completeCh != nil && !w.complete {
+		close(w.completeCh)
+	}
+	w.completeCh = make(chan struct{})
 
 	w.gen++
 	gen := w.gen
-	w.start = time.Now()
+
+	if capacity >= w.cfg.maxCap {
+		old := w.capacity
+		w.capacity = w.cfg.maxCap
+		w.progress = 1
+		w.start = w.now()
+		w.warming = false
+		w.complete = true
+		close(w.completeCh)
+		onChange, onComplete := w.cfg.onCapChange, w.cfg.onComplete
+		newCap := w.capacity
+		w.mu.Unlock()
+
+		if onChange != nil && old != newCap {
+			invokeOnCapacityChange(onChange, old, newCap)
+		}
+		invokeOnComplete(onComplete)
+		return
+	}
+
+	t0 := w.invert(capacity)
+	now := w.now()
+	w.start = now.Add(-time.Duration(t0 * float64(w.cfg.duration)))
 	w.capacity = capacity
-	w.progress = 0
+	w.progress = t0
 	w.warming = true
 	w.complete = false
 	w.stopCh = make(chan struct{})
-	w.completeCh = make(chan struct{})
 	stopCh := w.stopCh
 	w.mu.Unlock()
 
@@ -129,13 +165,39 @@ func (w *Warmer) StartAt(capacity float64) {
 
 // Stop halts the warmup. The current capacity and progress are retained;
 // subsequent admission decisions use the frozen capacity unchanged until the
-// next [Warmer.Start]. Stop is idempotent.
+// next [Warmer.Start]. Stop is idempotent. Stop does not reject traffic — use
+// [Warmer.Close] to refuse further admission.
 func (w *Warmer) Stop() {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.freezeProgressLocked()
 	w.stopLocked()
 	w.warming = false
+}
+
+// Close freezes the ramp like [Warmer.Stop] and then refuses further
+// admission. Subsequent [Warmer.Allow] returns false; [Warmer.AllowOrError],
+// [Execute], [TryExecute], and [Warmer.WaitForCompletion] return [ErrClosed].
+// [Warmer.Start], [Warmer.StartAt], and [Warmer.Reset] become no-ops. Close is
+// idempotent and always returns nil.
+func (w *Warmer) Close() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if !w.closed.CompareAndSwap(false, true) {
+		return nil
+	}
+	w.freezeProgressLocked()
+	w.stopLocked()
+	w.warming = false
+	if w.completeCh != nil && !w.complete {
+		close(w.completeCh)
+	}
+	return nil
+}
+
+// IsClosed reports whether [Warmer.Close] has been called.
+func (w *Warmer) IsClosed() bool {
+	return w.closed.Load()
 }
 
 // stopLocked closes the active stop channel (if any) and clears it. The caller
@@ -197,6 +259,10 @@ func (w *Warmer) Progress() float64 {
 // reported by [Warmer.Stats].
 func (w *Warmer) Allow() bool {
 	w.mu.RLock()
+	if w.closed.Load() {
+		w.mu.RUnlock()
+		return false
+	}
 	capacity := w.capacity
 	w.mu.RUnlock()
 
@@ -213,6 +279,10 @@ func (w *Warmer) Allow() bool {
 // decision was made against) if it is rejected.
 func (w *Warmer) AllowOrError() error {
 	w.mu.RLock()
+	if w.closed.Load() {
+		w.mu.RUnlock()
+		return ErrClosed
+	}
 	capacity, progress := w.capacity, w.progressLocked()
 	w.mu.RUnlock()
 
@@ -240,32 +310,40 @@ func (w *Warmer) MaxRequests(baseLimit int) int {
 
 // WaitForCompletion blocks until the warmup completes or ctx is cancelled.
 // It returns nil on completion or ctx.Err() if the context is cancelled first.
+// After [Warmer.Close] it returns [ErrClosed].
 //
 // If warmup has never been started, it returns nil immediately because there is
 // no active ramp to wait on.
 //
 // A warmer halted with [Warmer.Stop] before completion never completes, so a
 // waiter unblocks only when ctx is cancelled. A subsequent [Warmer.Start]
-// begins a new run with its own completion signal; callers should re-invoke
-// WaitForCompletion after restarting.
+// begins a new run; an in-flight waiter re-reads the completion signal and
+// continues waiting for the new run.
 func (w *Warmer) WaitForCompletion(ctx context.Context) error {
-	w.mu.RLock()
-	if w.complete {
+	for {
+		w.mu.RLock()
+		if w.closed.Load() {
+			w.mu.RUnlock()
+			return ErrClosed
+		}
+		if w.complete {
+			w.mu.RUnlock()
+			return nil
+		}
+		if !w.warming && w.start.IsZero() {
+			w.mu.RUnlock()
+			return nil
+		}
+		ch := w.completeCh
 		w.mu.RUnlock()
-		return nil
-	}
-	if !w.warming && w.start.IsZero() {
-		w.mu.RUnlock()
-		return nil
-	}
-	ch := w.completeCh
-	w.mu.RUnlock()
-
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-ch:
-		return nil
+		if ch == nil {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ch:
+		}
 	}
 }
 
@@ -277,7 +355,8 @@ func (w *Warmer) WaitForCompletion(ctx context.Context) error {
 // If the call is rejected, Execute returns the zero value and an error wrapping
 // [ErrRejected] without invoking fn. If fn is nil, Execute returns [ErrNilFunc].
 // If ctx is already cancelled or its deadline has expired, Execute returns
-// [ErrCancelled] without attempting admission.
+// [ErrCancelled] without attempting admission. After [Warmer.Close], Execute
+// returns [ErrClosed].
 //
 // On admission fn receives the call context and a [WarmupController] exposing
 // the capacity and progress at admission time. fn runs under [panix.Safe]; a
@@ -293,7 +372,10 @@ func Execute[T any](w *Warmer, ctx context.Context, fn WarmupFunc[T]) (T, error)
 		return zero, errCancelled(err)
 	}
 
-	capacity, progress, strategy, ok := w.tryAdmit()
+	capacity, progress, strategy, ok, closed := w.tryAdmit()
+	if closed {
+		return zero, ErrClosed
+	}
 	if !ok {
 		return zero, errRejected(capacity, progress)
 	}
@@ -305,11 +387,11 @@ func Execute[T any](w *Warmer, ctx context.Context, fn WarmupFunc[T]) (T, error)
 // returns (true, val, err). If the call is rejected it returns (false, zero, nil)
 // without invoking fn and increments the rejected counter.
 //
-// Returns (false, zero, [ErrNilFunc]) if fn is nil, and (false, zero,
+// Returns (false, zero, [ErrNilFunc]) if fn is nil, (false, zero,
 // [ErrCancelled]) if ctx is already cancelled or its deadline has expired (no
-// admission attempted). When admitted, fn runs under [panix.Safe] with the same
-// outcome semantics as [Execute], including [WarmupController.Reject] and panic
-// recovery.
+// admission attempted), and (false, zero, [ErrClosed]) after [Warmer.Close].
+// When admitted, fn runs under [panix.Safe] with the same outcome semantics as
+// [Execute], including [WarmupController.Reject] and panic recovery.
 func TryExecute[T any](w *Warmer, ctx context.Context, fn WarmupFunc[T]) (bool, T, error) {
 	var zero T
 	if fn == nil {
@@ -319,7 +401,10 @@ func TryExecute[T any](w *Warmer, ctx context.Context, fn WarmupFunc[T]) (bool, 
 		return false, zero, errCancelled(err)
 	}
 
-	capacity, progress, strategy, ok := w.tryAdmit()
+	capacity, progress, strategy, ok, closed := w.tryAdmit()
+	if closed {
+		return false, zero, ErrClosed
+	}
 	if !ok {
 		return false, zero, nil
 	}
@@ -330,17 +415,21 @@ func TryExecute[T any](w *Warmer, ctx context.Context, fn WarmupFunc[T]) (bool, 
 // tryAdmit reads warmer state and applies probabilistic admission. It returns
 // the capacity and progress observed at the decision point, the configured
 // strategy, and whether the call was admitted.
-func (w *Warmer) tryAdmit() (capacity, progress float64, strategy Strategy, ok bool) {
+func (w *Warmer) tryAdmit() (capacity, progress float64, strategy Strategy, ok, closed bool) {
 	w.mu.RLock()
+	if w.closed.Load() {
+		w.mu.RUnlock()
+		return 0, 0, 0, false, true
+	}
 	capacity, progress = w.capacity, w.progressLocked()
 	strategy = w.cfg.strategy
 	w.mu.RUnlock()
 
 	if rand.Float64() >= capacity {
 		w.rejected.Add(1)
-		return capacity, progress, strategy, false
+		return capacity, progress, strategy, false, false
 	}
-	return capacity, progress, strategy, true
+	return capacity, progress, strategy, true, false
 }
 
 // executeRun runs fn after admission and settles counters. The caller must
@@ -387,7 +476,7 @@ func (w *Warmer) Stats() Stats {
 
 	var elapsed, remaining time.Duration
 	if !w.start.IsZero() {
-		elapsed = time.Since(w.start)
+		elapsed = w.sinceStartLocked()
 		if elapsed > w.cfg.duration {
 			elapsed = w.cfg.duration
 		}
@@ -425,7 +514,7 @@ func (w *Warmer) freezeProgressLocked() {
 	if !w.warming || w.start.IsZero() {
 		return
 	}
-	p := float64(time.Since(w.start)) / float64(w.cfg.duration)
+	p := float64(w.sinceStartLocked()) / float64(w.cfg.duration)
 	if p > 1.0 {
 		p = 1.0
 	}
@@ -441,7 +530,7 @@ func (w *Warmer) progressLocked() float64 {
 		return 0.0
 	}
 	if w.warming {
-		p := float64(time.Since(w.start)) / float64(w.cfg.duration)
+		p := float64(w.sinceStartLocked()) / float64(w.cfg.duration)
 		if p > 1.0 {
 			return 1.0
 		}
@@ -478,7 +567,7 @@ func (w *Warmer) tick(gen uint64) bool {
 		return true
 	}
 
-	elapsed := time.Since(w.start)
+	elapsed := w.sinceStartLocked()
 	if elapsed >= w.cfg.duration {
 		old := w.capacity
 		w.capacity = w.cfg.maxCap
@@ -490,11 +579,9 @@ func (w *Warmer) tick(gen uint64) bool {
 		w.mu.Unlock()
 
 		if onChange != nil && old != newCap {
-			go onChange(old, newCap)
+			invokeOnCapacityChange(onChange, old, newCap)
 		}
-		if onComplete != nil {
-			go onComplete()
-		}
+		invokeOnComplete(onComplete)
 		return true
 	}
 
@@ -506,7 +593,7 @@ func (w *Warmer) tick(gen uint64) bool {
 	w.mu.Unlock()
 
 	if onChange != nil && math.Abs(newCap-old) > capacityEpsilon {
-		go onChange(old, newCap)
+		invokeOnCapacityChange(onChange, old, newCap)
 	}
 	return false
 }
@@ -529,7 +616,13 @@ func (w *Warmer) calculate(t float64) float64 {
 	case Linear:
 		value = base + delta*t
 	case Exponential:
-		value = base + delta*(1-math.Exp(-w.cfg.expFactor*t))
+		k := w.cfg.expFactor
+		denom := 1 - math.Exp(-k)
+		if denom == 0 {
+			value = base + delta*t
+		} else {
+			value = base + delta*(1-math.Exp(-k*t))/denom
+		}
 	case Logarithmic:
 		value = base + delta*math.Log(1+t*math.E)/math.Log(1+math.E)
 	case Step:
@@ -543,4 +636,73 @@ func (w *Warmer) calculate(t float64) float64 {
 		return w.cfg.maxCap
 	}
 	return value
+}
+
+// invert returns the fractional progress t in [0, 1] at which [Warmer.calculate]
+// produces capacity. Used by [Warmer.StartAt] to backdate the start time.
+func (w *Warmer) invert(capacity float64) float64 {
+	delta := w.cfg.maxCap - w.cfg.minCap
+	if delta <= 0 {
+		return 1
+	}
+	frac := (capacity - w.cfg.minCap) / delta
+	if frac <= 0 {
+		return 0
+	}
+	if frac >= 1 {
+		return 1
+	}
+	switch w.cfg.strategy {
+	case Linear:
+		return frac
+	case Exponential:
+		k := w.cfg.expFactor
+		denom := 1 - math.Exp(-k)
+		return -math.Log(1-frac*denom) / k
+	case Logarithmic:
+		return (math.Exp(frac*math.Log(1+math.E)) - 1) / math.E
+	case Step:
+		n := float64(w.cfg.stepCount)
+		if n <= 0 {
+			return frac
+		}
+		return math.Round(frac*n) / n
+	default:
+		return frac
+	}
+}
+
+func (w *Warmer) now() time.Time {
+	if w.cfg.now != nil {
+		return w.cfg.now()
+	}
+	return time.Now()
+}
+
+// sinceStartLocked returns elapsed time since w.start. The caller must hold w.mu.
+func (w *Warmer) sinceStartLocked() time.Duration {
+	if w.start.IsZero() {
+		return 0
+	}
+	d := w.now().Sub(w.start)
+	if d < 0 {
+		return 0
+	}
+	return d
+}
+
+func invokeOnCapacityChange(fn func(oldCap, newCap float64), oldCap, newCap float64) {
+	if fn == nil {
+		return
+	}
+	defer func() { _ = recover() }()
+	fn(oldCap, newCap)
+}
+
+func invokeOnComplete(fn func()) {
+	if fn == nil {
+		return
+	}
+	defer func() { _ = recover() }()
+	fn()
 }

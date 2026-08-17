@@ -2,13 +2,13 @@
 // services.
 //
 // A [Limiter] discovers a backend's safe concurrency on its own. It starts at a
-// configured limit and continuously moves that limit up or down from latency
-// and error feedback, using one of three control laws — [AIMD], [Vegas], or
-// [Gradient]. Where a static bulkhead (see bulkx) must be sized by hand to a
-// fixed guess, an adaptive limiter tracks capacity as it changes: it opens up
-// when the backend is fast and healthy, and clamps down the moment latency
-// climbs or errors appear, so callers wait (or are turned away) instead of
-// piling onto a struggling backend.
+// configured limit and moves that limit up or down once per sample window from
+// latency and error feedback, using one of three control laws — [AIMD],
+// [Vegas], or [Gradient]. Where a static bulkhead (see bulkx) must be sized by
+// hand to a fixed guess, an adaptive limiter tracks capacity as it changes: it
+// opens up when the backend is fast and healthy, and clamps down the moment
+// latency climbs or errors appear, so callers wait (or are turned away) instead
+// of piling onto a struggling backend.
 //
 // # Quick Start
 //
@@ -58,8 +58,12 @@ import (
 // counters with [Limiter.Stats], and release resources with [Limiter.Close].
 //
 // It is safe for concurrent use from multiple goroutines. Admission rides a
-// buffered-channel semaphore; only the periodic adaptation step and the
-// percentile snapshot take the mutex.
+// buffered-channel semaphore; only the periodic windowed adaptation step and
+// the percentile snapshot take the mutex.
+//
+// After a shrink, in-flight work may briefly exceed the live limit until
+// released permits pay the shrink debt. New admissions never take a permit
+// that is not in the semaphore; in-flight never exceeds [WithMaxLimit].
 type Limiter struct {
 	cfg config
 
@@ -67,10 +71,12 @@ type Limiter struct {
 	// of buffered values is the count of permits currently available to acquire.
 	sem chan struct{}
 
-	inFlight atomic.Int32
-	closed   atomic.Bool
+	inFlight  atomic.Int32
+	closed    atomic.Bool
 	closeOnce sync.Once
+	drainOnce sync.Once
 	closedCh  chan struct{}
+	drainCh   chan struct{}
 
 	total    atomic.Int64
 	success  atomic.Int64
@@ -80,12 +86,20 @@ type Limiter struct {
 	decr     atomic.Int64
 
 	// mu guards every field below: the live limit, the shrink debt, the latency
-	// estimators, and the sample ring buffer.
+	// estimators, the sample ring, and the in-progress window counters.
 	mu     sync.Mutex
 	limit  int
 	debt   int
 	avgLat float64
 	minLat float64
+
+	increaseCredit    float64
+	windowRTTSum      float64
+	windowMinRTT      float64
+	windowStart       time.Time
+	windowN           int
+	windowFails       int
+	windowMaxInFlight int
 
 	samples []sample
 	head    int
@@ -106,15 +120,25 @@ func New(opts ...Option) *Limiter {
 		cfg:      cfg,
 		sem:      make(chan struct{}, cfg.maxLimit),
 		closedCh: make(chan struct{}),
+		drainCh:  make(chan struct{}),
 		limit:    cfg.initialLimit,
 		minLat:   math.MaxFloat64,
 		samples:  make([]sample, ringCap),
 		ringCap:  ringCap,
 	}
+	l.resetWindow(l.now())
 	for range cfg.initialLimit {
 		l.sem <- struct{}{}
 	}
 	return l
+}
+
+// now returns the injected clock, or time.Now when none was configured.
+func (l *Limiter) now() time.Time {
+	if l.cfg.clock != nil {
+		return l.cfg.clock()
+	}
+	return time.Now()
 }
 
 // --- Admission ---
@@ -126,8 +150,10 @@ func New(opts ...Option) *Limiter {
 //
 // Allow is a best-effort hint: it compares in-flight work against the live
 // limit without claiming a slot, so a concurrent admission may change the
-// outcome before the caller acts. Only the tracked entry points enforce the
-// concurrency bound.
+// outcome before the caller acts. After a shrink, in-flight may still exceed
+// the live limit (debt not yet paid), in which case Allow reports false even
+// though no new permit is available. Only the tracked entry points enforce
+// the concurrency bound.
 func (l *Limiter) Allow() bool {
 	if l.closed.Load() {
 		return false
@@ -218,8 +244,11 @@ func (l *Limiter) admit() func(success bool, latency time.Duration) {
 			return
 		}
 		l.record(success, latency)
-		l.inFlight.Add(-1)
+		n := l.inFlight.Add(-1)
 		l.releasePermit()
+		if n == 0 {
+			l.signalDrainIfIdle()
+		}
 	}
 }
 
@@ -230,9 +259,9 @@ func (l *Limiter) admit() func(success bool, latency time.Duration) {
 //
 // The debt check and the permit send happen under the same lock that
 // [Limiter.adjust] takes, so a release racing a concurrent shrink cannot return
-// a permit the shrink already accounted for — the live permit pool never
-// transiently exceeds the limit. The send is non-blocking because the buffer is
-// the max limit, which the live count never reaches.
+// a permit the shrink already accounted for. In-flight work that was already
+// admitted may still exceed the live limit until that debt is paid. The send
+// is non-blocking because the buffer is the max limit.
 func (l *Limiter) releasePermit() {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -355,33 +384,31 @@ func (l *Limiter) InFlight() int {
 // operations to drain before returning. Blocked [Limiter.Acquire] waiters are
 // released immediately with [ErrClosed]. Subsequent [Limiter.Acquire],
 // [Limiter.TryAcquire], [Execute], and [TryExecute] calls return [ErrClosed].
-// A zero or negative timeout returns immediately without waiting. Close is
-// idempotent: the second and later calls return [ErrClosed].
+// A zero or negative timeout returns immediately without waiting. If in-flight
+// work remains after the wait, CloseWithTimeout returns [ErrDrainTimeout] and
+// the limiter stays closed. The first call performs shutdown; later calls
+// return [ErrClosed].
 func (l *Limiter) CloseWithTimeout(timeout time.Duration) error {
 	if !l.closed.CompareAndSwap(false, true) {
 		return ErrClosed
 	}
 	l.closeOnce.Do(func() { close(l.closedCh) })
-	if timeout > 0 {
-		deadline := time.Now().Add(timeout)
-		for l.inFlight.Load() > 0 && time.Now().Before(deadline) {
-			time.Sleep(drainPollInterval)
-		}
+	l.signalDrainIfIdle()
+	l.waitForDrain(timeout)
+	l.drainSemaphore()
+	if l.inFlight.Load() > 0 {
+		return ErrDrainTimeout
 	}
-	for {
-		select {
-		case <-l.sem:
-		default:
-			return nil
-		}
-	}
+	return nil
 }
 
 // Close shuts the limiter down, waiting up to [DefaultCloseTimeout] for
-// in-flight operations to drain. For a custom timeout use
-// [Limiter.CloseWithTimeout]. Close is idempotent.
+// in-flight work to drain. For a custom timeout use
+// [Limiter.CloseWithTimeout]. Close is idempotent: the first and every later
+// call return nil. Drain timeout is swallowed; the limiter is still closed.
 func (l *Limiter) Close() error {
-	return l.CloseWithTimeout(DefaultCloseTimeout)
+	_ = l.CloseWithTimeout(DefaultCloseTimeout)
+	return nil
 }
 
 // IsClosed reports whether [Limiter.Close] has been called.
@@ -393,11 +420,50 @@ const (
 	// DefaultCloseTimeout is how long [Limiter.Close] waits for in-flight work
 	// to drain before retiring the remaining permits.
 	DefaultCloseTimeout = 30 * time.Second
-
-	// drainPollInterval is how often [Limiter.CloseWithTimeout] re-checks the
-	// in-flight count while waiting for a drain.
-	drainPollInterval = 10 * time.Millisecond
 )
+
+// waitForDrain blocks until in-flight work reaches zero or timeout elapses.
+// A zero or negative timeout returns immediately. Uses timer/select, not Sleep.
+func (l *Limiter) waitForDrain(timeout time.Duration) {
+	if l.inFlight.Load() == 0 || timeout <= 0 {
+		return
+	}
+	timer := time.NewTimer(timeout)
+	defer stopTimer(timer)
+	select {
+	case <-l.drainCh:
+	case <-timer.C:
+	}
+}
+
+// drainSemaphore retires every idle permit still sitting in the semaphore.
+func (l *Limiter) drainSemaphore() {
+	for {
+		select {
+		case <-l.sem:
+		default:
+			return
+		}
+	}
+}
+
+// signalDrainIfIdle closes drainCh once the limiter is shut down and idle, so
+// a waiter in [Limiter.waitForDrain] can return without polling.
+func (l *Limiter) signalDrainIfIdle() {
+	if l.closed.Load() && l.inFlight.Load() == 0 {
+		l.drainOnce.Do(func() { close(l.drainCh) })
+	}
+}
+
+// stopTimer stops t and drains its channel when the timer already fired.
+func stopTimer(t *time.Timer) {
+	if !t.Stop() {
+		select {
+		case <-t.C:
+		default:
+		}
+	}
+}
 
 // --- Statistics ---
 
@@ -435,7 +501,7 @@ func (l *Limiter) Stats() Stats {
 	l.mu.Lock()
 	lim := l.limit
 	lats := make([]time.Duration, 0, l.count)
-	cutoff := time.Now().Add(-l.cfg.sampleWindow)
+	cutoff := l.now().Add(-l.cfg.sampleWindow)
 	for i := 0; i < l.count; i++ {
 		idx := (l.head - l.count + i + l.ringCap) % l.ringCap
 		s := l.samples[idx]
@@ -484,10 +550,11 @@ func (l *Limiter) Stats() Stats {
 }
 
 // ResetStats zeroes the cumulative counters and resets the adaptive state back
-// to the initial limit, clearing the latency estimators and sample history. It
-// does not affect the in-flight count or the closed state. When in-flight work
-// exceeds the configured initial limit the live limit is raised to that count
-// so permits never go negative; the permit pool is reconciled immediately.
+// to the initial limit, clearing the latency estimators, window counters, and
+// sample history. It does not affect the in-flight count or the closed state.
+// When in-flight work exceeds the configured initial limit the live limit is
+// raised to that count so permits never go negative; the permit pool is
+// reconciled immediately.
 func (l *Limiter) ResetStats() {
 	l.mu.Lock()
 	resetLimit := l.cfg.initialLimit
@@ -498,9 +565,11 @@ func (l *Limiter) ResetStats() {
 	l.debt = 0
 	l.avgLat = 0
 	l.minLat = math.MaxFloat64
+	l.increaseCredit = 0
 	l.head = 0
 	l.count = 0
 	l.seen = 0
+	l.resetWindow(l.now())
 	for i := range l.samples {
 		l.samples[i] = sample{}
 	}
@@ -525,59 +594,141 @@ func (l *Limiter) ctxErr(err error) error {
 	return errCancelled(err)
 }
 
-// record updates the counters, latency estimators, and ring buffer for one
-// completed operation, then runs the adaptation step once warmup has elapsed.
-// A zero latency marks a skipped sample: it counts toward success/failure
-// totals but is excluded from the latency feedback and percentile history.
+// record updates the counters and the in-progress window for one completed
+// operation. A zero latency marks a skipped sample: it counts toward
+// success/failure totals and peak in-flight but is excluded from the latency
+// feedback and percentile history. The control law runs at most once per
+// sample window, after warmup, from the window snapshot — never per sample.
 func (l *Limiter) record(success bool, latency time.Duration) {
 	if success {
 		l.success.Add(1)
 	} else {
 		l.fail.Add(1)
 	}
-	if latency <= 0 {
-		return
-	}
 
 	l.mu.Lock()
-	defer l.mu.Unlock()
-
-	l.samples[l.head] = sample{latency: latency, ts: time.Now(), success: success}
-	l.head = (l.head + 1) % l.ringCap
-	if l.count < l.ringCap {
-		l.count++
+	fn, oldLimit, newLimit, fire := l.recordLocked(success, latency)
+	l.mu.Unlock()
+	if fire {
+		invokeLimitChange(fn, oldLimit, newLimit)
 	}
-	l.seen++
+}
 
-	ns := float64(latency.Nanoseconds())
-	l.avgLat = l.cfg.smoothing*ns + (1-l.cfg.smoothing)*l.avgLat
+// recordLocked applies one sample to the window and maybe runs the control
+// law. Callers hold l.mu. The hook is returned so it can run after unlock.
+func (l *Limiter) recordLocked(success bool, latency time.Duration) (fn func(int, int), oldLimit, newLimit int, fire bool) {
+	now := l.now()
+	if inf := int(l.inFlight.Load()); inf > l.windowMaxInFlight {
+		l.windowMaxInFlight = inf
+	}
+
+	if latency > 0 {
+		ns := float64(latency.Nanoseconds())
+		l.samples[l.head] = sample{latency: latency, ts: now, success: success}
+		l.head = (l.head + 1) % l.ringCap
+		if l.count < l.ringCap {
+			l.count++
+		}
+		l.seen++
+		l.windowN++
+		if !success {
+			l.windowFails++
+		}
+		l.windowRTTSum += ns
+		if ns > 0 && ns < l.windowMinRTT {
+			l.windowMinRTT = ns
+		}
+		if ns > 0 && ns < l.minLat {
+			l.minLat = ns
+		}
+	}
+
+	if now.Sub(l.windowStart) < l.cfg.sampleWindow || l.seen < l.cfg.warmupSamples {
+		return nil, 0, 0, false
+	}
+
+	if l.windowN > 0 {
+		snap := l.windowSnapshot()
+		oldLimit = l.limit
+		l.adjust(snap)
+		newLimit = l.limit
+		l.updateEstimators(snap)
+		if newLimit != oldLimit && l.cfg.onLimitChange != nil {
+			fn = l.cfg.onLimitChange
+			fire = true
+		}
+	}
+	l.resetWindow(now)
+	return fn, oldLimit, newLimit, fire
+}
+
+// windowSnapshot captures the in-progress window. Callers hold l.mu.
+func (l *Limiter) windowSnapshot() windowSnap {
+	mean := 0.0
+	if l.windowN > 0 {
+		mean = l.windowRTTSum / float64(l.windowN)
+	}
+	return windowSnap{
+		n:           l.windowN,
+		fails:       l.windowFails,
+		maxInFlight: l.windowMaxInFlight,
+		meanRTT:     mean,
+		minRTT:      l.windowMinRTT,
+	}
+}
+
+// updateEstimators refreshes the EMA average and decaying RTT_min from a
+// completed window. The first window sets avgLat to the window mean with no
+// blend toward zero. Callers hold l.mu.
+func (l *Limiter) updateEstimators(snap windowSnap) {
+	if snap.meanRTT <= 0 {
+		return
+	}
+	if l.avgLat <= 0 {
+		l.avgLat = snap.meanRTT
+	} else {
+		l.avgLat = l.cfg.smoothing*snap.meanRTT + (1-l.cfg.smoothing)*l.avgLat
+	}
 	if l.cfg.minLatDecay > 0 && l.minLat != math.MaxFloat64 {
 		l.minLat += l.cfg.minLatDecay * (l.avgLat - l.minLat)
 	}
-	if ns > 0 && ns < l.minLat {
-		l.minLat = ns
-	}
+}
 
-	if l.seen < l.cfg.warmupSamples {
+// resetWindow clears per-window counters and starts a new window at now.
+// Callers hold l.mu (or run from New before concurrent use).
+func (l *Limiter) resetWindow(now time.Time) {
+	l.windowStart = now
+	l.windowN = 0
+	l.windowFails = 0
+	l.windowMaxInFlight = 0
+	l.windowRTTSum = 0
+	l.windowMinRTT = math.MaxFloat64
+}
+
+// invokeLimitChange runs the user hook synchronously under recover. A panicking
+// hook is discarded; the hook must not block.
+func invokeLimitChange(fn func(oldLimit, newLimit int), oldLimit, newLimit int) {
+	if fn == nil {
 		return
 	}
-	l.adjust(success, latency)
+	defer func() { _ = recover() }()
+	fn(oldLimit, newLimit)
 }
 
 // adjust runs the configured control law to compute the next limit, applies
 // jitter and the [min, max] clamp, then reconciles the permit pool: a growth
 // pushes new permits, a shrink records debt so released permits are retired.
 // Callers hold l.mu.
-func (l *Limiter) adjust(success bool, latency time.Duration) {
+func (l *Limiter) adjust(snap windowSnap) {
 	old := l.limit
 	var next int
 	switch l.cfg.algorithm {
 	case Vegas:
-		next = l.vegas(latency)
+		next = l.vegas(snap.meanRTT)
 	case Gradient:
-		next = l.gradient(success, latency)
+		next = l.gradient(snap)
 	default:
-		next = l.aimd(success)
+		next = l.aimd(snap)
 	}
 
 	if next > old && l.cfg.jitter > 0 {
@@ -615,9 +766,6 @@ func (l *Limiter) adjust(success bool, latency time.Duration) {
 		l.decr.Add(1)
 		l.shrink(old - next)
 	}
-	if l.cfg.onLimitChange != nil {
-		go l.cfg.onLimitChange(old, next)
-	}
 }
 
 // shrink removes drop permits from circulation: it first pulls any idle permits
@@ -634,38 +782,50 @@ func (l *Limiter) shrink(drop int) {
 	}
 }
 
-// aimd is the Additive Increase / Multiplicative Decrease control law.
-// Callers hold l.mu.
-func (l *Limiter) aimd(success bool) int {
-	if success {
-		return l.limit + int(l.cfg.increaseRate)
+// aimd is the Additive Increase / Multiplicative Decrease control law, applied
+// once per window. A window with any failure is cut once. A successful window
+// grows only when peak in-flight reached ceil(limit·utilization); increase
+// credit accumulates as a float so fractional rates (0.5) grow every two
+// windows. Callers hold l.mu.
+func (l *Limiter) aimd(snap windowSnap) int {
+	if snap.fails > 0 {
+		l.increaseCredit = 0
+		return int(float64(l.limit) * l.cfg.decreaseRatio)
 	}
-	return int(float64(l.limit) * l.cfg.decreaseRatio)
+	need := int(math.Ceil(float64(l.limit) * l.cfg.utilization))
+	if snap.maxInFlight < need {
+		return l.limit
+	}
+	l.increaseCredit += l.cfg.increaseRate
+	step := int(l.increaseCredit)
+	l.increaseCredit -= float64(step)
+	return l.limit + step
 }
 
-// vegas estimates queued work from the gap between observed and minimum RTT and
-// steers the limit to keep the estimated queue inside a tolerance band centered
-// on [WithTargetLatency]. Callers hold l.mu.
-func (l *Limiter) vegas(latency time.Duration) int {
+// vegas estimates queued work from the gap between the window mean RTT and the
+// decaying global minimum: queue = limit·(1 − minRTT/rtt). It steers the limit
+// to keep that queue inside a tolerance band, scaled by [WithTargetLatency]
+// when the target sits above RTT_min. Callers hold l.mu.
+func (l *Limiter) vegas(rtt float64) int {
 	if l.minLat == math.MaxFloat64 {
 		return l.limit
 	}
-	rtt := float64(latency.Nanoseconds())
-	minLat := l.minLat
-	if rtt <= 0 || minLat <= 0 {
+	minRTT := l.minLat
+	if rtt <= 0 || minRTT <= 0 {
 		return l.limit
 	}
-	queue := float64(l.limit) * (rtt - minLat) / minLat
+	queue := float64(l.limit) * (1 - minRTT/rtt)
 
-	target := float64(l.limit) * l.cfg.tolerance
-	if targetNs := float64(l.cfg.targetLatency.Nanoseconds()); targetNs > minLat {
-		target = float64(l.limit) * l.cfg.tolerance * (targetNs - minLat) / minLat
+	alpha := float64(l.limit) * l.cfg.tolerance
+	if targetNs := float64(l.cfg.targetLatency.Nanoseconds()); targetNs > minRTT {
+		alpha = float64(l.limit) * l.cfg.tolerance * (1 - minRTT/targetNs)
 	}
+	beta := alpha * vegasBackoffBand
 
-	if queue < target {
+	if queue < alpha {
 		return l.limit + 1
 	}
-	if queue > target*vegasBackoffBand {
+	if queue > beta {
 		return int(float64(l.limit) * l.cfg.decreaseRatio)
 	}
 	return l.limit
@@ -695,16 +855,18 @@ fill:
 	}
 }
 
-// gradient backs off in proportion to how far the current latency sits above
-// the smoothed average and grows while at or below it. Callers hold l.mu.
-func (l *Limiter) gradient(success bool, latency time.Duration) int {
-	if !success {
+// gradient backs off in proportion to how far the window mean sits above the
+// smoothed average and grows while at or below it. A window with any failure
+// is cut once. Callers hold l.mu. EMA itself is updated in updateEstimators
+// after adjust, so the first window sees avgLat == 0 and takes a unit step.
+func (l *Limiter) gradient(snap windowSnap) int {
+	if snap.fails > 0 {
 		return int(float64(l.limit) * l.cfg.decreaseRatio)
 	}
 	if l.avgLat <= 0 {
 		return l.limit + 1
 	}
-	g := (float64(latency.Nanoseconds()) - l.avgLat) / l.avgLat
+	g := (snap.meanRTT - l.avgLat) / l.avgLat
 	if g < -l.cfg.tolerance {
 		return l.limit + gradientFastStep
 	}

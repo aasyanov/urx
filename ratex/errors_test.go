@@ -26,3 +26,20 @@ func TestErrCancelled_WrapsCustomCause(t *testing.T) {
 	require.ErrorIs(t, err, ErrCancelled)
 	require.ErrorIs(t, err, cause)
 }
+
+func TestErrors_IsSentinel(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+	}{
+		{"ErrCancelled", ErrCancelled},
+		{"ErrNilFunc", ErrNilFunc},
+		{"ErrExceedsBurst", ErrExceedsBurst},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.ErrorIs(t, tt.err, tt.err)
+			require.True(t, errors.Is(tt.err, tt.err))
+		})
+	}
+}

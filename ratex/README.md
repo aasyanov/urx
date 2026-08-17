@@ -2,6 +2,7 @@
 
 [CI](https://github.com/aasyanov/urx/actions/workflows/ci.yml)
 [Go Reference](https://pkg.go.dev/github.com/aasyanov/urx/ratex)
+[Changelog](../CHANGELOG.md)
 [License: MIT](../LICENSE)
 
 A thread-safe token-bucket rate limiter offering three layers — non-blocking `Allow`, blocking `Wait`, and a panic-safe `Execute` wrapper that hands the callback a `RateController`. Go 1.24+. Zero external dependencies (depends only on the urx `panix` package; testify in tests only).
@@ -11,7 +12,10 @@ go get github.com/aasyanov/urx
 ```
 
 > [!IMPORTANT]
-> **This is a single-process token-bucket limiter — not a distributed quota, not a concurrency cap (`bulkx`), and not a scheduler.** A `WaitN(ctx, n)` with `n > burst` can never succeed and blocks until the context is cancelled. For cluster-wide limits compose with a shared store (Redis, etc.) and use `ratex` as the local enforcement layer.
+> **This is a single-process token-bucket limiter — not a distributed quota, not a concurrency cap (`bulkx`), and not a scheduler.** `WaitN(ctx, n)` with `n > burst` returns `ErrExceedsBurst` immediately — it cannot succeed and does not wait. For cluster-wide limits compose with a shared store (Redis, etc.) and use `ratex` as the local enforcement layer.
+
+> [!CAUTION]
+> **Breaking in 1.5.2:** `WaitN(ctx, n)` with `n > burst` used to block until the context was cancelled. It now returns `ErrExceedsBurst` immediately without consuming tokens. Callers that relied on hanging until cancel must treat this sentinel instead.
 
 ## The Problem
 
@@ -20,7 +24,7 @@ A token bucket is a textbook algorithm that production code keeps re-implementin
 1. **No execution wrapper.** A bare `Allow()` leaves every caller to hand-roll the "check, run, account" dance, and to remember to wrap risky work in panic recovery. The rest of the urx resilience family (`retryx`, `circuitx`, `bulkx`, `toutx`) all expose an `Execute`/`Do` that runs your function under the policy — `ratex` should too.
 2. **No backpressure signal to the callee.** The function that just got admitted has no idea how close the bucket is to empty, so it cannot shed load gracefully (e.g. return a cheap partial result when spare capacity is low).
 3. **No way to "un-spend" a token.** When an admitted call turns out to be a no-op (a cache hit that performed no downstream work), the consumed token is wasted — there is no standard refund hook.
-4. **Busy-spin waits and unbounded requests.** Naive `Wait` loops burn CPU, and a request larger than the bucket capacity silently blocks forever instead of honouring the context.
+4. **Busy-spin waits and unbounded requests.** Naive `Wait` loops burn CPU, and a request larger than the bucket capacity either hangs forever or is not rejected as a distinct error.
 
 `ratex` provides a single `Limiter` covering all four: `Allow`/`AllowN` (non-blocking), `Wait`/`WaitN` (context-aware blocking with a delay floor), and `Execute`/`TryExecute` (panic-safe, with a `RateController` exposing remaining tokens and a `SkipToken` refund hook) — `-race`-clean and 100% covered.
 
@@ -70,7 +74,7 @@ A token bucket is a textbook algorithm that production code keeps re-implementin
  refill / take         │                   Tokens/Rate/Burst/
  Allow/Wait            │                   Waited/SkipToken
  waitFor (shared)    errors.go
- acquire / run       ErrCancelled / ErrNilFunc
+ acquire / run       ErrCancelled / ErrNilFunc / ErrExceedsBurst
 ```
 
 ## How It Works
@@ -79,8 +83,9 @@ A token bucket is a textbook algorithm that production code keeps re-implementin
 Execute(l, ctx, fn)
   │ fn == nil ? ─────────────► return ErrNilFunc
   ├── acquire(ctx):
-  │     ├── ctx done ? ───────► ErrCancelled(cause)
-  │     ├── take 1 token ? ───► admitted (waited=false)
+  │     ├── ctx done ? ─────────────► ErrCancelled(cause)
+  │     ├── n > burst ? ────────────► ErrExceedsBurst (WaitN only; Execute uses n=1)
+  │     ├── take 1 token ? ─────────► admitted (waited=false)
   │     └── loop: sleep delay(1); ctx done ? → ErrCancelled; retry take
   │
   └── run(l, op, waited, remaining, fn):
@@ -91,7 +96,7 @@ Execute(l, ctx, fn)
 
 Tokens accrue lazily: every operation first calls `refill`, which adds `elapsed × rate` tokens (capped at `burst`) since the last update. There is no background goroutine — the bucket advances only when touched, so an idle limiter costs nothing.
 
-`Wait`/`WaitN` compute the time until enough tokens accrue and sleep for at least `minDelay` (1 ms) per iteration, re-checking the context each loop so cancellation is always honoured. A request larger than `burst` can never be satisfied and therefore blocks until the context is cancelled — by design.
+`Wait`/`WaitN` compute the time until enough tokens accrue and sleep for at least `minDelay` (1 ms) per iteration, re-checking the context each loop so cancellation is always honoured. A request larger than `burst` can never be satisfied: `WaitN` returns `ErrExceedsBurst` immediately without blocking or consuming tokens. `AllowN` already returns false and consumes nothing in that case.
 
 ## Normative Contracts
 
@@ -106,6 +111,7 @@ Tokens accrue lazily: every operation first calls `refill`, which adds `elapsed 
 | Nil guard             | A nil `fn` returns `ErrNilFunc` without consuming a token                                                                                                                       |
 | Token refund          | `RateController.SkipToken` or [Limiter.Release] returns tokens and rolls back one `Allowed` count |
 | `n < 1` normalisation | `AllowN`/`WaitN` treat non-positive `n` as 1                                                                                                                                    |
+| Fail-fast `n > burst` | `WaitN` returns `ErrExceedsBurst` immediately (no wait, no tokens consumed); `AllowN` returns false and consumes nothing                                                         |
 | Outcome-based stats   | `Allowed`/`Limited` count *final outcomes*, never internal wait-loop probes: a blocking `Wait`/`Execute` adds exactly one `Allowed` on success or one `Limited` on cancellation |
 | Thread safety         | All `Limiter` methods are safe for concurrent use                                                                                                                               |
 
@@ -218,11 +224,12 @@ if !ok {
 | `DefaultBurst`       | `const DefaultBurst = 20`                                                                                           | Default bucket capacity when [WithBurst] is omitted         |
 | `ErrCancelled`       | `var ErrCancelled error`                                                                                            | Context cancelled or deadline expired before admission      |
 | `ErrNilFunc`         | `var ErrNilFunc error`                                                                                              | Nil callback passed to [Execute] or [TryExecute]            |
+| `ErrExceedsBurst`    | `var ErrExceedsBurst error`                                                                                         | `WaitN` requested more tokens than the bucket can ever hold |
 | `New`                | `func New(opts ...Option) *Limiter`                                                                                 | Create a limiter; non-positive rate → DefaultRate, burst floored to 1 |
 | `Limiter.Allow`      | `func (l *Limiter) Allow() bool`                                                                                    | Non-blocking: admit one request, consume one token          |
 | `Limiter.AllowN`     | `func (l *Limiter) AllowN(n int) bool`                                                                              | Non-blocking: admit n requests atomically                   |
 | `Limiter.Wait`       | `func (l *Limiter) Wait(ctx context.Context) error`                                                                 | Block until one token is available or ctx done              |
-| `Limiter.WaitN`      | `func (l *Limiter) WaitN(ctx context.Context, n int) error`                                                         | Block until n tokens are available or ctx done              |
+| `Limiter.WaitN`      | `func (l *Limiter) WaitN(ctx context.Context, n int) error`                                                         | Block until n tokens are available, ctx done, or `n > burst` |
 | `Execute`            | `func Execute[T any](l *Limiter, ctx context.Context, fn RateFunc[T]) (T, error)`                                  | Block for a token, then run fn panic-safe                   |
 | `TryExecute`         | `func TryExecute[T any](l *Limiter, ctx context.Context, fn RateFunc[T]) (bool, T, error)`                          | Run fn only if a token is immediately available             |
 | `Limiter.Tokens`     | `func (l *Limiter) Tokens() float64`                                                                                | Current available tokens (fractional)                       |
@@ -264,10 +271,11 @@ if !ok {
 ## Errors
 
 
-| Error          | Condition                                                                          |
-| -------------- | ---------------------------------------------------------------------------------- |
-| `ErrCancelled` | The context was cancelled or expired before a token was acquired (wraps the cause) |
-| `ErrNilFunc`   | The supplied function was nil                                                      |
+| Error             | Condition                                                                          |
+| ----------------- | ---------------------------------------------------------------------------------- |
+| `ErrCancelled`    | The context was cancelled or expired before a token was acquired (wraps the cause) |
+| `ErrNilFunc`      | The supplied function was nil                                                      |
+| `ErrExceedsBurst` | `WaitN(ctx, n)` with `n > burst` — returned immediately, no wait, no tokens consumed |
 
 
 `TryExecute` does not return a "rate limited" error — when no token is available it returns `(false, zero, nil)`, leaving the decision to the caller.
@@ -277,7 +285,7 @@ A panicking function does not produce a sentinel — it returns a `*panix.PanicE
 ## Pitfalls
 
 > [!WARNING]
-> **A request larger than `burst` can never succeed.** `WaitN(ctx, n)` with `n > burst` blocks until the context is cancelled, because the bucket can never hold that many tokens. Size your burst accordingly.
+> **A request larger than `burst` can never succeed.** `WaitN(ctx, n)` with `n > burst` returns `ErrExceedsBurst` immediately (it does not hang). `AllowN` returns false and consumes nothing. Size your burst so legitimate `WaitN`/`AllowN` requests fit.
 
 > [!NOTE]
 > **The limiter is single-process.** Each `Limiter` tracks its own bucket in memory. For a cluster-wide limit, run a shared store (Redis, etc.) — `ratex` is the local enforcement layer, not a distributed coordinator.
@@ -330,7 +338,7 @@ Three environments, two hardware classes, two operating systems. All values are 
 
 | Metric         | Value                          |
 | -------------- | ------------------------------ |
-| Test functions | 67                             |
+| Test functions | 75                             |
 | Benchmarks     | 5                              |
 | Fuzz targets   | 3                              |
 | Examples       | 4                              |
@@ -346,7 +354,7 @@ ratex/
 ├── ratex.go            # package doc + Limiter, Allow/Wait, Execute/TryExecute
 ├── options.go          # config, defaults/floors, WithRate/WithBurst
 ├── types.go            # RateController + private execution impl, RateFunc
-├── errors.go           # ErrCancelled, ErrNilFunc
+├── errors.go           # ErrCancelled, ErrNilFunc, ErrExceedsBurst
 ├── ratex_test.go       # unit + table-driven tests
 ├── errors_test.go      # sentinel error wrapper tests
 ├── bench_test.go       # benchmarks (sequential + parallel)

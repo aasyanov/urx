@@ -89,3 +89,39 @@ func ExampleBind_list() {
 	fmt.Println(origins.Value())
 	// Output: [a.com b.com c.com]
 }
+
+// ExampleWithFallbackPrefix looks up SMCORE_PORT first, then SMP_PORT.
+func ExampleWithFallbackPrefix() {
+	env := envx.New(
+		envx.WithPrefix("SMCORE"),
+		envx.WithFallbackPrefix("SMP"),
+		envx.WithLookup(envx.MapLookup(map[string]string{
+			"SMP_PORT": "8080",
+		})),
+	)
+	port := envx.Bind(env, "PORT", 0)
+	fmt.Println(port.Key(), port.Value())
+	// Output: SMP_PORT 8080
+}
+
+// ExampleWalk binds tagged fields through Walk + BindField. Bind remains
+// the canonical overlay; Walk is opt-in reflection with an env-tag allowlist.
+func ExampleWalk() {
+	type Config struct {
+		Port int    `env:"PORT"`
+		Host string `env:"HOST"`
+	}
+	cfg := Config{Port: 8080, Host: "localhost"}
+	env := envx.New(envx.WithLookup(envx.MapLookup(map[string]string{
+		"PORT": "9090",
+	})))
+	for f := range envx.Walk(&cfg) {
+		envx.BindField(env, f)
+	}
+	if err := env.Validate(); err != nil {
+		fmt.Println("error:", err)
+		return
+	}
+	fmt.Printf("%s:%d\n", cfg.Host, cfg.Port)
+	// Output: localhost:9090
+}
