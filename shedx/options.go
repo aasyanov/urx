@@ -162,8 +162,10 @@ func WithOp(op string) Option {
 }
 
 // WithHysteresis sets how far load must fall below the threshold before
-// shedding clears. Default 0 preserves today's trip-at-threshold behaviour.
-// Values <= 0 or >= the resolved threshold are ignored.
+// shedding clears. While latched and still below the threshold, all
+// non-critical traffic is rejected. Default 0 preserves today's
+// trip-at-threshold behaviour. Values <= 0 or >= the resolved threshold
+// are ignored.
 func WithHysteresis(delta float64) Option {
 	return func(c *config) {
 		if delta > 0 {

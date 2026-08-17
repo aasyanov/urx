@@ -274,7 +274,9 @@ func runAfterAdmit[T any](s *Shedder, ctx context.Context, priority Priority, n 
 //
 // When [WithHysteresis] is set, crossing the threshold latches a shedding
 // state that stays on until load falls below (threshold − hysteresis). While
-// latched, the below-threshold admit-all shortcut is skipped and cutoffs apply.
+// latched and still below the threshold, every non-critical request is
+// rejected so negative overload cannot admit-all in the hysteresis band.
+// Above the threshold, cutoffs still apply.
 func (s *Shedder) admits(priority Priority, inflight int64) bool {
 	if priority == PriorityCritical {
 		return true
@@ -286,6 +288,9 @@ func (s *Shedder) admits(priority Priority, inflight int64) bool {
 			if load < s.cfg.threshold-s.cfg.hysteresis {
 				s.shedding.Store(false)
 				return true
+			}
+			if load < s.cfg.threshold {
+				return false
 			}
 			return s.applyCutoffs(load, priority)
 		}

@@ -120,21 +120,19 @@ func (b *Breaker) Failures() int {
 }
 
 // Reset forces the circuit back to [Closed] and clears the consecutive failure
-// counter and the half-open probe budget. It does not affect the cumulative
-// [Stats] counters. In-flight probes are allowed to finish; their deferred slot
-// release is a no-op once [Reset] has bumped the HalfOpen generation and cleared
-// the budget, so the counter never goes negative and a stale probe cannot heal
-// or re-open the breaker. Use it to clear a tripped breaker after an out-of-band
-// recovery signal. Reset fires the [WithOnStateChange] hook when it changes the
-// state. It runs under the transition mutex so it never races a concurrent trip
-// or probe settlement.
+// counter and the half-open probe budget. It always bumps the generation so
+// in-flight probes admitted before Reset cannot heal, trip, or fail Closed.
+// It does not affect the cumulative [Stats] counters. In-flight probes are
+// allowed to finish; their deferred slot release is a no-op once the
+// generation has moved, so the counter never goes negative. Use it to clear a
+// tripped breaker after an out-of-band recovery signal. Reset fires the
+// [WithOnStateChange] hook when it changes the state. It runs under the
+// transition mutex so it never races a concurrent trip or probe settlement.
 func (b *Breaker) Reset() {
 	b.mu.Lock()
 	b.failures.Store(0)
 	prev := State(b.state.Swap(uint32(Closed)))
-	if prev != Closed {
-		b.generation.Add(1)
-	}
+	b.generation.Add(1)
 	b.halfOpenInflight.Store(0)
 	b.halfOpenSuccesses.Store(0)
 	b.mu.Unlock()
@@ -400,8 +398,10 @@ func (b *Breaker) recordSuccess(admitGen uint64) {
 			return
 		}
 		// Enough consecutive probe successes: the downstream has recovered.
+		// Bump generation so a leftover in-flight probe cannot fail Closed.
 		b.halfOpenSuccesses.Store(0)
 		b.failures.Store(0)
+		b.generation.Add(1)
 		b.state.Store(uint32(Closed))
 		b.mu.Unlock()
 		b.fireStateChange(HalfOpen, Closed)

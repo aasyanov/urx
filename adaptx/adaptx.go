@@ -402,12 +402,13 @@ func (l *Limiter) CloseWithTimeout(timeout time.Duration) error {
 	return nil
 }
 
-// Close shuts the limiter down, waiting up to [DefaultCloseTimeout] for
-// in-flight work to drain. For a custom timeout use
-// [Limiter.CloseWithTimeout]. Close is idempotent: the first and every later
-// call return nil. Drain timeout is swallowed; the limiter is still closed.
+// Close shuts the limiter down without waiting for in-flight work. Use
+// [Limiter.CloseWithTimeout] (for example with [DefaultCloseTimeout]) when
+// drain must complete before return. Close is idempotent: the first and every
+// later call return nil. An incomplete drain is swallowed; the limiter is
+// still closed.
 func (l *Limiter) Close() error {
-	_ = l.CloseWithTimeout(DefaultCloseTimeout)
+	_ = l.CloseWithTimeout(0)
 	return nil
 }
 
@@ -417,8 +418,8 @@ func (l *Limiter) IsClosed() bool {
 }
 
 const (
-	// DefaultCloseTimeout is how long [Limiter.Close] waits for in-flight work
-	// to drain before retiring the remaining permits.
+	// DefaultCloseTimeout is a suggested drain bound for [Limiter.CloseWithTimeout].
+	// [Limiter.Close] itself does not wait.
 	DefaultCloseTimeout = 30 * time.Second
 )
 
@@ -596,14 +597,18 @@ func (l *Limiter) ctxErr(err error) error {
 
 // record updates the counters and the in-progress window for one completed
 // operation. A zero latency marks a skipped sample: it counts toward
-// success/failure totals and peak in-flight but is excluded from the latency
-// feedback and percentile history. The control law runs at most once per
-// sample window, after warmup, from the window snapshot — never per sample.
+// success/failure totals but is excluded from latency feedback, percentile
+// history, and the window peak in-flight used by AIMD utilization. The control
+// law runs at most once per sample window, after warmup, from the window
+// snapshot — never per sample.
 func (l *Limiter) record(success bool, latency time.Duration) {
 	if success {
 		l.success.Add(1)
 	} else {
 		l.fail.Add(1)
+	}
+	if latency <= 0 {
+		return
 	}
 
 	l.mu.Lock()
@@ -858,13 +863,14 @@ fill:
 // gradient backs off in proportion to how far the window mean sits above the
 // smoothed average and grows while at or below it. A window with any failure
 // is cut once. Callers hold l.mu. EMA itself is updated in updateEstimators
-// after adjust, so the first window sees avgLat == 0 and takes a unit step.
+// after adjust, so the first window sees avgLat == 0 and holds — a high first
+// RTT must not grow the limit before the average exists.
 func (l *Limiter) gradient(snap windowSnap) int {
 	if snap.fails > 0 {
 		return int(float64(l.limit) * l.cfg.decreaseRatio)
 	}
 	if l.avgLat <= 0 {
-		return l.limit + 1
+		return l.limit
 	}
 	g := (snap.meanRTT - l.avgLat) / l.avgLat
 	if g < -l.cfg.tolerance {

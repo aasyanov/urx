@@ -338,7 +338,7 @@ Three environments, two hardware classes, two operating systems. All values are 
 
 | Metric         | Value                          |
 | -------------- | ------------------------------ |
-| Test functions | 75                             |
+| Test functions | 76                             |
 | Benchmarks     | 5                              |
 | Fuzz targets   | 3                              |
 | Examples       | 4                              |

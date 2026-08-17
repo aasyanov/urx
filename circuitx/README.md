@@ -90,7 +90,7 @@ A circuit breaker solves all three. It observes failures, and once they cross a 
    └─────────────────────────────────────────────────────┘
 ```
 
-The hot path is lock-free: admission reads `state`, `failures`, and `halfOpenInflight` with plain atomic loads and a compare-and-swap to reserve a probe slot. A `generation` counter is bumped on every `Open → HalfOpen` promotion and on `Reset` to `Closed`, so a probe that outlives its epoch cannot heal or re-open a newer generation. The single mutex is taken only on a *state transition* (a trip or a close), so it never contends under steady-state traffic — it exists purely to make each edge atomic with respect to the trip counter and the `onStateChange` hook, guaranteeing the hook fires exactly once per edge. A panicking hook is recovered; it must not block.
+The hot path is lock-free: admission reads `state`, `failures`, and `halfOpenInflight` with plain atomic loads and a compare-and-swap to reserve a probe slot. A `generation` counter is bumped on every `Open → HalfOpen` promotion, on `HalfOpen → Closed` heal, and on every `Reset`, so a probe that outlives its epoch cannot heal, re-open, or fail a newer generation. The single mutex is taken only on a *state transition* (a trip or a close), so it never contends under steady-state traffic — it exists purely to make each edge atomic with respect to the trip counter and the `onStateChange` hook, guaranteeing the hook fires exactly once per edge. A panicking hook is recovered; it must not block.
 
 ## How It Works
 
@@ -172,7 +172,7 @@ TryExecute(b, ctx, fn)
 | Open rejects without `fn`       | A call rejected in `Open` or budget-exhausted `HalfOpen` never invokes `fn`; `Execute` returns `ErrOpen`, `TryExecute` returns `(false, zero, nil)`. |
 | Probe budget                    | At most `WithHalfOpenMax` callbacks run concurrently in `HalfOpen`; the rest are rejected the same way.                                              |
 | Heal threshold                  | `HalfOpen → Closed` requires `WithSuccessThreshold` consecutive probe successes; a probe failure resets that counter and re-opens.                   |
-| HalfOpen generation             | `generation` bumps on `Open → HalfOpen` and on `Reset` to `Closed`. A stale probe must not heal or re-open the new epoch; its slot release is a no-op. |
+| HalfOpen generation             | `generation` bumps on `Open → HalfOpen`, on `HalfOpen → Closed` heal, and on every `Reset`. A stale probe must not heal, re-open, or fail Closed; its slot release is a no-op. |
 | Cancel is not a failure         | Post-admission `context.Canceled` is returned but not counted unless `WithCountCanceled`. Pre-admission cancel is `ErrCancelled` and never counted.   |
 | `WithFailureIf` classification  | When set, remaining errors (not ignored cancel, not panic) count only if the predicate returns true. `SkipFailure` always wins.                       |
 | Non-blocking reject             | `TryExecute` returns `(false, zero, nil)` when the circuit rejects — rejection is a return value, not `ErrOpen`.                                     |
@@ -464,7 +464,7 @@ Three environments, two hardware classes, two operating systems. All values are 
 
 | Metric         | Value                          |
 | -------------- | ------------------------------ |
-| Test functions | 77                             |
+| Test functions | 80                             |
 | Benchmarks     | 10                             |
 | Fuzz targets   | 2                              |
 | Examples       | 5                              |

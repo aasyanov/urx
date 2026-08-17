@@ -789,8 +789,10 @@ func TestReset_ForcesClosed(t *testing.T) {
 func TestReset_NoopWhenAlreadyClosed(t *testing.T) {
 	var changes int
 	b := New(WithOnStateChange(func(State, State) { changes++ }))
+	gen := b.generation.Load()
 	b.Reset()
 	assert.Equal(t, 0, changes, "no transition fired when already closed")
+	assert.Equal(t, gen+1, b.generation.Load(), "Reset always bumps generation")
 }
 
 func TestReset_FiresHookFromOpen(t *testing.T) {
@@ -942,6 +944,41 @@ func TestExecute_StaleProbeTripDoesNotOpenNewGeneration(t *testing.T) {
 	close(releaseA)
 	require.NoError(t, <-doneA)
 	assert.Equal(t, HalfOpen, b.State(), "stale probe A Trip must not open the new generation")
+	assert.Equal(t, gen, b.generation.Load())
+}
+
+func TestExecute_LeftoverProbeAfterHealDoesNotTripClosed(t *testing.T) {
+	b := New(
+		WithMaxFailures(1),
+		WithResetTimeout(20*time.Millisecond),
+		WithHalfOpenMax(2),
+	)
+	ctx := context.Background()
+
+	_, _ = Execute(b, ctx, fail[int]())
+	testx.Eventually(t, func() bool { return b.State() == HalfOpen }, time.Second)
+
+	releaseA := make(chan struct{})
+	enteredA := make(chan struct{})
+	doneA := make(chan error, 1)
+	go func() {
+		_, err := Execute(b, ctx, func(context.Context, CircuitController) (int, error) {
+			close(enteredA)
+			<-releaseA
+			return 0, errBoom
+		})
+		doneA <- err
+	}()
+	<-enteredA
+
+	_, err := Execute(b, ctx, ok(1))
+	require.NoError(t, err)
+	require.Equal(t, Closed, b.State())
+	gen := b.generation.Load()
+
+	close(releaseA)
+	require.ErrorIs(t, <-doneA, errBoom)
+	assert.Equal(t, Closed, b.State(), "leftover probe failure must not trip Closed")
 	assert.Equal(t, gen, b.generation.Load())
 }
 

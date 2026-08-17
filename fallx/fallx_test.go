@@ -904,3 +904,48 @@ func TestCached_WithCloneIsolates(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 1, got2.n, "replay clone must not share the previously returned pointer")
 }
+
+func TestCached_CloneReplayDoesNotHoldShardLock(t *testing.T) {
+	started := make(chan struct{})
+	unblock := make(chan struct{})
+	var n atomic.Int32
+	fb := New(
+		WithCached[int](time.Minute, 16),
+		WithClone(func(v int) int {
+			if n.Add(1) == 2 {
+				close(started)
+				<-unblock
+			}
+			return v
+		}),
+	)
+	defer func() { _ = fb.Close() }()
+
+	_, err := Execute(fb, context.Background(), okFn(1))
+	require.NoError(t, err)
+
+	replayDone := make(chan error, 1)
+	go func() {
+		_, err := Execute(fb, context.Background(), failFn[int](errPrimary))
+		replayDone <- err
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("clone on replay did not start")
+	}
+
+	seeded := make(chan struct{})
+	go func() {
+		fb.Seed(DefaultKey, 2)
+		close(seeded)
+	}()
+	select {
+	case <-seeded:
+	case <-time.After(time.Second):
+		t.Fatal("clone held the shard lock; Seed deadlocked")
+	}
+
+	close(unblock)
+	require.NoError(t, <-replayDone)
+}

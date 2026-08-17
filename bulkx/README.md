@@ -115,7 +115,7 @@ run(b, ctx, waited, fn)
   return val, err
 ```
 
-Admission is a three-phase strategy tuned for the common case. A pre-cancelled context is rejected before any work. The **optimistic phase** attempts a non-blocking send on the semaphore channel — when a slot is free **and no one is already waiting**, the call proceeds with **zero timer allocation**. If `waiters > 0`, the fast path is skipped so [TryExecute] and a lucky [Execute] cannot barge ahead of a blocked waiter. Only when every slot is busy (or waiters already exist) does the **slow phase** increment the waiter count, arm a `time.Timer` for `min(timeout, ctx remaining)`, and block on a four-way select: a freed slot, context cancellation, the wait timeout, or close.
+Admission is a three-phase strategy tuned for the common case. A pre-cancelled context is rejected before any work. The **optimistic phase** attempts a non-blocking send on the semaphore channel — when a slot is free **and no one is already waiting**, the call proceeds with **zero timer allocation**. After a successful send it re-checks `waiters`: if a waiter appeared mid-send, the slot is refunded and the caller joins the slow path (`TryExecute` rejects). If `waiters > 0` up front, the fast path is skipped so [TryExecute] and a lucky [Execute] cannot barge ahead of a blocked waiter. Only when every slot is busy (or waiters already exist) does the **slow phase** increment the waiter count, arm a `time.Timer` for `min(timeout, ctx remaining)`, and block on a four-way select: a freed slot, context cancellation, the wait timeout, or close.
 
 On timer expiry the wait re-checks `ctx.Err()`: if the context is done it returns `ErrCancelled`, otherwise `ErrTimeout`. After winning the semaphore, a cancelled context refunds the slot instead of running the callback.
 
@@ -372,7 +372,7 @@ Three environments, two hardware classes, two operating systems. All values are 
 
 | Metric         | Value                          |
 | -------------- | ------------------------------ |
-| Test functions | 64                             |
+| Test functions | 65                             |
 | Benchmarks     | 7                              |
 | Fuzz targets   | 3                              |
 | Examples       | 6                              |

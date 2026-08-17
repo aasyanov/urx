@@ -490,7 +490,7 @@ Contributing workflow: bring one package to Gate M+5 per focused change — audi
 
 ## Versioning
 
-- **1.5.2** (Unreleased) — resilience 8+ pass: windowed adaptx laws, fail-fast `WaitN`, pin-count quotax, consecutive circuitx generation + cancel classification, fallback/retry/hedge/bulk/shed/warmup contract fixes. Breaking details in [CHANGELOG.md](CHANGELOG.md).
+- **1.5.2** (Unreleased) — resilience 8+ pass plus re-audit polish: windowed adaptx laws (Gradient first window holds; `Close()` does not wait), fail-fast `WaitN`, pin-count quotax (`Remove`/`Reset` skip pins), consecutive circuitx generation (heal+Reset), hysteresis that actually sheds in-band, fallback/retry/hedge/bulk/toutx contract fixes. Breaking details in [CHANGELOG.md](CHANGELOG.md).
 - **1.4.0** — greenfield rewrite: flat imports, sentinel errors, expanded controllers, removed packages from ≤1.3.0 (`errx`, `dicx`, `logx`, …). Details in [CHANGELOG.md](CHANGELOG.md).
 - Pin a version in `go.mod`. Releases through 1.3.0 are a different library surface; upgrading to 1.4.0+ requires code changes.
 

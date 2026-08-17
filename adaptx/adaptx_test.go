@@ -56,8 +56,8 @@ func saturate(l *Limiter) {
 	l.inFlight.Store(int32(l.Limit()))
 }
 
-// shutdown zeros in-flight (including test-only saturations) so Close does not
-// wait out DefaultCloseTimeout for work that was never admitted.
+// shutdown zeros in-flight (including test-only saturations) so CloseWithTimeout
+// drain checks see a clean limiter.
 func shutdown(l *Limiter) {
 	l.inFlight.Store(0)
 	_ = l.Close()
@@ -222,6 +222,20 @@ func TestExecute_SkipSamplePreservesFailureCount(t *testing.T) {
 	assert.Equal(t, time.Duration(0), l.Stats().AvgLat)
 }
 
+func TestRecord_SkipSampleDoesNotRaiseWindowPeak(t *testing.T) {
+	l := New(WithAlgorithm(AIMD), WithInitialLimit(10), WithMaxLimit(100),
+		WithUtilization(0.9), WithWarmupSamples(0))
+	defer l.Close()
+
+	l.inFlight.Store(100)
+	l.record(true, 0)
+
+	l.mu.Lock()
+	peak := l.windowMaxInFlight
+	l.mu.Unlock()
+	assert.Equal(t, 0, peak, "skipped samples must not raise AIMD utilization peak")
+}
+
 // --- Context handling ---
 
 func TestExecute_CancelledContext(t *testing.T) {
@@ -338,6 +352,19 @@ func TestClose_Idempotent(t *testing.T) {
 	require.NoError(t, l.Close())
 	require.NoError(t, l.Close())
 	assert.True(t, l.IsClosed())
+}
+
+func TestClose_DoesNotWaitForInFlight(t *testing.T) {
+	l := New(WithInitialLimit(1), WithMaxLimit(1))
+	rel, ok := l.TryAcquire()
+	require.True(t, ok)
+
+	start := time.Now()
+	require.NoError(t, l.Close())
+	assert.Less(t, time.Since(start), 2*time.Second, "Close must not wait DefaultCloseTimeout")
+	assert.True(t, l.IsClosed())
+
+	rel(true, time.Millisecond)
 }
 
 func TestAcquire_BlockedWaiterRejectedOnClose(t *testing.T) {
@@ -494,6 +521,9 @@ func TestVegas_QueueUsesRttDenominator(t *testing.T) {
 	// α = limit·tol = 4, β = 8 → hold. The old /minLat formula would give
 	// queue=10 and multiplicative-decrease to 5.
 	assert.Equal(t, 10, l.vegas(float64((2 * time.Millisecond).Nanoseconds())))
+
+	// queue = 10·(1 − 1ms/10ms) = 9. α = 4, β = 8 → multiplicative decrease to 5.
+	assert.Equal(t, 5, l.vegas(float64((10 * time.Millisecond).Nanoseconds())))
 }
 
 func TestGradient_GrowsThenBacksOff(t *testing.T) {
@@ -505,18 +535,29 @@ func TestGradient_GrowsThenBacksOff(t *testing.T) {
 	l.record(true, time.Millisecond)
 	clk.Advance(time.Second)
 	l.record(true, time.Millisecond)
-	grew := l.Limit()
-	assert.Greater(t, grew, 10, "first window at avgLat=0 takes a unit step")
+	assert.Equal(t, 10, l.Limit(), "first window at avgLat=0 holds")
 
 	clk.Advance(time.Second)
 	l.record(true, time.Millisecond)
-	assert.Greater(t, l.Limit(), grew, "rtt at the average still grows")
+	grew := l.Limit()
+	assert.Greater(t, grew, 10, "second window at the average still grows")
 
-	beforeBackoff := l.Limit()
 	clk.Advance(time.Second)
 	l.record(true, 50*time.Millisecond)
-	assert.Less(t, l.Limit(), beforeBackoff, "window mean far above EMA backs off")
+	assert.Less(t, l.Limit(), grew, "window mean far above EMA backs off")
 	assert.Equal(t, Gradient.String(), l.Stats().Algorithm)
+}
+
+func TestGradient_FirstWindowHighRTTDoesNotGrow(t *testing.T) {
+	clk := newTestClock()
+	l := New(adaptOpts(clk, WithAlgorithm(Gradient), WithInitialLimit(10), WithMaxLimit(100),
+		WithMinLimit(1), WithSmoothing(0.5), WithTolerance(0.1), WithDecreaseRatio(0.5))...)
+	defer l.Close()
+
+	l.record(true, 50*time.Millisecond)
+	clk.Advance(time.Second)
+	l.record(true, 50*time.Millisecond)
+	assert.Equal(t, 10, l.Limit(), "first window holds even when RTT is already high")
 }
 
 func TestGradient_EMAInitFirstSample(t *testing.T) {
@@ -912,8 +953,8 @@ func TestGradient_GuardBranches(t *testing.T) {
 	defer l.mu.Unlock()
 
 	l.avgLat = 0
-	assert.Equal(t, 11, l.gradient(windowSnap{meanRTT: float64(time.Millisecond.Nanoseconds())}),
-		"no average yet → step up")
+	assert.Equal(t, 10, l.gradient(windowSnap{meanRTT: float64(time.Millisecond.Nanoseconds())}),
+		"no average yet → hold")
 
 	l.avgLat = float64(time.Millisecond.Nanoseconds())
 	assert.Equal(t, int(float64(10)*l.cfg.decreaseRatio), l.gradient(windowSnap{fails: 1, meanRTT: 1e6}),

@@ -124,8 +124,8 @@ func TestNormalizeResult_CanceledWhenOurCtxDone(t *testing.T) {
 	<-tctx.Done()
 	got, err := normalizeResult(0, tctx, context.Background(), "op", time.Second,
 		execResult[int]{val: 7, err: context.Canceled})
-	require.ErrorIs(t, err, ErrCancelled)
-	require.ErrorIs(t, err, context.Canceled)
+	require.ErrorIs(t, err, ErrDeadlineExceeded)
+	assert.NotErrorIs(t, err, ErrCancelled)
 	assert.Zero(t, got)
 }
 

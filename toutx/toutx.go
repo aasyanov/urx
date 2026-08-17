@@ -150,8 +150,9 @@ func awaitResult[T any](
 // tctx has already expired (this call's timeout fired). If fn returns
 // DeadlineExceeded while tctx is still live, the original error and value
 // pass through. context.Canceled is remapped to [ErrCancelled] only when the
-// parent is done or tctx is done; an inner Canceled while both are live
-// propagates unchanged.
+// parent is already done; if the parent is live and tctx is done, that
+// Canceled is our timeout and becomes [ErrDeadlineExceeded]. An inner
+// Canceled while both are live propagates unchanged.
 func normalizeResult[T any](zero T, tctx, parent context.Context, op string, timeout time.Duration, r execResult[T]) (T, error) {
 	if r.err == nil {
 		return r.val, nil
@@ -160,11 +161,14 @@ func normalizeResult[T any](zero T, tctx, parent context.Context, op string, tim
 		if parent.Err() == nil && tctx.Err() == nil {
 			return r.val, r.err
 		}
-		cause := context.Cause(parent)
-		if cause == nil {
-			cause = context.Canceled
+		if parent.Err() != nil {
+			cause := context.Cause(parent)
+			if cause == nil {
+				cause = context.Canceled
+			}
+			return zero, errCancelled(op, cause)
 		}
-		return zero, errCancelled(op, cause)
+		return zero, errDeadlineExceeded(op, timeout)
 	}
 	if errors.Is(r.err, context.DeadlineExceeded) {
 		if tctx.Err() == nil {

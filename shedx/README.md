@@ -101,6 +101,7 @@ Execute(s, ctx, priority, fn)
   │       ├── priority == Critical ──────────────► commit (bypass; never sheds)
   │       ├── hysteresis>0 && shedding:
   │       │     load < (threshold − hysteresis) ─► clear shedding ; admit
+  │       │     load < threshold ─► reject non-critical (keep latched)
   │       │     else apply cutoffs
   │       ├── load < threshold ──────────────────► admit
   │       └── else latch shedding (if hysteresis>0) and
@@ -139,7 +140,7 @@ TryExecute(s, ctx, priority, fn)
 
 Admission is the whole game. Below the threshold every request passes. Above it, each non-critical priority is admitted only while the **overload fraction** — how far into the `[threshold, 1.0]` band the current load sits — stays under that priority's cutoff. As load climbs, `Low` drops out first (at 25 % into the band), then `Normal` (60 %), then `High` (90 %); `Critical` never drops. This produces a smooth, monotonic shed order rather than a cliff.
 
-`WithHysteresis(delta)` (default `0`) latches shedding once load crosses the threshold and keeps applying cutoffs until load falls below `threshold − delta`. Zero hysteresis is today's trip-at-threshold behaviour. `PriorityCritical` is never shed and does not clear the latch.
+`WithHysteresis(delta)` (default `0`) latches shedding once load crosses the threshold and keeps shedding **all non-critical** traffic until load falls below `threshold − delta`. While latched and still below the threshold, admit-all is skipped (negative overload cannot reopen Low/Normal/High). Above the threshold, cutoffs still apply. Zero hysteresis is today's trip-at-threshold behaviour. `PriorityCritical` is never shed and does not clear the latch.
 
 The reservation uses a lock-free **compare-and-swap loop**: the candidate slot is committed only if admission holds for the *exact* post-increment count being stored. After a successful CAS, **commitReservation** re-checks the closed flag (the same pattern as `bulkx`'s `commitSlot`): if `Close` won the race, the increment is rolled back and the caller receives `ErrClosed` rather than being admitted past shutdown. This is what makes the capacity bound hold under concurrency — two goroutines racing for the last slot read distinct counts, so at most one commits, and the in-flight counter is never transiently inflated past what is admitted. The loop retries only under genuine contention on the counter and allocates nothing.
 
@@ -156,7 +157,7 @@ The `ShedController` handed to the callback carries the load snapshot taken at a
 | -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Capacity bound       | The committed non-critical in-flight count never exceeds the per-priority admission ceiling, even under concurrency (CAS-enforced)                                    |
 | Critical never shed  | `PriorityCritical` is admitted at any load, even above capacity; hysteresis does not change this |
-| Hysteresis latch     | `WithHysteresis(d)` keeps cutoff mode until load `< threshold − d`; `d = 0` is today's behaviour |
+| Hysteresis latch     | `WithHysteresis(d)` keeps shedding non-critical until load `< threshold − d`; in-band (`resume ≤ load < threshold`) rejects all non-critical; `d = 0` is today's behaviour |
 | SkipSlot             | Early inflight release is idempotent with the deferred decrement; `Shed` never releases the slot |
 | Monotonic shed order | As load rises, lower priorities are shed before higher ones                                                                                                           |
 | Context first        | A pre-cancelled context returns `ErrCancelled` without invoking fn or consuming a slot                                                                                |
@@ -429,7 +430,7 @@ Above the threshold, the overload fraction `(load − threshold) / (1 − thresh
 > **Shed vs SkipSlot.** `Shed()` records that you served a cheaper response; the in-flight slot stays held until the callback returns. `SkipSlot()` frees the slot immediately for a cache hit / no-op so other work can be admitted. They are independent — calling `Shed` does not release capacity.
 
 > [!NOTE]
-> **Hysteresis keeps shedding latched in-band.** With `WithHysteresis(0.2)` and threshold `0.8`, load must fall below `0.6` before non-critical traffic is admitted-all again. Zero hysteresis (the default) matches today's trip-at-threshold behaviour. `PriorityCritical` is unaffected.
+> **Hysteresis keeps shedding latched in-band.** With `WithHysteresis(0.2)` and threshold `0.8`, load must fall below `0.6` before non-critical traffic is admitted-all again. While latched in `[0.6, 0.8)`, every non-critical request is rejected. Zero hysteresis (the default) matches today's trip-at-threshold behaviour. `PriorityCritical` is unaffected.
 
 > [!NOTE]
 > **Shedding does not abort admitted work.** A request admitted just before load spiked still runs to completion. For a hard per-request deadline, wrap the callback with `toutx.Execute`.

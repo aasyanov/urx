@@ -2,6 +2,7 @@
 
 [CI](https://github.com/aasyanov/urx/actions/workflows/ci.yml)
 [Go Reference](https://pkg.go.dev/github.com/aasyanov/urx/retryx)
+[Changelog](../CHANGELOG.md)
 [License: MIT](../LICENSE)
 
 A generic retry engine that re-executes a function with exponential backoff, decorrelating jitter, context-aware cancellation, per-attempt control, and panic recovery. Go 1.24+. Zero external dependencies (depends only on the urx `panix` package; testify in tests only).

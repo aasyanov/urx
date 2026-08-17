@@ -83,7 +83,8 @@ type AdaptController interface {
 	// SkipSample tells the limiter not to feed this call's latency and outcome
 	// into the adaptive algorithm. Use it for outlier operations whose latency
 	// would mislead the controller (cache misses, cold starts, admin calls).
-	// The call still counts toward the success/failure totals in [Stats]. Safe
+	// The call still counts toward the success/failure totals in [Stats] but
+	// does not raise the window peak in-flight used by AIMD utilization. Safe
 	// to call multiple times; only the first call has an effect.
 	SkipSample()
 }

@@ -253,7 +253,6 @@ func (q *Quota) waitFor(ctx context.Context, key string, n int) (*bucket, waitRe
 		return nil, waitResult{}, err
 	}
 
-	b.pin()
 	defer b.unpin()
 	res, err := q.waitForOnBucket(ctx, b, n)
 	if err != nil {
@@ -274,20 +273,34 @@ func stopTimer(t *time.Timer) {
 }
 
 // bucketForWait resolves the key's bucket for a blocking call, creating it if
-// absent. Both [Quota.lookup] (on hit) and [Quota.getOrCreate] (on create)
-// already refresh the access timestamp, so no extra touch is needed here. It
-// returns [ErrMaxKeys] if a new key cannot be admitted under the [WithMaxKeys]
-// cap.
+// absent, and pins it under the shard write lock so [Quota.Remove] and
+// [Quota.Reset] cannot orphan an in-flight waiter. The caller must unpin.
+// It returns [ErrMaxKeys] if a new key cannot be admitted under the
+// [WithMaxKeys] cap.
 func (q *Quota) bucketForWait(key string) (*bucket, error) {
 	s := q.shardFor(key)
-	b := q.lookup(s, key)
-	if b == nil {
-		b = q.getOrCreate(s, key)
-		if b == nil {
-			q.limited.Add(1)
-			return nil, errMaxKeys(key)
-		}
+	s.mu.Lock()
+	if b, exists := s.buckets[key]; exists {
+		b.pin()
+		s.mu.Unlock()
+		b.touch()
+		return b, nil
 	}
+
+	if !q.reserveKey() {
+		s.mu.Unlock()
+		q.invokeOnMaxKeys(key)
+		q.limited.Add(1)
+		return nil, errMaxKeys(key)
+	}
+
+	b := &bucket{
+		limiter: ratex.New(ratex.WithRate(q.cfg.rate), ratex.WithBurst(q.cfg.burst)),
+	}
+	b.touch()
+	b.pin()
+	s.buckets[key] = b
+	s.mu.Unlock()
 	return b, nil
 }
 
@@ -325,7 +338,6 @@ func Execute[T any](q *Quota, ctx context.Context, key string, fn QuotaFunc[T]) 
 	if err != nil {
 		return zero, err
 	}
-	b.pin()
 	defer b.unpin()
 
 	res, err := q.waitForOnBucket(ctx, b, 1)
@@ -361,7 +373,6 @@ func TryExecute[T any](q *Quota, ctx context.Context, key string, fn QuotaFunc[T
 	if err != nil {
 		return false, zero, err
 	}
-	b.pin()
 	defer b.unpin()
 
 	if !b.limiter.Allow() {
@@ -461,30 +472,46 @@ func runAfterAdmit[T any](q *Quota, b *bucket, key string, res waitResult, op st
 	})
 	if qc.skipToken {
 		b.limiter.Release(1)
-		q.allowed.Add(-1)
+		q.rollbackAllowed()
 	}
 	return val, err
+}
+
+// rollbackAllowed decrements the aggregate allowed counter without driving it
+// below zero, matching [ratex.Limiter.Release] so [QuotaController.SkipToken]
+// after [Quota.ResetStats] cannot wrap the counter.
+func (q *Quota) rollbackAllowed() {
+	for {
+		cur := q.allowed.Load()
+		if cur <= 0 {
+			return
+		}
+		if q.allowed.CompareAndSwap(cur, cur-1) {
+			return
+		}
+	}
 }
 
 // --- Key management ---
 
 // Remove deletes the bucket for a key, discarding its accrued tokens. It
-// reports whether the key existed.
+// reports whether the key existed and was deleted.
 //
-// Remove does not wait for in-flight Wait/Execute callers. A waiter that has
-// already pinned this bucket keeps using the orphaned limiter until it unpins;
-// a later Allow for the same key may create a new bucket (a ghost dual-bucket
-// until the waiter returns). The sweeper never does this: it skips pinned keys.
+// Remove is a no-op (returns false) while any Wait/Execute caller holds a pin
+// on the bucket, so a later Allow cannot create a second limiter for the same
+// key. The sweeper also skips pinned keys.
 func (q *Quota) Remove(key string) bool {
 	s := q.shardFor(key)
 	s.mu.Lock()
-	_, exists := s.buckets[key]
-	if exists {
-		delete(s.buckets, key)
-		q.keyCount.Add(-1)
+	b, exists := s.buckets[key]
+	if !exists || b.pins.Load() > 0 {
+		s.mu.Unlock()
+		return false
 	}
+	delete(s.buckets, key)
+	q.keyCount.Add(-1)
 	s.mu.Unlock()
-	return exists
+	return true
 }
 
 // Exists reports whether a bucket is currently tracked for the given key.
@@ -501,19 +528,25 @@ func (q *Quota) KeyCount() int64 {
 	return q.keyCount.Load()
 }
 
-// Reset removes all tracked keys, discarding every bucket. Counters are left
+// Reset removes every unpinned tracked key. Buckets with pins > 0 stay so
+// in-flight Wait/Execute callers keep a single limiter; [Quota.KeyCount] is
+// rewritten to the number of remaining (pinned) keys. Counters are left
 // untouched; use [Quota.ResetStats] for those.
-//
-// Like [Quota.Remove], Reset may orphan in-flight waiters: they keep their
-// pinned *bucket until unpin, while new admissions create fresh limiters. The
-// background sweeper never orphans waiters — it skips buckets with pins > 0.
 func (q *Quota) Reset() {
+	var remaining int64
 	for i := range q.shards {
-		q.shards[i].mu.Lock()
-		q.shards[i].buckets = make(map[string]*bucket)
-		q.shards[i].mu.Unlock()
+		s := &q.shards[i]
+		s.mu.Lock()
+		for k, b := range s.buckets {
+			if b.pins.Load() > 0 {
+				remaining++
+				continue
+			}
+			delete(s.buckets, k)
+		}
+		s.mu.Unlock()
 	}
-	q.keyCount.Store(0)
+	q.keyCount.Store(remaining)
 }
 
 // --- Statistics ---

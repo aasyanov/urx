@@ -2,6 +2,7 @@
 
 [CI](https://github.com/aasyanov/urx/actions/workflows/ci.yml)
 [Go Reference](https://pkg.go.dev/github.com/aasyanov/urx/toutx)
+[Changelog](../CHANGELOG.md)
 [License: MIT](../LICENSE)
 
 A generic timeout wrapper that runs a function under a deadline-scoped context, distinguishes a fired deadline from parent cancellation, recovers panics, and hands the callback a `TimeoutController` for self-throttling. Go 1.24+. Zero external dependencies (depends only on the urx `panix` package; testify in tests only).
@@ -98,7 +99,7 @@ The deadline context is created with `context.WithTimeoutCause(..., ErrDeadlineE
 
 Classification: both a parent cancellation and the locally-imposed deadline close `tctx`. `Execute` inspects `context.Cause` on the *parent*: if the parent carries a cancellation cause, the failure is `ErrCancelled` (wrapping that cause); otherwise it was this call's own deadline, reported as `ErrDeadlineExceeded`.
 
-If `fn` itself returns `context.DeadlineExceeded` while `tctx` is still live, that error (and value) **propagates unchanged** — it is an inner deadline, not this wrapper's timeout. The same applies to `context.Canceled` while both parent and `tctx` are still live. Remap to package sentinels only when our timeout context or the parent is already done.
+If `fn` itself returns `context.DeadlineExceeded` while `tctx` is still live, that error (and value) **propagates unchanged** — it is an inner deadline, not this wrapper's timeout. The same applies to `context.Canceled` while both parent and `tctx` are still live. If `fn` returns `Canceled` after `tctx` is done and the parent is still live, that is this call's timeout and remaps to `ErrDeadlineExceeded`. Remap to `ErrCancelled` only when the parent is already done.
 
 ## Normative Contracts
 

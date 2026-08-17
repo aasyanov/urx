@@ -15,7 +15,7 @@ go get github.com/aasyanov/urx
 > `quotax` is **per-key, single-process**. It does not coordinate across machines. For a cluster-wide per-key budget, back it with a shared store (Redis, etc.); `quotax` is the local enforcement layer. The global `ratex` limiter handles the single-bucket case — reach for `quotax` only when the limit is *per key*. **Always call `Close`**: `New` starts a background sweeper. `WaitN(ctx, key, n)` with `n > burst` returns `ratex.ErrExceedsBurst` immediately.
 
 > [!CAUTION]
-> **Breaking in 1.5.2:** `WaitN` with `n > burst` used to block until cancel/`Close`. It now returns `ratex.ErrExceedsBurst` immediately (same sentinel as `ratex`, so `errors.Is` works). Eviction of in-flight `Wait`/`Execute` is prevented by a pin count, not by "touch every loop" — `Remove`/`Reset` can still orphan waiters.
+> **Breaking in 1.5.2:** `WaitN` with `n > burst` used to block until cancel/`Close`. It now returns `ratex.ErrExceedsBurst` immediately (same sentinel as `ratex`, so `errors.Is` works). Eviction of in-flight `Wait`/`Execute` is prevented by a pin count. `Remove`/`Reset` skip pinned buckets so they cannot create a ghost dual-bucket.
 
 ## The Problem
 
@@ -80,7 +80,7 @@ A single token bucket (`ratex`) limits an entire process. But real services must
  bucket.pins          skip pins>0         + ratex.ErrExceedsBurst
 ```
 
-Each `shard` is `{sync.RWMutex; map[string]*bucket}`. A key hashes (via `hash/maphash`, allocation-free) to exactly one shard, so concurrent requests for keys on different shards never contend. Each `bucket` wraps a `ratex.Limiter`, an atomic `lastAccess` timestamp, and an atomic pin count: `Wait`/`WaitN`/`Execute`/`TryExecute` pin the bucket for the whole call (including the user callback). The sweeper will not evict a pinned bucket, even if `lastAccess` is older than the TTL. `Allow`/`AllowN` do not pin.
+Each `shard` is `{sync.RWMutex; map[string]*bucket}`. A key hashes (via `hash/maphash`, allocation-free) to exactly one shard, so concurrent requests for keys on different shards never contend. Each `bucket` wraps a `ratex.Limiter`, an atomic `lastAccess` timestamp, and an atomic pin count: `Wait`/`WaitN`/`Execute`/`TryExecute` pin the bucket **under the shard write lock** for the whole call (including the user callback). The sweeper, `Remove`, and `Reset` will not evict a pinned bucket. `Allow`/`AllowN` do not pin.
 
 ## How It Works
 
@@ -132,7 +132,7 @@ Token accrual is delegated entirely to `ratex`: each key's bucket refills lazily
 | Panic safety        | A panicking `fn` becomes a `*panix.PanicError` tagged with the quotax op (`quotax.Execute` / `quotax.TryExecute`); the process never crashes                                         |
 | Nil guard           | A nil `fn` returns `ErrNilFunc` without consuming a token                                                                                                                              |
 | Token refund        | `QuotaController.SkipToken` returns the token to the *key's* bucket                                                                                                                    |
-| Eviction safety     | The sweeper never deletes a bucket with `pins > 0`. `Wait`/`WaitN`/`Execute`/`TryExecute` pin around the whole call, including a long `fn`, so a waiter cannot be swept into a ghost dual-bucket. `Allow`/`AllowN` do not pin. `Remove`/`Reset` **may** orphan waiters |
+| Eviction safety     | The sweeper never deletes a bucket with `pins > 0`. `Wait`/`WaitN`/`Execute`/`TryExecute` pin under the shard lock for the whole call, including a long `fn`. `Allow`/`AllowN` do not pin. `Remove`/`Reset` skip pinned buckets |
 | Fail-fast `n > burst` | `WaitN` returns `ratex.ErrExceedsBurst` immediately (no wait, no tokens, no new key); `AllowN` returns false and consumes nothing |
 | Idempotent close    | `Close` is safe to call repeatedly; it stops the sweeper exactly once                                                                                                                  |
 | Thread safety       | All `Quota` methods are safe for concurrent use                                                                                                                                        |
@@ -264,10 +264,10 @@ val, err := quotax.Execute(q, ctx, userID,
 | `Quota.WaitN`         | `func (q *Quota) WaitN(ctx, key, n) error`                                                     | Block until n tokens for key, ctx done, close, or `n > burst` |
 | `Execute`             | `func Execute[T any](q *Quota, ctx, key, fn QuotaFunc[T]) (T, error)` | Block for a token, then run fn panic-safe                      |
 | `TryExecute`          | `func TryExecute[T any](q *Quota, ctx, key, fn QuotaFunc[T]) (bool, T, error)` | Run fn only if a token is immediately available                |
-| `Quota.Remove`        | `func (q *Quota) Remove(key string) bool`                                                      | Delete a key's bucket; reports whether it existed              |
+| `Quota.Remove`        | `func (q *Quota) Remove(key string) bool`                                                      | Delete an unpinned key's bucket; false if missing or pinned    |
+| `Quota.Reset`         | `func (q *Quota) Reset()`                                                                      | Remove unpinned keys; pinned buckets stay                      |
 | `Quota.Exists`        | `func (q *Quota) Exists(key string) bool`                                                      | Whether a bucket is currently tracked for key                  |
 | `Quota.KeyCount`      | `func (q *Quota) KeyCount() int64`                                                             | Number of currently tracked keys                               |
-| `Quota.Reset`         | `func (q *Quota) Reset()`                                                                      | Remove all tracked keys                                        |
 | `Quota.Stats`         | `func (q *Quota) Stats() Stats`                                                                | Aggregate counters snapshot                                    |
 | `Quota.ResetStats`    | `func (q *Quota) ResetStats()`                                                                 | Zero the allowed/limited counters                              |
 | `Quota.ForceEviction` | `func (q *Quota) ForceEviction()`                                                              | Run one eviction pass now (testing hook)                       |
@@ -323,7 +323,7 @@ val, err := quotax.Execute(q, ctx, userID,
 > **A request larger than `burst` can never succeed.** `WaitN(ctx, key, n)` with `n > burst` returns `ratex.ErrExceedsBurst` immediately (it does not hang). `AllowN` returns false and consumes nothing. Size your burst so legitimate requests fit.
 
 > [!WARNING]
-> **`Remove` and `Reset` can orphan waiters.** They delete the map entry even if a `Wait`/`Execute` is pinned to that `*bucket`. The waiter keeps using the orphaned limiter until it unpins; a later `Allow` for the same key may create a **second** limiter (ghost dual-bucket) until the waiter returns. The sweeper never does this — it skips `pins > 0`.
+> **`Remove` and `Reset` skip pinned keys.** A `Wait`/`Execute` in flight keeps its bucket; `Remove` returns false and `Reset` leaves that key counted. After unpin, `Remove`/`Reset` can delete it. The sweeper has always skipped `pins > 0`.
 
 > [!WARNING]
 > **Always `Close`.** `New` starts a background sweeper goroutine. Forgetting `Close` leaks that goroutine for the lifetime of the process.
@@ -339,7 +339,7 @@ val, err := quotax.Execute(q, ctx, userID,
 
 ## Safety and Concurrency
 
-Keys are partitioned across `WithShards` shards, each guarded by its own `sync.RWMutex`; requests for keys on different shards never contend. The read path (`lookup`) takes a read lock; only first-touch creation and removal take the write lock. Each bucket carries an atomic pin count: `Wait`/`Execute` pin for the whole call (including `fn`) so the sweeper cannot delete the limiter out from under a sleeper or a long callback. The aggregate counters (`allowed`, `limited`, `keyCount`) and the closed flag are lock-free atomics, and the `WithMaxKeys` cap is enforced with a compare-and-swap loop so the bound holds exactly under contention. The user function in `Execute` runs **outside** all shard locks (the per-key `ratex.Limiter` owns its own brief lock), so a slow callback never blocks other keys. A single background sweeper goroutine performs eviction; `Close` closes `closedCh` (unblocking any in-flight waiters with `ErrClosed`), stops the sweeper, and blocks until it exits. Every test runs under `-race`.
+Keys are partitioned across `WithShards` shards, each guarded by its own `sync.RWMutex`; requests for keys on different shards never contend. The read path (`lookup`) takes a read lock; only first-touch creation and removal take the write lock. Each bucket carries an atomic pin count: `Wait`/`Execute` pin **under the shard write lock** for the whole call (including `fn`) so the sweeper, `Remove`, and `Reset` cannot delete the limiter out from under a sleeper or a long callback. The aggregate counters (`allowed`, `limited`, `keyCount`) and the closed flag are lock-free atomics, and the `WithMaxKeys` cap is enforced with a compare-and-swap loop so the bound holds exactly under contention. The user function in `Execute` runs **outside** all shard locks (the per-key `ratex.Limiter` owns its own brief lock), so a slow callback never blocks other keys. A single background sweeper goroutine performs eviction; `Close` closes `closedCh` (unblocking any in-flight waiters with `ErrClosed`), stops the sweeper, and blocks until it exits. Every test runs under `-race`.
 
 ## Benchmarks
 
@@ -380,7 +380,7 @@ Three environments, two hardware classes, two operating systems. All values are 
 
 | Metric         | Value                                 |
 | -------------- | ------------------------------------- |
-| Test functions | 72                                    |
+| Test functions | 75                                    |
 | Benchmarks     | 6                                     |
 | Fuzz targets   | 2                                     |
 | Examples       | 4                                     |

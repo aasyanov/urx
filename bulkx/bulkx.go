@@ -155,6 +155,10 @@ func (b *Bulkhead) reserve(ctx context.Context) (waited bool, err error) {
 	if b.waiters.Load() == 0 {
 		select {
 		case b.sem <- struct{}{}:
+			if b.waiters.Load() > 0 {
+				<-b.sem
+				return b.reserveSlow(ctx)
+			}
 			return b.finishReserve(ctx, false)
 		default:
 		}
@@ -348,6 +352,11 @@ func TryExecute[T any](b *Bulkhead, ctx context.Context, fn func(ctx context.Con
 
 	select {
 	case b.sem <- struct{}{}:
+		if b.waiters.Load() > 0 {
+			<-b.sem
+			b.rejected.Add(1)
+			return false, zero, nil
+		}
 		if _, err := b.finishReserve(ctx, false); err != nil {
 			return false, zero, err
 		}

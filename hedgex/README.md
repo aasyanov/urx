@@ -2,6 +2,7 @@
 
 [CI](https://github.com/aasyanov/urx/actions/workflows/ci.yml)
 [Go Reference](https://pkg.go.dev/github.com/aasyanov/urx/hedgex)
+[Changelog](../CHANGELOG.md)
 [License: MIT](../LICENSE)
 
 A thread-safe request hedger that launches the same logical request as several copies with staggered delays and keeps the first success, cancelling the losers. It turns a fat latency tail into a tight one by racing a slow request against a fresh copy instead of waiting it out. Staggered fan-out, a controller for per-copy adaptation and voluntary withdrawal, panic recovery, and a zero-goroutine fast path when hedging is disabled. Go 1.24+. Zero external dependencies (depends only on the urx `panix` package; testify in tests only).

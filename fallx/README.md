@@ -399,7 +399,7 @@ This gives three comparison axes: **laptop vs server** (hardware scaling), **Lin
 
 | Metric | Value |
 |---|---|
-| Test functions | 67 |
+| Test functions | 68 |
 | Benchmarks | 7 |
 | Fuzz targets | 4 (all pass, 30s each) |
 | Examples | 5 |

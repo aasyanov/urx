@@ -908,6 +908,47 @@ func TestTryExecute_DoesNotBargeAheadOfWaiter(t *testing.T) {
 	assert.Equal(t, 1, b.Active())
 }
 
+func TestTryExecute_DoesNotBargeLiveWaiter(t *testing.T) {
+	b := New(WithMaxConcurrent(1), WithTimeout(2*time.Second))
+	defer func() { require.NoError(t, b.Close()) }()
+
+	tok := fill(t, b, 1)[0]
+	defer tok.Release()
+
+	waiting := make(chan struct{})
+	gotSlot := make(chan struct{})
+	errCh := make(chan error, 1)
+	go func() {
+		close(waiting)
+		_, err := Execute(b, context.Background(),
+			func(context.Context, BulkController) (int, error) {
+				close(gotSlot)
+				return 1, nil
+			})
+		errCh <- err
+	}()
+	<-waiting
+	testx.Eventually(t, func() bool { return b.Stats().Waiters == 1 }, time.Second)
+
+	called := false
+	ok, _, err := TryExecute(b, context.Background(),
+		func(context.Context, BulkController) (int, error) {
+			called = true
+			return 1, nil
+		})
+	require.NoError(t, err)
+	assert.False(t, ok, "TryExecute must not take a slot a live waiter is queued for")
+	assert.False(t, called)
+
+	tok.Release()
+	select {
+	case <-gotSlot:
+	case <-time.After(time.Second):
+		t.Fatal("live waiter did not obtain the freed slot")
+	}
+	require.NoError(t, <-errCh)
+}
+
 func TestReserve_WaitIsMinOfTimeoutAndDeadline(t *testing.T) {
 	b := New(WithMaxConcurrent(1), WithTimeout(time.Hour))
 	defer func() { require.NoError(t, b.Close()) }()

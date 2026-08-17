@@ -115,10 +115,10 @@ func (f *Fallback[T]) getCachedResult(key string) (T, bool) {
 	var zero T
 	shard := f.getShard(key)
 	shard.mu.Lock()
-	defer shard.mu.Unlock()
 
 	entry, ok := shard.entries[key]
 	if !ok {
+		shard.mu.Unlock()
 		return zero, false
 	}
 	now := time.Now()
@@ -126,12 +126,15 @@ func (f *Fallback[T]) getCachedResult(key string) (T, bool) {
 		shard.remove(entry)
 		f.cacheSize.Add(-1)
 		f.cacheEvictions.Add(1)
+		shard.mu.Unlock()
 		return zero, false
 	}
 	shard.lru.touch(entry, now)
 	val := entry.value
-	if f.cfg.clone != nil {
-		val = f.cfg.clone(val)
+	clone := f.cfg.clone
+	shard.mu.Unlock()
+	if clone != nil {
+		val = clone(val)
 	}
 	return val, true
 }

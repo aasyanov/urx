@@ -110,7 +110,7 @@ Execute(l, ctx, fn)
             ├── Vegas    : queue = limit·(1 − minRTT/rtt)   rtt = window mean
             │              α = limit·tol [, ×(1 − minRTT/targetLatency)]
             │              queue<α → +1 ; queue>α·2 → ×ratio ; else hold
-            └── Gradient : first window avgLat = rtt (no blend with 0)
+            └── Gradient : first window holds (avgLat unset); then avgLat = rtt
                            later avgLat = s·rtt + (1−s)·avgLat
                            fails>0 → ×ratio once
                            g=(rtt−avg)/avg ; g<−tol → +2 ; g≤tol → +1
@@ -141,7 +141,7 @@ Only the windowed adaptation step and the percentile snapshot take the mutex; th
 | **Gradient** | window mean vs EMA average | g at/below tolerance                           | g above tolerance (proportional)   | drifting floor latency                    |
 
 
-`AIMD` is the TCP congestion-avoidance law, applied per window and **gated on utilization**: idle successes do not inflate the limit. Fractional `WithIncreaseRate` (for example 0.5) keeps a remainder so the limit grows by 1 every two eligible windows. `Vegas` infers queued work as `limit·(1 − minRTT/rtt)` — the denominator is the window mean RTT, not RTT_min — and holds the limit inside a tolerance band scaled by `WithTargetLatency` when the target sits above RTT_min. `Gradient` compares each window mean to an EMA that is initialized to the first window's RTT (not blended with zero) so it adapts when the backend's baseline latency itself moves.
+`AIMD` is the TCP congestion-avoidance law, applied per window and **gated on utilization**: idle successes do not inflate the limit. Fractional `WithIncreaseRate` (for example 0.5) keeps a remainder so the limit grows by 1 every two eligible windows. `Vegas` infers queued work as `limit·(1 − minRTT/rtt)` — the denominator is the window mean RTT, not RTT_min — and holds the limit inside a tolerance band scaled by `WithTargetLatency` when the target sits above RTT_min. `Gradient` compares each window mean to an EMA that is initialized to the first window's RTT (not blended with zero). The first window **holds** the limit so a high opening RTT cannot grow concurrency before an average exists.
 
 ### Keeping the feedback honest
 
@@ -298,7 +298,7 @@ The hook runs **synchronously** on the goroutine that closed the sample window. 
 | `Limiter.InFlight`         | `func (l *Limiter) InFlight() int`                                                                                      | Current in-flight count                         |
 | `Limiter.Stats`            | `func (l *Limiter) Stats() Stats`                                                                                       | Counter + latency-percentile snapshot           |
 | `Limiter.ResetStats`       | `func (l *Limiter) ResetStats()`                                                                                        | Zero counters, reset adaptive state             |
-| `Limiter.Close`            | `func (l *Limiter) Close() error`                                                                                       | Idempotent shutdown; always returns nil (30s drain) |
+| `Limiter.Close`            | `func (l *Limiter) Close() error`                                                                                       | Idempotent shutdown; always returns nil (does not wait) |
 | `Limiter.CloseWithTimeout` | `func (l *Limiter) CloseWithTimeout(d time.Duration) error`                                                             | Shutdown with custom drain; `ErrDrainTimeout` / `ErrClosed` |
 | `Limiter.IsClosed`         | `func (l *Limiter) IsClosed() bool`                                                                                     | Report closed state                             |
 | `Algorithm`                | `type Algorithm uint8`                                                                                                  | `AIMD` / `Vegas` / `Gradient`                   |
@@ -372,10 +372,10 @@ A panicking callback surfaces as a `*panix.PanicError` returned by `Execute` (re
 > **`ResetStats` snaps the limit immediately.** Counters, latency estimators, window credit, and the permit pool are reset to the configured initial limit in one step. When in-flight work exceeds that initial limit the live limit is raised to the in-flight count so permits never go negative.
 
 > [!NOTE]
-> **SkipSample keeps the success/failure totals.** A skipped call is removed from latency feedback and percentile history only — it still counts as a success or failure in `Stats`. Use it for outlier *latency*, not to hide errors.
+> **SkipSample keeps the success/failure totals.** A skipped call is removed from latency feedback, percentile history, and the AIMD window peak in-flight — it still counts as a success or failure in `Stats`. Use it for outlier *latency*, not to hide errors.
 
 > [!NOTE]
-> **`CloseWithTimeout(0)` does not wait.** If in-flight work remains it returns `ErrDrainTimeout` and the limiter stays closed. `Close()` waits up to 30s and always returns nil.
+> **`Close()` does not wait.** It is `CloseWithTimeout(0)`: in-flight work is not joined, drain timeout is swallowed, and the call always returns nil. Use `CloseWithTimeout(DefaultCloseTimeout)` when shutdown must wait up to 30s. `CloseWithTimeout(0)` itself returns `ErrDrainTimeout` if in-flight work remains; the limiter stays closed.
 
 ## Safety and Concurrency
 
@@ -432,7 +432,7 @@ This gives three comparison axes: **laptop vs server** (hardware scaling), **Lin
 
 | Metric         | Value                          |
 | -------------- | ------------------------------ |
-| Test functions | 85                             |
+| Test functions | 88                             |
 | Benchmarks     | 8                              |
 | Fuzz targets   | 2                              |
 | Examples       | 4                              |

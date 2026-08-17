@@ -643,9 +643,11 @@ func TestAdmits_HysteresisKeepsSheddingInBand(t *testing.T) {
 	assert.False(t, s.admits(PriorityLow, 90), "overload 0.5 latches shedding")
 	assert.True(t, s.shedding.Load())
 
-	_ = s.admits(PriorityLow, 70) // load 0.7 in (resume 0.6, threshold 0.8)
+	assert.False(t, s.admits(PriorityLow, 70), "in-band load must keep shedding non-critical")
 	assert.True(t, s.shedding.Load(), "shedding stays latched in the hysteresis band")
-	assert.False(t, s.admits(PriorityLow, 90), "cutoffs still apply while latched")
+	assert.False(t, s.admits(PriorityHigh, 70), "High is also shed in the hysteresis band")
+	assert.True(t, s.admits(PriorityCritical, 70), "Critical is never shed")
+	assert.False(t, s.admits(PriorityLow, 90), "cutoffs still apply above threshold while latched")
 }
 
 func TestAdmits_HysteresisClearsBelowResume(t *testing.T) {

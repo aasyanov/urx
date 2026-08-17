@@ -560,6 +560,20 @@ func TestExecute_SkipToken_RefundsKeyBucket(t *testing.T) {
 	assert.True(t, q.Allow("k"), "token was refunded to the key's bucket")
 }
 
+func TestExecute_SkipToken_DoesNotDriveAllowedNegative(t *testing.T) {
+	q := New(WithBurst(8))
+	defer q.Close()
+
+	_, err := Execute(q, context.Background(), "k",
+		func(_ context.Context, qc QuotaController) (int, error) {
+			q.ResetStats()
+			qc.SkipToken()
+			return 0, nil
+		})
+	require.NoError(t, err)
+	assert.GreaterOrEqual(t, q.Stats().Allowed, int64(0))
+}
+
 func TestTryExecute_AdmitsThenRejects(t *testing.T) {
 	q := New(WithRate(0.0001), WithBurst(1))
 	defer q.Close()
@@ -655,6 +669,64 @@ func TestQuota_RemoveAndExists(t *testing.T) {
 	assert.Equal(t, int64(0), q.KeyCount())
 
 	assert.False(t, q.Remove("k"), "removing an absent key reports false")
+}
+
+func TestQuota_Remove_PinnedRefused(t *testing.T) {
+	q := New(WithBurst(8))
+	defer q.Close()
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		_, err := Execute(q, context.Background(), "k",
+			func(context.Context, QuotaController) (int, error) {
+				close(entered)
+				<-release
+				return 0, nil
+			})
+		done <- err
+	}()
+	<-entered
+
+	assert.False(t, q.Remove("k"), "Remove must refuse a pinned key")
+	assert.True(t, q.Exists("k"))
+	assert.True(t, q.Allow("k"), "Allow must hit the same limiter, not a ghost bucket")
+	assert.Equal(t, int64(1), q.KeyCount())
+
+	close(release)
+	require.NoError(t, <-done)
+	assert.True(t, q.Remove("k"), "unpin allows Remove")
+}
+
+func TestQuota_Reset_SkipsPinned(t *testing.T) {
+	q := New(WithBurst(8))
+	defer q.Close()
+
+	require.True(t, q.Allow("other"))
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		_, err := Execute(q, context.Background(), "k",
+			func(context.Context, QuotaController) (int, error) {
+				close(entered)
+				<-release
+				return 0, nil
+			})
+		done <- err
+	}()
+	<-entered
+
+	q.Reset()
+	assert.True(t, q.Exists("k"), "pinned key survives Reset")
+	assert.False(t, q.Exists("other"))
+	assert.Equal(t, int64(1), q.KeyCount())
+	assert.True(t, q.Allow("k"), "Allow must hit the pinned limiter")
+
+	close(release)
+	require.NoError(t, <-done)
 }
 
 func TestQuota_Reset(t *testing.T) {

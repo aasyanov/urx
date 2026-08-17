@@ -11,7 +11,7 @@ This Unreleased payload is intended to ship as **1.5.2** (sole consumer; breakin
 
 ### Breaking
 
-- **`adaptx` control laws** now match their names: AIMD/Vegas/Gradient adjust **once per `WithSampleWindow`**. AIMD increases only when window `maxInFlight >= limit * WithUtilization` (default **0.9**) and accumulates fractional `WithIncreaseRate`. Vegas queue is `limit * (1 - minRTT/RTT)` (was `/minRTT`). Gradient EMA initializes to the first window sample. **`Close` / `CloseWithTimeout`:** incomplete drain returns **`ErrDrainTimeout`**; `Close()` is nil-idempotent (second call no longer returns `ErrClosed`).
+- **`adaptx` control laws** now match their names: AIMD/Vegas/Gradient adjust **once per `WithSampleWindow`**. AIMD increases only when window `maxInFlight >= limit * WithUtilization` (default **0.9**) and accumulates fractional `WithIncreaseRate`. Vegas queue is `limit * (1 - minRTT/RTT)` (was `/minRTT`). Gradient EMA initializes to the first window sample; the first window **holds** (does not +1). **`Close()`** does not wait for in-flight work (use **`CloseWithTimeout`**); incomplete drain returns **`ErrDrainTimeout`**; `Close()` is nil-idempotent (second call no longer returns `ErrClosed`).
 - **`ratex` / `quotax`:** `WaitN(n > burst)` returns **`ErrExceedsBurst`** immediately instead of hanging until context cancel. `errors.Is(err, ratex.ErrExceedsBurst)` works for both packages.
 - **`circuitx`:** a callback error that is `context.Canceled` is no longer a consecutive failure. Opt in with `WithCountCanceled()`. `DeadlineExceeded` still counts.
 - **`retryx`:** a cancelled last attempt returns **`ErrCancelled`**, not `ErrExhausted`.
@@ -54,9 +54,13 @@ This Unreleased payload is intended to ship as **1.5.2** (sole consumer; breakin
 
 ### Fixed
 
-- **`quotax`:** sweeper can no longer split one key into two token buckets while Wait/Execute is in flight.
-- **`circuitx`:** HalfOpen `inflight.Store(0)` no longer lets a stale probe heal or trip a newer generation.
-- **`bulkx`:** slot release decrements `Active` before returning the semaphore; wait duration is `min(timeout, ctx remaining)`.
+- **`quotax`:** sweeper can no longer split one key into two token buckets while Wait/Execute is in flight. `Remove`/`Reset` skip pinned buckets (no ghost dual-bucket). `SkipToken` never drives `Allowed` below zero.
+- **`circuitx`:** HalfOpen `inflight.Store(0)` no longer lets a stale probe heal or trip a newer generation. Healing `HalfOpen → Closed` and every `Reset` bump generation so a leftover probe cannot fail Closed.
+- **`adaptx`:** `SkipSample` no longer raises the AIMD window peak in-flight. Gradient's first window holds when `avgLat` is unset.
+- **`fallx`:** `WithClone` on cache replay runs outside the shard lock (store already did).
+- **`shedx`:** hysteresis in-band (`resume ≤ load < threshold`) keeps shedding all non-critical traffic; cutoffs apply only at/above the threshold.
+- **`toutx`:** `fn` returning `context.Canceled` after this call's timeout fired (parent still live) remaps to `ErrDeadlineExceeded`, not `ErrCancelled`.
+- **`bulkx`:** slot release decrements `Active` before returning the semaphore; wait duration is `min(timeout, ctx remaining)`. Fast-path `Execute`/`TryExecute` refund a claimed slot when waiters appeared mid-send.
 - **`clix`:** `--help=...` and `--version=...` are recognised as the built-in control flags (previously `ErrUnknownFlag`). `-V` inside a POSIX short group triggers `ErrVersion`. `--no-<bool>=false` now writes true instead of always writing false.
 - **`clix`:** construction panics on reserved `--help`/`-h` (and `--version`/`-V` when `Version` is set), multi-character short aliases, `Version` or `WithHelpLabels` applied to a subcommand, and duplicate `Version`. Nil options are ignored.
 - **`clix`:** a non-bool flag no longer consumes a following flag-like token as its value (`--port --verbose` → `ErrMissingValue`, matching the documented contract). Signed numbers (`-5`, `-1s`) and a bare `-` still bind as values; dash-prefixed strings use the inline form (`--name=--raw`).
